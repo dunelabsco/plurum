@@ -24,7 +24,7 @@ export class ServerAPIError extends Error {
  */
 export async function serverApi<T>(
   endpoint: string,
-  options: RequestInit = {}
+  options: RequestInit & { revalidate?: number } = {}
 ): Promise<T> {
   const supabase = await createClient();
   const {
@@ -38,7 +38,8 @@ export async function serverApi<T>(
     ...options.headers,
   };
 
-  if (session?.access_token) {
+  const isAuthenticated = !!session?.access_token;
+  if (isAuthenticated) {
     (headers as Record<string, string>)["Authorization"] = `Bearer ${session.access_token}`;
   }
 
@@ -46,15 +47,23 @@ export async function serverApi<T>(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
 
+  // Cache public GET requests for 30s, skip cache for authenticated requests
+  const { revalidate, ...restOptions } = options;
+  const fetchOptions: RequestInit & { next?: { revalidate: number } } = {
+    ...restOptions,
+    headers,
+    signal: controller.signal,
+  };
+
+  if (isAuthenticated) {
+    fetchOptions.cache = "no-store";
+  } else {
+    fetchOptions.next = { revalidate: revalidate ?? 30 };
+  }
+
   let res: Response;
   try {
-    res = await fetch(url, {
-      ...options,
-      headers,
-      signal: controller.signal,
-      // Important: don't cache by default for authenticated requests
-      cache: "no-store",
-    });
+    res = await fetch(url, fetchOptions);
   } finally {
     clearTimeout(timeoutId);
   }
