@@ -57,10 +57,21 @@ class EnvironmentConstraints(BaseModel):
     dependencies: Optional[list[str]] = None
 
 
+class Author(BaseModel):
+    """Blueprint author info"""
+
+    id: str
+    name: Optional[str] = None
+    username: Optional[str] = None
+    publisher_domain: Optional[str] = None
+
+
 class QualityMetrics(BaseModel):
     """Quality and usage metrics for a blueprint"""
 
     execution_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
     success_rate: float = 0.0
     upvotes: int = 0
     downvotes: int = 0
@@ -90,15 +101,19 @@ class BlueprintVersion(BaseModel):
 
 
 class BlueprintSummary(BaseModel):
-    """Summary view of a blueprint"""
+    """Summary view of a blueprint (search results)"""
 
     id: str
     slug: str
+    short_id: Optional[str] = None
+    title: Optional[str] = None
+    goal_description: Optional[str] = None
     status: BlueprintStatus
     is_public: bool
     quality_metrics: QualityMetrics
     tags: list[str]
-    current_version: BlueprintVersion
+    current_version: Optional[BlueprintVersion] = None
+    author: Optional[Author] = None
     created_at: datetime
     updated_at: datetime
 
@@ -107,6 +122,7 @@ class BlueprintDetail(BlueprintSummary):
     """Full detail view of a blueprint"""
 
     agent_id: Optional[str] = None
+    created_by_agent_id: Optional[str] = None
 
 
 class BlueprintCreate(BaseModel):

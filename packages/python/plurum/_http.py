@@ -19,7 +19,7 @@ from plurum._exceptions import (
 
 T = TypeVar("T")
 
-DEFAULT_API_URL = "https://api.plurum.dev"
+DEFAULT_API_URL = "https://api.plurum.ai"
 DEFAULT_TIMEOUT = 30.0
 
 

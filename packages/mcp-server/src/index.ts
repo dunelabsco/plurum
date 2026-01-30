@@ -10,7 +10,7 @@
  *
  * Environment variables:
  *   PLURUM_API_KEY  - API key for authenticated operations (optional for read-only)
- *   PLURUM_API_URL  - API URL (default: https://api.plurum.dev)
+ *   PLURUM_API_URL  - API URL (default: https://api.plurum.ai)
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -43,7 +43,7 @@ import {
 // Configuration from environment
 const config = {
   apiKey: process.env.PLURUM_API_KEY,
-  apiUrl: process.env.PLURUM_API_URL || "https://api.plurum.dev",
+  apiUrl: process.env.PLURUM_API_URL || "https://api.plurum.ai",
 };
 
 // Initialize API client

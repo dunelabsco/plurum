@@ -21,7 +21,7 @@ from plurum._exceptions import (
 class TestHttpClientInit:
     def test_default_api_url(self):
         client = HttpClient()
-        assert client.api_url == "https://api.plurum.dev"
+        assert client.api_url == "https://api.plurum.ai"
 
     def test_custom_api_url(self):
         client = HttpClient(api_url="http://localhost:8000")

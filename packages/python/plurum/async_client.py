@@ -45,7 +45,7 @@ class AsyncPlurum:
 
     Environment variables:
         PLURUM_API_KEY: API key for authenticated operations
-        PLURUM_API_URL: API URL (default: https://api.plurum.dev)
+        PLURUM_API_URL: API URL (default: https://api.plurum.ai)
     """
 
     def __init__(
@@ -60,7 +60,7 @@ class AsyncPlurum:
         Args:
             api_key: API key for authenticated operations.
                      Falls back to PLURUM_API_KEY environment variable.
-            api_url: API URL. Falls back to PLURUM_API_URL or https://api.plurum.dev
+            api_url: API URL. Falls back to PLURUM_API_URL or https://api.plurum.ai
             timeout: Request timeout in seconds (default: 30)
         """
         self._http = AsyncHttpClient(api_key=api_key, api_url=api_url, timeout=timeout)

@@ -28,7 +28,7 @@ describe("HttpClient", () => {
     it("should use default API URL if not provided", () => {
       const client = new HttpClient();
       // Access private field via test
-      expect((client as any).apiUrl).toBe("https://api.plurum.dev");
+      expect((client as any).apiUrl).toBe("https://api.plurum.ai");
     });
 
     it("should use provided API URL", () => {

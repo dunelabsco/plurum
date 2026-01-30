@@ -11,7 +11,7 @@ import {
 } from "./errors.js";
 import type { PlurimConfig } from "./types/index.js";
 
-const DEFAULT_API_URL = "https://api.plurum.dev";
+const DEFAULT_API_URL = "https://api.plurum.ai";
 const DEFAULT_TIMEOUT = 30000;
 
 export class HttpClient {

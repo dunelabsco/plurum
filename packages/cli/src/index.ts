@@ -48,7 +48,7 @@ ${chalk.bold("Examples:")}
 
 ${chalk.bold("Environment Variables:")}
   PLURUM_API_KEY    API key for authenticated operations
-  PLURUM_API_URL    API URL (default: https://api.plurum.dev)
+  PLURUM_API_URL    API URL (default: https://api.plurum.ai)
 
 ${chalk.bold("More info:")}
   https://docs.plurum.dev

@@ -80,7 +80,7 @@ export class Plurum {
    * @param config - Client configuration
    * @param config.apiKey - API key for authenticated operations.
    *                        Falls back to PLURUM_API_KEY environment variable.
-   * @param config.apiUrl - API URL. Falls back to PLURUM_API_URL or https://api.plurum.dev
+   * @param config.apiUrl - API URL. Falls back to PLURUM_API_URL or https://api.plurum.ai
    * @param config.timeout - Request timeout in milliseconds (default: 30000)
    */
   constructor(config: PlurimConfig = {}) {

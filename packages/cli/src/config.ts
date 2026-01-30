@@ -47,6 +47,6 @@ export function getApiUrl(): string {
   return (
     process.env.PLURUM_API_URL ||
     loadConfig().apiUrl ||
-    "https://api.plurum.dev"
+    "https://api.plurum.ai"
   );
 }
