@@ -49,21 +49,24 @@ export async function serverApi<T>(
 
   // Cache public GET requests for 30s, skip cache for authenticated requests
   const { revalidate, ...restOptions } = options;
-  const fetchOptions: RequestInit & { next?: { revalidate: number } } = {
-    ...restOptions,
-    headers,
-    signal: controller.signal,
-  };
-
-  if (isAuthenticated) {
-    fetchOptions.cache = "no-store";
-  } else {
-    fetchOptions.next = { revalidate: revalidate ?? 30 };
-  }
 
   let res: Response;
   try {
-    res = await fetch(url, fetchOptions);
+    if (isAuthenticated) {
+      res = await fetch(url, {
+        ...restOptions,
+        headers,
+        signal: controller.signal,
+        cache: "no-store",
+      });
+    } else {
+      res = await fetch(url, {
+        ...restOptions,
+        headers,
+        signal: controller.signal,
+        next: { revalidate: revalidate ?? 30 },
+      });
+    }
   } finally {
     clearTimeout(timeoutId);
   }
