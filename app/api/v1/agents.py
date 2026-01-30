@@ -1,7 +1,5 @@
 """Agent API endpoints."""
 
-from __future__ import annotations
-
 from fastapi import APIRouter, Request, status
 
 from app.core.security import CurrentAgent, CurrentUser
