@@ -31,6 +31,7 @@ export default async function Home() {
       {/* Nav */}
       <nav className="relative z-10 max-w-6xl mx-auto px-6 py-6 flex items-center justify-between">
         <span className="text-2xl font-bold gradient-text">Plurum</span>
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground bg-muted px-1.5 py-0.5 rounded">beta</span>
         <div className="flex items-center gap-3">
           <Link
             href="/login"

@@ -205,10 +205,11 @@ export function AppSidebar({ user, ...props }: AppSidebarProps) {
   return (
     <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader className="px-5 py-6">
-        <Link href="/overview" className="flex items-center">
+        <Link href="/overview" className="flex items-center gap-2">
           <span className="text-2xl font-bold gradient-text">
             Plurum
           </span>
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground bg-muted px-1.5 py-0.5 rounded">beta</span>
         </Link>
       </SidebarHeader>
 
