@@ -38,16 +38,18 @@ function ResetPasswordContent() {
   const supabase = createClient();
 
   useEffect(() => {
-    const code = searchParams.get("code");
-    if (code) {
-      supabase.auth.exchangeCodeForSession(code).then(({ error }) => {
+    const tokenHash = searchParams.get("token_hash");
+    const type = searchParams.get("type");
+
+    if (tokenHash && type === "recovery") {
+      supabase.auth.verifyOtp({ token_hash: tokenHash, type: "recovery" }).then(({ error }) => {
         if (error) {
           setError("Reset link is invalid or expired. Please request a new one.");
         }
         setIsVerifying(false);
       });
     } else {
-      // No code — check if user already has a session (came via auth callback)
+      // Check if user already has a session
       supabase.auth.getUser().then(({ data: { user } }) => {
         if (!user) {
           setError("No reset session found. Please request a new reset link.");
