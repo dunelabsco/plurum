@@ -154,19 +154,68 @@ class BlueprintRepository:
 
         result = query.execute()
 
-        # Enrich with tags, current version title, and author
         blueprints = result.data or []
+        if not blueprints:
+            return blueprints, result.count or 0
+
+        # Batch fetch versions (1 query instead of N)
+        version_ids = [bp["current_version_id"] for bp in blueprints if bp.get("current_version_id")]
+        versions_by_id = {}
+        if version_ids:
+            versions_result = (
+                self.client.table("blueprint_versions")
+                .select("id, title, goal_description")
+                .in_("id", version_ids)
+                .execute()
+            )
+            versions_by_id = {v["id"]: v for v in (versions_result.data or [])}
+
+        # Batch fetch authors (1 query instead of N)
+        agent_ids = list({bp["created_by_agent_id"] for bp in blueprints if bp.get("created_by_agent_id")})
+        agents_by_id = {}
+        if agent_ids:
+            agents_result = (
+                self.client.table("agents")
+                .select("id, name, username, publisher_domain")
+                .in_("id", agent_ids)
+                .execute()
+            )
+            agents_by_id = {a["id"]: a for a in (agents_result.data or [])}
+
+        # Batch fetch tags (2 queries instead of 2N)
+        bp_ids = [bp["id"] for bp in blueprints]
+        tags_by_bp = {}
+        if bp_ids:
+            bt_result = (
+                self.client.table("blueprint_tags")
+                .select("blueprint_id, tag_id")
+                .in_("blueprint_id", bp_ids)
+                .execute()
+            )
+            if bt_result.data:
+                all_tag_ids = list({r["tag_id"] for r in bt_result.data})
+                tags_result = (
+                    self.client.table("tags")
+                    .select("id, name")
+                    .in_("id", all_tag_ids)
+                    .execute()
+                )
+                tag_names = {t["id"]: t["name"] for t in (tags_result.data or [])}
+                for r in bt_result.data:
+                    bp_id = r["blueprint_id"]
+                    tag_name = tag_names.get(r["tag_id"])
+                    if tag_name:
+                        tags_by_bp.setdefault(bp_id, []).append(tag_name)
+
+        # Enrich blueprints with batched data
         for bp in blueprints:
-            bp["tags"] = self.get_blueprint_tags(bp["id"])
-            if bp.get("current_version_id"):
-                version = self.get_version_by_id(bp["current_version_id"])
-                if version:
-                    bp["title"] = version.get("title", "")
-                    bp["goal_description"] = version.get("goal_description", "")
-            # Fetch author info
+            bp["tags"] = tags_by_bp.get(bp["id"], [])
+            version = versions_by_id.get(bp.get("current_version_id"))
+            if version:
+                bp["title"] = version.get("title", "")
+                bp["goal_description"] = version.get("goal_description", "")
             if bp.get("created_by_agent_id"):
-                author = self.get_agent_by_id(bp["created_by_agent_id"])
-                bp["author"] = author
+                bp["author"] = agents_by_id.get(bp["created_by_agent_id"])
 
         # Filter by tags if specified (post-query filter)
         if tags:
