@@ -29,7 +29,7 @@ router = APIRouter(prefix="/agents", tags=["Agents"])
     """,
 )
 @limiter.limit("5/hour")
-async def register_agent(data: AgentCreate, request: Request):
+async def register_agent(request: Request, data: AgentCreate):
     """
     Register a new agent and get an API key.
 
