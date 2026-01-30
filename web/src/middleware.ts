@@ -49,10 +49,9 @@ export async function middleware(request: NextRequest) {
   if (pathname === "/" && request.nextUrl.searchParams.has("code")) {
     const url = request.nextUrl.clone();
     const code = url.searchParams.get("code")!;
-    url.pathname = "/auth/callback";
-    url.searchParams.delete("code");
+    url.pathname = "/reset-password";
+    url.search = "";
     url.searchParams.set("code", code);
-    url.searchParams.set("next", "/reset-password");
     return NextResponse.redirect(url);
   }
 
