@@ -62,7 +62,11 @@ export class HttpClient {
     }
   }
 
-  async get<T>(path: string, params?: Record<string, unknown>): Promise<T> {
+  async get<T>(
+    path: string,
+    params?: Record<string, unknown>,
+    requiresAuth: boolean = false
+  ): Promise<T> {
     const url = new URL(`${this.apiUrl}${path}`);
     if (params) {
       Object.entries(params).forEach(([key, value]) => {
@@ -82,7 +86,7 @@ export class HttpClient {
     try {
       const response = await fetch(url.toString(), {
         method: "GET",
-        headers: this.headers(),
+        headers: this.headers(requiresAuth),
         signal: controller.signal,
       });
 

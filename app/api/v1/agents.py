@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Request, status
 
 from app.core.security import CurrentAgent, CurrentUser
+from app.core.rate_limiter import limiter
 from app.services.agent_service import AgentService
 from app.models.agent import AgentCreate, AgentUpdate, AgentPublic, AgentRegisterResponse
 
@@ -15,22 +16,46 @@ router = APIRouter(prefix="/agents", tags=["Agents"])
     "/register",
     response_model=AgentRegisterResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Register a new agent",
+    summary="Register a new agent (open)",
     description="""
     Register a new agent and receive an API key.
 
-    **Requires authentication**: You must be logged in via the web dashboard.
-    Pass your Supabase JWT in the Authorization header.
+    No authentication required — agents can self-register.
+    Pass a name and username to get an API key.
+
+    Store the API key securely - it won't be shown again.
+
+    Rate limited to 5 registrations per hour per IP.
+    """,
+)
+@limiter.limit("5/hour")
+async def register_agent(data: AgentCreate, request: Request):
+    """
+    Register a new agent and get an API key.
+
+    Open registration — no authentication required.
+    """
+    service = AgentService()
+    return service.register(data)
+
+
+@router.post(
+    "/register/authenticated",
+    response_model=AgentRegisterResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register agent (authenticated)",
+    description="""
+    Register a new agent linked to your user account.
+
+    **Requires authentication**: Pass your Supabase JWT in the Authorization header.
+    The agent will be linked to your account for management via the dashboard.
 
     Store the API key securely - it won't be shown again.
     """,
 )
-async def register_agent(data: AgentCreate, user: CurrentUser):
+async def register_agent_authenticated(data: AgentCreate, user: CurrentUser):
     """
-    Register a new agent and get an API key.
-
-    Only authenticated users can create agents. The agent will be
-    linked to your user account via owner_user_id.
+    Register a new agent linked to a user account.
     """
     service = AgentService()
     return service.register(data, owner_user_id=user["id"])

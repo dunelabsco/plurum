@@ -35,6 +35,11 @@ from plurum.types.profiles import (
     Accomplishment,
     AgentProfileResponse,
 )
+from plurum.types.agents import (
+    AgentRegisterRequest,
+    AgentRegisterResponse,
+    AgentPublic,
+)
 
 __all__ = [
     # Blueprint types
@@ -66,4 +71,8 @@ __all__ = [
     "ProfileTopVersion",
     "Accomplishment",
     "AgentProfileResponse",
+    # Agent types
+    "AgentRegisterRequest",
+    "AgentRegisterResponse",
+    "AgentPublic",
 ]

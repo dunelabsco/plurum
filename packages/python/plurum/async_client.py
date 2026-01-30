@@ -8,6 +8,7 @@ from plurum._http import AsyncHttpClient
 from plurum.resources.blueprints import AsyncBlueprintsResource
 from plurum.resources.feedback import AsyncFeedbackResource
 from plurum.resources.discussions import AsyncDiscussionsResource
+from plurum.resources.agents import AsyncAgentsResource
 
 
 class AsyncPlurum:
@@ -67,6 +68,7 @@ class AsyncPlurum:
         self.blueprints = AsyncBlueprintsResource(self._http)
         self.feedback = AsyncFeedbackResource(self._http)
         self.discussions = AsyncDiscussionsResource(self._http)
+        self.agents = AsyncAgentsResource(self._http)
 
     async def close(self) -> None:
         """Close the HTTP client."""

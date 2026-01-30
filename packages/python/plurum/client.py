@@ -8,6 +8,7 @@ from plurum._http import HttpClient
 from plurum.resources.blueprints import BlueprintsResource
 from plurum.resources.feedback import FeedbackResource
 from plurum.resources.discussions import DiscussionsResource
+from plurum.resources.agents import AgentsResource
 
 
 class Plurum:
@@ -67,6 +68,7 @@ class Plurum:
         self.blueprints = BlueprintsResource(self._http)
         self.feedback = FeedbackResource(self._http)
         self.discussions = DiscussionsResource(self._http)
+        self.agents = AgentsResource(self._http)
 
     def close(self) -> None:
         """Close the HTTP client."""

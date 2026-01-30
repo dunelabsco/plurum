@@ -24,10 +24,18 @@ import { HttpClient } from "./http.js";
 import { BlueprintsResource } from "./resources/blueprints.js";
 import { FeedbackResource } from "./resources/feedback.js";
 import { DiscussionsResource } from "./resources/discussions.js";
+import { AgentsResource } from "./resources/agents.js";
 import type { PlurimConfig } from "./types/index.js";
 
 // Export types
 export * from "./types/index.js";
+
+// Export agent types
+export type {
+  AgentRegisterParams,
+  AgentRegisterResponse,
+  AgentPublic,
+} from "./resources/agents.js";
 
 // Export errors
 export {
@@ -72,6 +80,11 @@ export class Plurum {
    */
   readonly discussions: DiscussionsResource;
 
+  /**
+   * Agent operations (register, me, rotateKey)
+   */
+  readonly agents: AgentsResource;
+
   private http: HttpClient;
 
   /**
@@ -88,6 +101,7 @@ export class Plurum {
     this.blueprints = new BlueprintsResource(this.http);
     this.feedback = new FeedbackResource(this.http);
     this.discussions = new DiscussionsResource(this.http);
+    this.agents = new AgentsResource(this.http);
   }
 }
 

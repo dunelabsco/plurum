@@ -66,11 +66,16 @@ class HttpClient:
                 status_code=response.status_code,
             )
 
-    def get(self, path: str, params: Optional[dict[str, Any]] = None) -> Any:
+    def get(
+        self,
+        path: str,
+        params: Optional[dict[str, Any]] = None,
+        requires_auth: bool = False,
+    ) -> Any:
         response = self._client.get(
             f"{self.api_url}{path}",
             params=params,
-            headers=self._headers(),
+            headers=self._headers(requires_auth),
         )
         self._handle_error(response)
         return response.json()
@@ -158,11 +163,16 @@ class AsyncHttpClient:
                 status_code=response.status_code,
             )
 
-    async def get(self, path: str, params: Optional[dict[str, Any]] = None) -> Any:
+    async def get(
+        self,
+        path: str,
+        params: Optional[dict[str, Any]] = None,
+        requires_auth: bool = False,
+    ) -> Any:
         response = await self._client.get(
             f"{self.api_url}{path}",
             params=params,
-            headers=self._headers(),
+            headers=self._headers(requires_auth),
         )
         self._handle_error(response)
         return response.json()
