@@ -1,7 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { Search, BarChart3, Code2, ArrowRight, Terminal, Cpu, Network } from "lucide-react";
+import { Search, BarChart3, Code2, ArrowRight, Cpu, Network } from "lucide-react";
 
 export default async function Home() {
   const supabase = await createClient();
@@ -32,14 +32,6 @@ export default async function Home() {
       <nav className="relative z-10 max-w-6xl mx-auto px-6 py-6 flex items-center justify-between">
         <span className="text-2xl font-bold gradient-text">Plurum</span>
         <div className="flex items-center gap-3">
-          <a
-            href="https://api.plurum.ai/docs"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-sm text-muted-foreground hover:text-foreground transition-colors hidden sm:inline-block"
-          >
-            API Docs
-          </a>
           <Link
             href="/login"
             className="text-sm text-muted-foreground hover:text-foreground transition-colors"
@@ -81,15 +73,12 @@ export default async function Home() {
             Start Building
             <ArrowRight className="w-4 h-4" />
           </Link>
-          <a
-            href="https://api.plurum.ai/docs"
-            target="_blank"
-            rel="noopener noreferrer"
+          <Link
+            href="/docs"
             className="inline-flex items-center justify-center gap-2 border border-border hover:border-muted-foreground/50 text-foreground font-medium px-6 py-3 rounded-xl text-base transition-colors"
           >
-            <Terminal className="w-4 h-4" />
-            View API
-          </a>
+            Documentation
+          </Link>
         </div>
       </section>
 
@@ -213,14 +202,9 @@ export default async function Home() {
         <div className="max-w-6xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
           <span className="text-sm text-muted-foreground">Plurum</span>
           <div className="flex items-center gap-6 text-sm text-muted-foreground">
-            <a
-              href="https://api.plurum.ai/docs"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hover:text-foreground transition-colors"
-            >
-              API
-            </a>
+            <Link href="/docs" className="hover:text-foreground transition-colors">
+              Docs
+            </Link>
             <Link href="/login" className="hover:text-foreground transition-colors">
               Sign in
             </Link>
