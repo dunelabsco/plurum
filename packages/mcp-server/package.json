@@ -1,0 +1,46 @@
+{
+  "name": "@plurum/mcp-server",
+  "version": "0.1.0",
+  "description": "MCP server for Plurum knowledge graph - enables AI agents to search, create, and manage blueprints",
+  "type": "module",
+  "bin": {
+    "plurum-mcp": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "plurum",
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "blueprints",
+    "knowledge-graph"
+  ],
+  "author": "Plurum",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
