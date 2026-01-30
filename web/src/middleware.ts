@@ -45,6 +45,17 @@ export async function middleware(request: NextRequest) {
 
   const pathname = request.nextUrl.pathname;
 
+  // Handle auth code on root — Supabase redirects password reset here
+  if (pathname === "/" && request.nextUrl.searchParams.has("code")) {
+    const url = request.nextUrl.clone();
+    const code = url.searchParams.get("code")!;
+    url.pathname = "/auth/callback";
+    url.searchParams.delete("code");
+    url.searchParams.set("code", code);
+    url.searchParams.set("next", "/reset-password");
+    return NextResponse.redirect(url);
+  }
+
   // Check if route is protected
   const isProtectedRoute = protectedRoutes.some(
     (route) => pathname === route || pathname.startsWith(`${route}/`)
@@ -82,6 +93,7 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
+    "/",
     "/overview/:path*",
     "/blueprints/:path*",
     "/search/:path*",
