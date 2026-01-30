@@ -203,7 +203,7 @@ export function AppSidebar({ user, ...props }: AppSidebarProps) {
     : user.email?.slice(0, 2).toUpperCase() || "U";
 
   return (
-    <Sidebar collapsible="none" {...props}>
+    <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader className="px-5 py-6">
         <Link href="/overview" className="flex items-center">
           <span className="text-2xl font-bold gradient-text">

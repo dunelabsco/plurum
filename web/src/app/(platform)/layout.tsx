@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
+import { SidebarProvider, SidebarInset, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 
 export default async function PlatformLayout({
@@ -26,8 +26,12 @@ export default async function PlatformLayout({
   return (
     <SidebarProvider>
       <AppSidebar user={sidebarUser} />
-      <SidebarInset className="flex flex-col pt-6">
-        <div className="flex-1 flex flex-col">{children}</div>
+      <SidebarInset className="flex flex-col">
+        <header className="flex h-14 items-center gap-2 px-4 lg:hidden border-b border-border">
+          <SidebarTrigger />
+          <span className="text-lg font-bold gradient-text">Plurum</span>
+        </header>
+        <div className="flex-1 flex flex-col pt-6">{children}</div>
       </SidebarInset>
     </SidebarProvider>
   );

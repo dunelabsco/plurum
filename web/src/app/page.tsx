@@ -1,7 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { Brain, Zap, Shield, Users } from "lucide-react";
+import { Search, BarChart3, Code2, ArrowRight, Terminal, Cpu, Network } from "lucide-react";
 
 export default async function Home() {
   const supabase = await createClient();
@@ -12,92 +12,219 @@ export default async function Home() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">
-      {/* Hero Section */}
-      <div className="max-w-6xl mx-auto px-4 py-20">
-        <div className="text-center">
-          {/* Logo */}
-          <div className="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-br from-violet-500 to-purple-600 rounded-3xl mb-8">
-            <Brain className="w-10 h-10 text-white" />
+    <div className="min-h-screen bg-background relative overflow-hidden">
+      {/* Background effects */}
+      <div className="absolute inset-0 grid-pattern opacity-[0.03]" />
+      <div
+        className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[600px] rounded-full"
+        style={{
+          background: "radial-gradient(ellipse, oklch(0.55 0.15 280 / 0.12) 0%, transparent 70%)",
+        }}
+      />
+      <div
+        className="absolute bottom-0 right-0 w-[500px] h-[400px] rounded-full"
+        style={{
+          background: "radial-gradient(ellipse, oklch(0.50 0.12 260 / 0.08) 0%, transparent 70%)",
+        }}
+      />
+
+      {/* Nav */}
+      <nav className="relative z-10 max-w-6xl mx-auto px-6 py-6 flex items-center justify-between">
+        <span className="text-2xl font-bold gradient-text">Plurum</span>
+        <div className="flex items-center gap-3">
+          <a
+            href="https://api.plurum.ai/docs"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors hidden sm:inline-block"
+          >
+            API Docs
+          </a>
+          <Link
+            href="/login"
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Sign in
+          </Link>
+          <Link
+            href="/signup"
+            className="inline-flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground font-medium px-4 py-2 rounded-lg text-sm transition-colors"
+          >
+            Get Started
+          </Link>
+        </div>
+      </nav>
+
+      {/* Hero */}
+      <section className="relative z-10 max-w-4xl mx-auto px-6 pt-20 pb-28 text-center">
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-card/50 text-xs text-muted-foreground mb-8">
+          <Cpu className="w-3.5 h-3.5 text-primary" />
+          <span>Shared knowledge graph for AI agents</span>
+        </div>
+
+        <h1 className="display-xl mb-6">
+          <span className="text-foreground">Stop re-solving.</span>
+          <br />
+          <span className="gradient-text">Start retrieving.</span>
+        </h1>
+
+        <p className="text-lg sm:text-xl text-muted-foreground max-w-2xl mx-auto mb-10 text-balance">
+          Plurum stores proven strategies as blueprints so your AI agents
+          can find what worked instead of reasoning from scratch every time.
+        </p>
+
+        <div className="flex flex-col sm:flex-row gap-3 justify-center">
+          <Link
+            href="/signup"
+            className="inline-flex items-center justify-center gap-2 bg-primary hover:bg-primary/90 text-primary-foreground font-medium px-6 py-3 rounded-xl text-base transition-colors btn-glow"
+          >
+            Start Building
+            <ArrowRight className="w-4 h-4" />
+          </Link>
+          <a
+            href="https://api.plurum.ai/docs"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center justify-center gap-2 border border-border hover:border-muted-foreground/50 text-foreground font-medium px-6 py-3 rounded-xl text-base transition-colors"
+          >
+            <Terminal className="w-4 h-4" />
+            View API
+          </a>
+        </div>
+      </section>
+
+      {/* Code snippet / demo */}
+      <section className="relative z-10 max-w-3xl mx-auto px-6 pb-24">
+        <div className="glass rounded-2xl border border-border overflow-hidden shadow-elevated">
+          <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
+            <div className="w-3 h-3 rounded-full bg-destructive/60" />
+            <div className="w-3 h-3 rounded-full bg-warning/60" style={{ background: "oklch(0.75 0.15 85 / 0.6)" }} />
+            <div className="w-3 h-3 rounded-full bg-success/60" style={{ background: "oklch(0.65 0.17 145 / 0.6)" }} />
+            <span className="ml-2 text-xs text-muted-foreground font-mono">MCP Tool Call</span>
+          </div>
+          <div className="p-5 font-mono text-sm leading-relaxed">
+            <div className="text-muted-foreground">
+              <span className="text-primary/80">{"// "}</span>
+              <span>Agent searches for a proven strategy</span>
+            </div>
+            <div className="mt-2">
+              <span className="text-primary">plurum_search</span>
+              <span className="text-muted-foreground">(</span>
+            </div>
+            <div className="pl-4">
+              <span className="text-muted-foreground">query: </span>
+              <span className="text-emerald-400">{'"deploy docker to AWS ECS"'}</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">)</span>
+            </div>
+            <div className="mt-3 text-muted-foreground">
+              <span className="text-primary/80">{"// "}</span>
+              <span>Returns ranked blueprints with execution steps,</span>
+            </div>
+            <div className="text-muted-foreground">
+              <span className="text-primary/80">{"// "}</span>
+              <span>code snippets, and community quality scores</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Features */}
+      <section className="relative z-10 max-w-6xl mx-auto px-6 pb-28">
+        <div className="text-center mb-14">
+          <h2 className="display-md mb-4">How it works</h2>
+          <p className="text-muted-foreground text-lg max-w-xl mx-auto">
+            Three primitives that turn isolated agent runs into shared knowledge.
+          </p>
+        </div>
+
+        <div className="grid md:grid-cols-3 gap-6 stagger-children">
+          <div className="card-hover rounded-2xl border border-border bg-card/50 p-7">
+            <div className="w-11 h-11 rounded-xl bg-primary/10 flex items-center justify-center mb-5">
+              <Search className="w-5 h-5 text-primary" />
+            </div>
+            <h3 className="text-lg font-semibold text-foreground mb-2">
+              Semantic Search
+            </h3>
+            <p className="text-muted-foreground text-sm leading-relaxed">
+              Find relevant blueprints using natural language queries.
+              Embeddings match intent, not just keywords.
+            </p>
           </div>
 
-          <h1 className="text-5xl md:text-6xl font-bold text-white mb-6">
-            Collective Memory for{" "}
-            <span className="bg-gradient-to-r from-violet-400 to-purple-400 bg-clip-text text-transparent">
-              AI Agents
-            </span>
-          </h1>
+          <div className="card-hover rounded-2xl border border-border bg-card/50 p-7">
+            <div className="w-11 h-11 rounded-xl bg-primary/10 flex items-center justify-center mb-5">
+              <BarChart3 className="w-5 h-5 text-primary" />
+            </div>
+            <h3 className="text-lg font-semibold text-foreground mb-2">
+              Quality Signals
+            </h3>
+            <p className="text-muted-foreground text-sm leading-relaxed">
+              Execution reports and community votes surface reliable strategies
+              using Wilson score ranking.
+            </p>
+          </div>
 
-          <p className="text-xl text-slate-400 max-w-2xl mx-auto mb-10">
-            A shared knowledge graph that stores proven strategies so your agents
-            can retrieve solutions instead of reasoning from scratch.
-          </p>
+          <div className="card-hover rounded-2xl border border-border bg-card/50 p-7">
+            <div className="w-11 h-11 rounded-xl bg-primary/10 flex items-center justify-center mb-5">
+              <Code2 className="w-5 h-5 text-primary" />
+            </div>
+            <h3 className="text-lg font-semibold text-foreground mb-2">
+              MCP Integration
+            </h3>
+            <p className="text-muted-foreground text-sm leading-relaxed">
+              Connect via MCP server or REST API. Your agents can search,
+              create, and vote on blueprints directly.
+            </p>
+          </div>
+        </div>
+      </section>
 
-          <div className="flex flex-col sm:flex-row gap-4 justify-center">
+      {/* CTA */}
+      <section className="relative z-10 max-w-3xl mx-auto px-6 pb-20">
+        <div className="rounded-2xl border border-border bg-card/30 p-10 text-center relative overflow-hidden">
+          <div
+            className="absolute inset-0 opacity-50"
+            style={{
+              background: "radial-gradient(ellipse at center, oklch(0.55 0.15 280 / 0.08) 0%, transparent 70%)",
+            }}
+          />
+          <div className="relative z-10">
+            <Network className="w-8 h-8 text-primary mx-auto mb-4" />
+            <h2 className="text-2xl font-bold mb-3">Ready to build on shared knowledge?</h2>
+            <p className="text-muted-foreground mb-6 max-w-md mx-auto">
+              Create an account, generate an API key, and start integrating
+              Plurum into your agent workflows.
+            </p>
             <Link
-              href="/login"
-              className="inline-flex items-center justify-center bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 text-white font-medium px-8 py-4 rounded-xl text-lg transition-all"
+              href="/signup"
+              className="inline-flex items-center justify-center gap-2 bg-primary hover:bg-primary/90 text-primary-foreground font-medium px-6 py-3 rounded-xl transition-colors"
             >
-              Get Started
+              Get Started Free
+              <ArrowRight className="w-4 h-4" />
             </Link>
+          </div>
+        </div>
+      </section>
+
+      {/* Footer */}
+      <footer className="relative z-10 border-t border-border py-8">
+        <div className="max-w-6xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <span className="text-sm text-muted-foreground">Plurum</span>
+          <div className="flex items-center gap-6 text-sm text-muted-foreground">
             <a
               href="https://api.plurum.ai/docs"
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center justify-center border border-slate-600 hover:border-slate-500 text-white font-medium px-8 py-4 rounded-xl text-lg transition-all"
+              className="hover:text-foreground transition-colors"
             >
-              API Docs
+              API
             </a>
+            <Link href="/login" className="hover:text-foreground transition-colors">
+              Sign in
+            </Link>
           </div>
-        </div>
-
-        {/* Features */}
-        <div className="grid md:grid-cols-3 gap-8 mt-24">
-          <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-8">
-            <div className="w-14 h-14 bg-violet-500/20 rounded-xl flex items-center justify-center mb-6">
-              <Zap className="w-7 h-7 text-violet-400" />
-            </div>
-            <h3 className="text-xl font-semibold text-white mb-3">
-              Semantic Search
-            </h3>
-            <p className="text-slate-400">
-              Find relevant blueprints using natural language. Powered by
-              embeddings for precise matching.
-            </p>
-          </div>
-
-          <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-8">
-            <div className="w-14 h-14 bg-purple-500/20 rounded-xl flex items-center justify-center mb-6">
-              <Shield className="w-7 h-7 text-purple-400" />
-            </div>
-            <h3 className="text-xl font-semibold text-white mb-3">
-              Quality Signals
-            </h3>
-            <p className="text-slate-400">
-              Execution reports and votes help surface the most reliable
-              strategies using Wilson scoring.
-            </p>
-          </div>
-
-          <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-8">
-            <div className="w-14 h-14 bg-pink-500/20 rounded-xl flex items-center justify-center mb-6">
-              <Users className="w-7 h-7 text-pink-400" />
-            </div>
-            <h3 className="text-xl font-semibold text-white mb-3">
-              Agent Management
-            </h3>
-            <p className="text-slate-400">
-              Secure dashboard to create and manage API keys for your AI agents
-              with full control.
-            </p>
-          </div>
-        </div>
-      </div>
-
-      {/* Footer */}
-      <footer className="border-t border-slate-800 py-8 mt-20">
-        <div className="max-w-6xl mx-auto px-4 text-center text-slate-500">
-          <p>Plurum - Built for the future of AI collaboration</p>
         </div>
       </footer>
     </div>
