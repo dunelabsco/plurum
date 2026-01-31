@@ -97,6 +97,73 @@ def get_blueprint(
     return service.get_by_identifier(identifier)
 
 
+# ---- Routes with /{identifier}/suffix MUST come before /{short_id}/{slug} ----
+
+@router.get(
+    "/{identifier}/versions",
+    response_model=list[BlueprintVersion],
+    summary="Get version history",
+    description="Get the version history of a blueprint.",
+)
+def get_blueprint_versions(
+    identifier: Annotated[str, Path(description="Blueprint short_id or slug")],
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    """Get version history for a blueprint."""
+    service = BlueprintService()
+    return service.get_versions(identifier, limit=limit, offset=offset)
+
+
+@router.patch(
+    "/{identifier}/status",
+    response_model=BlueprintDetail,
+    summary="Update blueprint status",
+    description="Update a blueprint's status (publish, deprecate, archive). Only the owner can update.",
+)
+def update_blueprint_status(
+    identifier: Annotated[str, Path(description="Blueprint short_id or slug")],
+    data: BlueprintStatusUpdate,
+    agent: CurrentAgent,
+):
+    """Update a blueprint's status."""
+    service = BlueprintService()
+    return service.update_status(identifier, data, agent["id"])
+
+
+@router.put(
+    "/{identifier}",
+    response_model=BlueprintDetail,
+    summary="Update a blueprint",
+    description="Update a blueprint, creating a new version. Only the owner can update.",
+)
+def update_blueprint(
+    identifier: Annotated[str, Path(description="Blueprint short_id or slug")],
+    data: BlueprintUpdate,
+    agent: CurrentAgent,
+):
+    """Update a blueprint (creates new version)."""
+    service = BlueprintService()
+    return service.update(identifier, data, agent["id"])
+
+
+@router.delete(
+    "/{identifier}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a blueprint",
+    description="Delete a blueprint and all its versions. Only the owner can delete.",
+)
+def delete_blueprint(
+    identifier: Annotated[str, Path(description="Blueprint short_id or slug")],
+    agent: CurrentAgent,
+):
+    """Delete a blueprint."""
+    service = BlueprintService()
+    service.delete(identifier, agent["id"])
+
+
+# ---- SEO route MUST be last (catches /{anything}/{anything}) ----
+
 @router.get(
     "/{short_id}/{slug}",
     response_model=BlueprintDetail,
@@ -118,66 +185,3 @@ def get_blueprint_seo(
     service = BlueprintService()
     # Use short_id for lookup, slug is for SEO only
     return service.get_by_identifier(short_id)
-
-
-@router.get(
-    "/{identifier}/versions",
-    response_model=list[BlueprintVersion],
-    summary="Get version history",
-    description="Get the version history of a blueprint.",
-)
-def get_blueprint_versions(
-    identifier: Annotated[str, Path(description="Blueprint short_id or slug")],
-    limit: Annotated[int, Query(ge=1, le=50)] = 20,
-    offset: Annotated[int, Query(ge=0)] = 0,
-):
-    """Get version history for a blueprint."""
-    service = BlueprintService()
-    return service.get_versions(identifier, limit=limit, offset=offset)
-
-
-@router.put(
-    "/{identifier}",
-    response_model=BlueprintDetail,
-    summary="Update a blueprint",
-    description="Update a blueprint, creating a new version. Only the owner can update.",
-)
-def update_blueprint(
-    identifier: Annotated[str, Path(description="Blueprint short_id or slug")],
-    data: BlueprintUpdate,
-    agent: CurrentAgent,
-):
-    """Update a blueprint (creates new version)."""
-    service = BlueprintService()
-    return service.update(identifier, data, agent["id"])
-
-
-@router.patch(
-    "/{identifier}/status",
-    response_model=BlueprintDetail,
-    summary="Update blueprint status",
-    description="Update a blueprint's status (publish, deprecate, archive). Only the owner can update.",
-)
-def update_blueprint_status(
-    identifier: Annotated[str, Path(description="Blueprint short_id or slug")],
-    data: BlueprintStatusUpdate,
-    agent: CurrentAgent,
-):
-    """Update a blueprint's status."""
-    service = BlueprintService()
-    return service.update_status(identifier, data, agent["id"])
-
-
-@router.delete(
-    "/{identifier}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete a blueprint",
-    description="Delete a blueprint and all its versions. Only the owner can delete.",
-)
-def delete_blueprint(
-    identifier: Annotated[str, Path(description="Blueprint short_id or slug")],
-    agent: CurrentAgent,
-):
-    """Delete a blueprint."""
-    service = BlueprintService()
-    service.delete(identifier, agent["id"])
