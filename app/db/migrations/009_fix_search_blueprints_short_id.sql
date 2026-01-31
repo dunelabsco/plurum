@@ -65,7 +65,7 @@ BEGIN
         1 - (bv.embedding <=> query_embedding) AS similarity,
         COALESCE(
             (
-                SELECT array_agg(t.name)
+                SELECT array_agg(t.name)::text[]
                 FROM blueprint_tags bt
                 JOIN tags t ON t.id = bt.tag_id
                 WHERE bt.blueprint_id = b.id
