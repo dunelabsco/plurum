@@ -45,9 +45,13 @@ def find_similar_blueprints(
     Uses the blueprint's embedding to find semantically similar blueprints.
     Useful for discovering related strategies.
     """
+    import traceback
     service = SearchService()
-    return service.find_similar(
-        identifier=slug,
-        limit=limit,
-        exclude_same_author=exclude_same_author,
-    )
+    try:
+        return service.find_similar(
+            identifier=slug,
+            limit=limit,
+            exclude_same_author=exclude_same_author,
+        )
+    except Exception as e:
+        return {"debug_error": str(e), "traceback": traceback.format_exc()}
