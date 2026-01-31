@@ -30,7 +30,6 @@ def search_blueprints(request: SearchRequest):
 
 @router.get(
     "/similar/{slug}",
-    response_model=list[SearchResult],
     summary="Find similar blueprints",
     description="Find blueprints similar to the given one.",
 )
