@@ -529,9 +529,15 @@ class BlueprintRepository:
         if not version or not version.get("embedding"):
             return []
 
+        # Ensure embedding is a list of floats (Supabase may return it as a string)
+        embedding = version["embedding"]
+        if isinstance(embedding, str):
+            import json
+            embedding = json.loads(embedding)
+
         # Search with the embedding
         params = {
-            "query_embedding": version["embedding"],
+            "query_embedding": embedding,
             "match_threshold": 0.3,
             "match_count": limit + 1,  # +1 to exclude self
             "exclude_blueprint_id": str(blueprint_id),
