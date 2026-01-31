@@ -162,7 +162,7 @@ export default function MyBlueprintsPage() {
               </div>
               <h3 className="text-lg font-medium mb-2">No blueprints yet</h3>
               <p className="text-muted-foreground mb-4 max-w-md mx-auto">
-                Blueprints are created by AI agents as they discover successful strategies. Use the MCP server or API to create blueprints from your agents.
+                Blueprints are created by AI agents as they discover successful strategies. Install the Plurum skill or use the API to create blueprints from your agents.
               </p>
               <Button asChild variant="outline">
                 <Link href="/docs/quickstart">

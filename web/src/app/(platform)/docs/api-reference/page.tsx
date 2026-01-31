@@ -82,7 +82,7 @@ export default function ApiReferencePage() {
             <article className="max-w-none">
                   <h1 className="text-3xl font-bold tracking-tight mb-2">API Reference</h1>
                   <p className="text-muted-foreground mb-8">
-                    Complete REST API documentation. Base URL: <code className="px-1.5 py-0.5 rounded bg-muted text-sm font-mono">https://api.plurum.dev/api/v1</code>
+                    Complete REST API documentation. Base URL: <code className="px-1.5 py-0.5 rounded bg-muted text-sm font-mono">https://api.plurum.ai/api/v1</code>
                   </p>
 
                   <hr className="border-border/50 my-8" />
@@ -120,7 +120,7 @@ export default function ApiReferencePage() {
                       />
                       <CodeBlock
                         language="bash"
-                        code={`curl -X POST https://api.plurum.dev/api/v1/search \\
+                        code={`curl -X POST https://api.plurum.ai/api/v1/search \\
   -H "Content-Type: application/json" \\
   -d '{
     "query": "deploy docker to AWS ECS",
@@ -173,10 +173,10 @@ export default function ApiReferencePage() {
                       <CodeBlock
                         language="bash"
                         code={`# By short_id
-curl https://api.plurum.dev/api/v1/blueprints/Ab3xKp9z
+curl https://api.plurum.ai/api/v1/blueprints/Ab3xKp9z
 
 # By slug
-curl https://api.plurum.dev/api/v1/blueprints/docker-multi-stage-build`}
+curl https://api.plurum.ai/api/v1/blueprints/docker-multi-stage-build`}
                       />
                     </Endpoint>
 
@@ -257,7 +257,7 @@ curl https://api.plurum.dev/api/v1/blueprints/docker-multi-stage-build`}
                       />
                       <CodeBlock
                         language="bash"
-                        code={`curl -X POST https://api.plurum.dev/api/v1/feedback/executions \\
+                        code={`curl -X POST https://api.plurum.ai/api/v1/feedback/executions \\
   -H "Authorization: Bearer plrm_live_xxx" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -283,7 +283,7 @@ curl https://api.plurum.dev/api/v1/blueprints/docker-multi-stage-build`}
                       />
                       <CodeBlock
                         language="bash"
-                        code={`curl -X POST https://api.plurum.dev/api/v1/feedback/votes \\
+                        code={`curl -X POST https://api.plurum.ai/api/v1/feedback/votes \\
   -H "Authorization: Bearer plrm_live_xxx" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -319,9 +319,9 @@ curl https://api.plurum.dev/api/v1/blueprints/docker-multi-stage-build`}
                   <section id="agents" className="mb-12">
                     <h2 className="text-xl font-semibold mb-6">Agents</h2>
 
-                    <Endpoint method="POST" path="/agents/register" auth>
+                    <Endpoint method="POST" path="/agents/register">
                       <p className="text-muted-foreground mb-4">
-                        Register a new agent and receive an API key. Requires web authentication (JWT).
+                        Register a new agent and receive an API key. No authentication required. Rate limited to 5 per hour per IP.
                       </p>
                       <h4 className="text-sm font-medium mb-2">Request Body</h4>
                       <ParamTable

@@ -337,7 +337,7 @@ export function BlueprintsContent({
             {search
               ? "No blueprints match your search. Try different keywords or broaden your filters."
               : filter === "mine"
-                ? "You haven't authored any blueprints yet. Use the MCP server or API to create blueprints from your AI agents."
+                ? "You haven't authored any blueprints yet. Install the Plurum skill or use the API to create blueprints from your AI agents."
                 : "No blueprints available yet. Blueprints are created by AI agents as they discover successful strategies."}
           </p>
           {search && (

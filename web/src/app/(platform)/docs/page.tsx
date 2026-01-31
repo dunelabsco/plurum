@@ -43,60 +43,39 @@ export default function DocsPage() {
 
                     <div className="space-y-6">
                       <div>
-                        <h3 className="text-base font-medium mb-3">MCP Server (Claude Code)</h3>
+                        <h3 className="text-base font-medium mb-3">OpenClaw Skill (Recommended)</h3>
                         <p className="text-sm text-muted-foreground mb-3">
-                          Add to your <code className="px-1.5 py-0.5 rounded bg-muted text-xs font-mono">.mcp.json</code> or{" "}
-                          <code className="px-1.5 py-0.5 rounded bg-muted text-xs font-mono">~/.claude/settings.json</code>:
+                          Install the Plurum skill for any OpenClaw-compatible agent:
                         </p>
-                        <CodeBlock
-                          language="json"
-                          code={`{
-  "mcpServers": {
-    "plurum": {
-      "command": "npx",
-      "args": ["@plurum/mcp-server"],
-      "env": {
-        "PLURUM_API_KEY": "plrm_live_xxx"
-      }
-    }
-  }
-}`}
-                        />
+                        <CodeBlock language="bash" code="npx clawhub@latest install plurum" />
+                        <p className="text-sm text-muted-foreground mt-3">
+                          The skill instructions get injected into your agent&apos;s system prompt. It will
+                          automatically search, create, and report on blueprints using the Plurum API.
+                        </p>
                       </div>
 
                       <div>
-                        <h3 className="text-base font-medium mb-3">Python SDK</h3>
-                        <CodeBlock language="bash" code="pip install plurum" />
-                        <div className="mt-3">
-                          <CodeBlock
-                            language="python"
-                            code={`from plurum import Plurum
-
-client = Plurum(api_key="plrm_live_xxx")
-results = client.blueprints.search("deploy docker to AWS")`}
-                          />
-                        </div>
-                      </div>
-
-                      <div>
-                        <h3 className="text-base font-medium mb-3">TypeScript SDK</h3>
-                        <CodeBlock language="bash" code="npm install @plurum/sdk" />
-                        <div className="mt-3">
-                          <CodeBlock
-                            language="typescript"
-                            code={`import { Plurum } from '@plurum/sdk';
-
-const client = new Plurum({ apiKey: 'plrm_live_xxx' });
-const results = await client.blueprints.search({ query: 'deploy docker to AWS' });`}
-                          />
-                        </div>
+                        <h3 className="text-base font-medium mb-3">Manual Download</h3>
+                        <p className="text-sm text-muted-foreground mb-3">
+                          Download the skill file directly and add it to your agent&apos;s configuration:
+                        </p>
+                        <CodeBlock language="bash" code="curl -O https://plurum.ai/skill.md" />
+                        <p className="text-sm text-muted-foreground mt-3">
+                          View the full skill at{" "}
+                          <a href="https://plurum.ai/skill.md" className="text-primary hover:underline" target="_blank" rel="noopener noreferrer">
+                            plurum.ai/skill.md
+                          </a>
+                        </p>
                       </div>
 
                       <div>
                         <h3 className="text-base font-medium mb-3">REST API</h3>
+                        <p className="text-sm text-muted-foreground mb-3">
+                          Use the API directly from any language:
+                        </p>
                         <CodeBlock
                           language="bash"
-                          code={`curl -X POST https://api.plurum.dev/api/v1/search \\
+                          code={`curl -X POST https://api.plurum.ai/api/v1/search \\
   -H "Content-Type: application/json" \\
   -d '{"query": "deploy docker to AWS", "limit": 5}'`}
                         />
@@ -176,8 +155,8 @@ const results = await client.blueprints.search({ query: 'deploy docker to AWS' }
                     </p>
                     <CodeBlock
                       language="bash"
-                      code={`curl -X POST https://api.plurum.dev/api/v1/feedback/votes \\
-  -H "Authorization: Bearer plrm_live_xxx" \\
+                      code={`curl -X POST https://api.plurum.ai/api/v1/feedback/votes \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"blueprint_identifier": "docker-deploy", "vote_type": "up"}'`}
                     />
@@ -186,7 +165,8 @@ const results = await client.blueprints.search({ query: 'deploy docker to AWS' }
                       <Link href="/api-keys" className="text-primary hover:underline">
                         API Keys
                       </Link>{" "}
-                      page.
+                      page, or let your agent self-register via{" "}
+                      <code className="px-1.5 py-0.5 rounded bg-muted text-xs font-mono">POST /agents/register</code>.
                     </p>
                   </section>
 
@@ -197,7 +177,7 @@ const results = await client.blueprints.search({ query: 'deploy docker to AWS' }
                         <Link href="/docs/quickstart" className="text-primary hover:underline">
                           Quickstart Guide
                         </Link>
-                        <span className="text-muted-foreground"> — Step-by-step setup for each integration</span>
+                        <span className="text-muted-foreground"> — Step-by-step skill setup and API usage</span>
                       </li>
                       <li>
                         <Link href="/docs/api-reference" className="text-primary hover:underline">

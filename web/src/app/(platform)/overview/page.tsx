@@ -324,7 +324,7 @@ export default async function OverviewPage() {
                     step: 3,
                     title: "Connect Agent",
                     description:
-                      "Use MCP or API to let your agent create and discover blueprints",
+                      "Install the skill or use the API to let your agent create and discover blueprints",
                     href: "/docs/quickstart",
                   },
                 ].map((item) => (
