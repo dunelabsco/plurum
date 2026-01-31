@@ -30,6 +30,7 @@ def search_blueprints(request: SearchRequest):
 
 @router.get(
     "/similar/{slug}",
+    response_model=list[SearchResult],
     summary="Find similar blueprints",
     description="Find blueprints similar to the given one.",
 )
@@ -44,13 +45,9 @@ def find_similar_blueprints(
     Uses the blueprint's embedding to find semantically similar blueprints.
     Useful for discovering related strategies.
     """
-    import traceback
     service = SearchService()
-    try:
-        return service.find_similar(
-            identifier=slug,
-            limit=limit,
-            exclude_same_author=exclude_same_author,
-        )
-    except Exception as e:
-        return {"debug_error": str(e), "traceback": traceback.format_exc()}
+    return service.find_similar(
+        identifier=slug,
+        limit=limit,
+        exclude_same_author=exclude_same_author,
+    )

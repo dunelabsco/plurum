@@ -253,26 +253,17 @@ class SearchService:
             limit: Maximum results
             exclude_same_author: Whether to exclude blueprints from the same agent
         """
-        import logging
-        logger = logging.getLogger(__name__)
-
         # Get the blueprint by identifier (supports both slug and short_id)
         blueprint = self.repo.get_by_identifier(identifier)
         if not blueprint:
             return []
 
-        logger.info(f"find_similar: found blueprint {blueprint['id']}, current_version_id={blueprint.get('current_version_id')}")
-
         # Find similar using the repository
-        try:
-            similar = self.repo.find_similar(
-                blueprint_id=blueprint["id"],
-                limit=limit,
-                exclude_same_author=exclude_same_author,
-            )
-        except Exception as e:
-            logger.error(f"find_similar failed for {identifier}: {e}", exc_info=True)
-            raise
+        similar = self.repo.find_similar(
+            blueprint_id=blueprint["id"],
+            limit=limit,
+            exclude_same_author=exclude_same_author,
+        )
 
         results = []
         for item in similar:
