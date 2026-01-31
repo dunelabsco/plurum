@@ -540,6 +540,11 @@ class BlueprintRepository:
         if exclude_same_author:
             params["exclude_agent_id"] = blueprint["created_by_agent_id"]
 
-        result = self.client.rpc("search_blueprints", params).execute()
-
-        return result.data[:limit] if result.data else []
+        import logging
+        logger = logging.getLogger(__name__)
+        try:
+            result = self.client.rpc("search_blueprints", params).execute()
+            return result.data[:limit] if result.data else []
+        except Exception as e:
+            logger.error(f"find_similar RPC failed: {e}", exc_info=True)
+            raise
