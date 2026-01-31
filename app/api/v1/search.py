@@ -47,7 +47,7 @@ def find_similar_blueprints(
     """
     service = SearchService()
     return service.find_similar(
-        slug=slug,
+        identifier=slug,
         limit=limit,
         exclude_same_author=exclude_same_author,
     )
