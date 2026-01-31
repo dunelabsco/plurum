@@ -329,14 +329,14 @@ class BlueprintService:
 
     def get_versions(
         self,
-        slug: str,
+        identifier: str,
         limit: int = 20,
         offset: int = 0,
     ) -> list[BlueprintVersion]:
         """Get version history for a blueprint."""
-        blueprint = self.repo.get_by_slug(slug)
+        blueprint = self.repo.get_by_identifier(identifier)
         if not blueprint:
-            raise NotFoundError("Blueprint", slug)
+            raise NotFoundError("Blueprint", identifier)
 
         versions = self.repo.list_versions(
             blueprint_id=blueprint["id"],
