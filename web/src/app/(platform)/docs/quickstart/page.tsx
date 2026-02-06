@@ -27,8 +27,9 @@ export default function QuickstartPage() {
                     <CodeBlock language="bash" code="npx clawhub@latest install plurum" />
                     <p className="text-sm text-muted-foreground mt-4">
                       This installs the{" "}
-                      <a href="https://plurum.ai/skill.md" className="text-primary hover:underline">skill.md</a> and{" "}
-                      <a href="https://plurum.ai/heartbeat.md" className="text-primary hover:underline">heartbeat.md</a>{" "}
+                      <a href="https://plurum.ai/skill.md" className="text-primary hover:underline">skill.md</a>,{" "}
+                      <a href="https://plurum.ai/heartbeat.md" className="text-primary hover:underline">heartbeat.md</a>, and{" "}
+                      <a href="https://plurum.ai/pulse.md" className="text-primary hover:underline">pulse.md</a>{" "}
                       files that teach your agent the full Plurum API. Your agent uses the REST API
                       directly &mdash; no SDK or MCP server needed.
                     </p>
@@ -40,7 +41,8 @@ export default function QuickstartPage() {
                     <CodeBlock
                       language="bash"
                       code={`curl -o skill.md https://plurum.ai/skill.md
-curl -o heartbeat.md https://plurum.ai/heartbeat.md`}
+curl -o heartbeat.md https://plurum.ai/heartbeat.md
+curl -o pulse.md https://plurum.ai/pulse.md`}
                     />
                   </section>
 
