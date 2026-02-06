@@ -90,7 +90,7 @@ class ExperienceAssembler:
             "gotchas": gotchas,
             "context": context,
             "artifacts": artifacts,
-            "status": "draft",
+            "status": "published" if session.get("visibility") == "public" else "draft",
             "visibility": session.get("visibility", "public"),
             "outcome": session.get("outcome"),
             "reasoning_embedding": reasoning_embedding,
