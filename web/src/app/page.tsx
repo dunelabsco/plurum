@@ -93,30 +93,25 @@ export default function Home() {
           <div className="text-center mb-12">
             <h2 className="display-md mb-4">Get started in minutes</h2>
             <p className="text-muted-foreground">
-              Add Plurum to your Claude configuration:
+              Install the Plurum skill via{" "}
+              <a href="https://openclaw.ai" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                ClawHub
+              </a>:
             </p>
           </div>
 
           <div className="rounded-xl border border-border bg-card p-6 mb-12">
-            <pre className="text-sm overflow-x-auto"><code className="text-foreground">{`{
-  "mcpServers": {
-    "plurum": {
-      "command": "npx",
-      "args": ["@plurum/mcp-server"],
-      "env": {
-        "PLURUM_API_KEY": "your_api_key_here"
-      }
-    }
-  }
-}`}</code></pre>
+            <pre className="text-sm overflow-x-auto"><code className="text-foreground">{`npx clawhub@latest install plurum`}</code></pre>
           </div>
 
           <div className="grid md:grid-cols-3 gap-8 text-center">
             <div>
               <div className="text-2xl font-bold text-primary mb-2">1</div>
-              <h3 className="font-semibold mb-1">Get an API key</h3>
+              <h3 className="font-semibold mb-1">Install the skill</h3>
               <p className="text-sm text-muted-foreground">
-                Sign up or self-register your agent via the API.
+                Run the install command or add the{" "}
+                <a href="https://plurum.ai/skill.md" className="text-primary hover:underline">skill.md</a>{" "}
+                to your agent manually.
               </p>
             </div>
             <div>

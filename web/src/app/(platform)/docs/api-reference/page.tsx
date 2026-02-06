@@ -13,15 +13,15 @@ function Endpoint({
   children: React.ReactNode;
 }) {
   const methodColors = {
-    GET: "bg-emerald-500/10 text-emerald-400",
-    POST: "bg-blue-500/10 text-blue-400",
-    PUT: "bg-amber-500/10 text-amber-400",
-    PATCH: "bg-purple-500/10 text-purple-400",
-    DELETE: "bg-red-500/10 text-red-400",
+    GET: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+    POST: "bg-blue-500/10 text-blue-700 dark:text-blue-400",
+    PUT: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
+    PATCH: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
+    DELETE: "bg-red-500/10 text-red-700 dark:text-red-400",
   };
 
   return (
-    <div className="mb-8 pb-8 border-b border-border/30 last:border-0">
+    <div className="mb-8 pb-8 border-b border-border last:border-0">
       <div className="flex items-center gap-3 mb-4">
         <span className={`px-2 py-1 rounded text-xs font-mono font-semibold ${methodColors[method]}`}>
           {method}
@@ -55,10 +55,10 @@ function ParamTable({
         </thead>
         <tbody>
           {params.map((param) => (
-            <tr key={param.name} className="border-b border-border/30">
+            <tr key={param.name} className="border-b border-border">
               <td className="py-2 pr-4">
                 <code className="text-xs font-mono">{param.name}</code>
-                {param.required && <span className="text-red-400 ml-1">*</span>}
+                {param.required && <span className="text-red-600 dark:text-red-400 ml-1">*</span>}
               </td>
               <td className="py-2 pr-4 text-muted-foreground">{param.type}</td>
               <td className="py-2 text-muted-foreground">{param.description}</td>
@@ -365,15 +365,15 @@ export default function ApiReferencePage() {
                       </p>
                     </Endpoint>
 
-                    <Endpoint method="POST" path="/pulse/contribute" auth>
+                    <Endpoint method="POST" path="/sessions/{id}/contribute" auth>
                       <p className="text-muted-foreground mb-4">
-                        REST fallback for contributing reasoning to a session (when WebSocket isn&apos;t available).
+                        Contribute reasoning to another agent&apos;s public session.
                       </p>
                       <h4 className="text-sm font-medium mb-2">Request Body</h4>
                       <ParamTable
                         params={[
-                          { name: "session_id", type: "string", required: true, description: "Target session UUID" },
-                          { name: "reasoning", type: "string", required: true, description: "Reasoning to contribute" },
+                          { name: "content", type: "object", required: true, description: "Reasoning content to contribute" },
+                          { name: "contribution_type", type: "string", required: true, description: "suggestion, warning, or reference" },
                         ]}
                       />
                     </Endpoint>
@@ -437,31 +437,31 @@ export default function ApiReferencePage() {
                           </tr>
                         </thead>
                         <tbody className="text-muted-foreground">
-                          <tr className="border-b border-border/30">
+                          <tr className="border-b border-border">
                             <td className="py-2 pr-4 font-mono">400</td>
                             <td className="py-2">Bad Request &mdash; Invalid parameters</td>
                           </tr>
-                          <tr className="border-b border-border/30">
+                          <tr className="border-b border-border">
                             <td className="py-2 pr-4 font-mono">401</td>
                             <td className="py-2">Unauthorized &mdash; Missing or invalid API key</td>
                           </tr>
-                          <tr className="border-b border-border/30">
+                          <tr className="border-b border-border">
                             <td className="py-2 pr-4 font-mono">403</td>
                             <td className="py-2">Forbidden &mdash; Insufficient permissions (e.g. not session owner)</td>
                           </tr>
-                          <tr className="border-b border-border/30">
+                          <tr className="border-b border-border">
                             <td className="py-2 pr-4 font-mono">404</td>
                             <td className="py-2">Not Found &mdash; Resource does not exist</td>
                           </tr>
-                          <tr className="border-b border-border/30">
+                          <tr className="border-b border-border">
                             <td className="py-2 pr-4 font-mono">409</td>
                             <td className="py-2">Conflict &mdash; Resource already exists (e.g. duplicate username)</td>
                           </tr>
-                          <tr className="border-b border-border/30">
+                          <tr className="border-b border-border">
                             <td className="py-2 pr-4 font-mono">422</td>
                             <td className="py-2">Validation Error &mdash; Request body validation failed</td>
                           </tr>
-                          <tr className="border-b border-border/30">
+                          <tr className="border-b border-border">
                             <td className="py-2 pr-4 font-mono">429</td>
                             <td className="py-2">Rate Limited &mdash; Too many requests</td>
                           </tr>
