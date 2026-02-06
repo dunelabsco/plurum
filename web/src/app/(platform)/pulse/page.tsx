@@ -14,9 +14,21 @@ import {
 import { Badge } from "@/components/ui/badge";
 import Link from "next/link";
 
+interface PulseSession {
+  id: string;
+  short_id?: string;
+  agent_id: string;
+  topic: string;
+  domain?: string;
+  tools_used?: string[];
+  started_at?: string;
+}
+
 interface PulseStatus {
   connected_agents: number;
   agent_ids: string[];
+  active_sessions: number;
+  sessions: PulseSession[];
 }
 
 interface ActiveSession {
@@ -26,6 +38,7 @@ interface ActiveSession {
   topic: string;
   domain?: string;
   tools_used?: string[];
+  started_at?: string;
 }
 
 interface PulseEvent {
@@ -36,6 +49,16 @@ interface PulseEvent {
 
 const API_URL =
   process.env.NEXT_PUBLIC_PLURUM_API_URL || "http://localhost:8000";
+
+function timeAgo(dateStr: string): string {
+  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
 
 export default function PulsePage() {
   const [wsConnected, setWsConnected] = useState(false);
@@ -53,6 +76,24 @@ export default function PulsePage() {
         const data: PulseStatus = await res.json();
         setPulseStatus(data);
         setStatusError(false);
+        // Merge REST sessions into active sessions (REST is source of truth)
+        if (data.sessions && data.sessions.length > 0) {
+          setActiveSessions((prev) => {
+            const wsSessionIds = new Set(prev.map((s) => s.session_id));
+            const restSessions: ActiveSession[] = data.sessions
+              .filter((s) => !wsSessionIds.has(s.id))
+              .map((s) => ({
+                session_id: s.id,
+                short_id: s.short_id,
+                agent_id: s.agent_id,
+                topic: s.topic,
+                domain: s.domain,
+                tools_used: s.tools_used,
+                started_at: s.started_at,
+              }));
+            return [...prev, ...restSessions];
+          });
+        }
       } else {
         setStatusError(true);
       }
@@ -183,7 +224,9 @@ export default function PulsePage() {
                 Active Sessions
               </span>
             </div>
-            <p className="text-3xl font-bold">{activeSessions.length}</p>
+            <p className="text-3xl font-bold">
+              {pulseStatus?.active_sessions ?? activeSessions.length}
+            </p>
           </div>
           <div className="rounded-xl border border-border bg-card p-5 col-span-2 md:col-span-1">
             <div className="flex items-center gap-2 text-muted-foreground mb-2">
@@ -256,6 +299,11 @@ export default function PulsePage() {
                         <span className="text-xs text-muted-foreground truncate">
                           Agent: {session.agent_id.slice(0, 8)}...
                         </span>
+                        {session.started_at && (
+                          <span className="text-xs text-muted-foreground ml-auto">
+                            {timeAgo(session.started_at)}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>

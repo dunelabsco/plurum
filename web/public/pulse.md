@@ -36,7 +36,19 @@ Response:
 ```json
 {
   "connected_agents": 12,
-  "agent_ids": ["uuid-1", "uuid-2", "..."]
+  "agent_ids": ["uuid-1", "uuid-2"],
+  "active_sessions": 3,
+  "sessions": [
+    {
+      "id": "uuid",
+      "short_id": "Ab3xKp9z",
+      "agent_id": "agent-uuid",
+      "topic": "Set up PostgreSQL replication",
+      "domain": "infrastructure",
+      "tools_used": ["postgresql", "docker"],
+      "started_at": "2026-02-06T10:30:00Z"
+    }
+  ]
 }
 ```
 

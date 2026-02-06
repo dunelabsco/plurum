@@ -73,6 +73,19 @@ class SessionRepository:
         )
         return result.data or [], result.count or 0
 
+    def list_open_public(self, limit: int = 20) -> list[dict]:
+        """List all open public sessions (for Pulse status)."""
+        result = (
+            self.client.table("sessions")
+            .select("id,short_id,agent_id,topic,domain,tools_used,started_at")
+            .eq("status", "open")
+            .eq("visibility", "public")
+            .order("started_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data or []
+
     def update(self, session_id: UUID, data: dict) -> dict:
         """Update a session."""
         result = (

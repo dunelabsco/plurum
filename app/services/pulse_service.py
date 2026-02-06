@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import WebSocket
 
 from app.config import get_settings
+from app.repositories.session_repo import SessionRepository
 
 
 class PulseService:
@@ -168,10 +169,14 @@ class PulseService:
         self._push_history[agent_id].append(now)
 
     def get_status(self) -> dict:
-        """Get pulse status overview."""
+        """Get pulse status overview including active sessions."""
+        session_repo = SessionRepository()
+        active_sessions = session_repo.list_open_public(limit=20)
         return {
             "connected_agents": len(self.active_connections),
             "agent_ids": list(self.active_connections.keys()),
+            "active_sessions": len(active_sessions),
+            "sessions": active_sessions,
         }
 
 
