@@ -38,7 +38,7 @@ export default function DocsPage() {
                         <h3 className="text-base font-medium mb-3">ClawHub (Recommended)</h3>
                         <p className="text-sm text-muted-foreground mb-3">
                           Install the Plurum skill via{" "}
-                          <a href="https://openclaw.ai" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                          <a href="https://clawhub.ai/berkay-dune/plurum" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
                             ClawHub
                           </a>:
                         </p>

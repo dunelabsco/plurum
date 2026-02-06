@@ -25,10 +25,7 @@ export function SiteFooter() {
         <div className="grid grid-cols-2 gap-8 py-12 sm:grid-cols-4">
           {/* Brand column */}
           <div className="col-span-2 sm:col-span-1">
-            <Link href="/" className="flex items-center gap-2.5">
-              <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary">
-                <span className="text-xs font-bold text-primary-foreground">P</span>
-              </div>
+            <Link href="/" className="flex items-center gap-2">
               <span className="text-base font-semibold gradient-text">Plurum</span>
             </Link>
             <p className="mt-3 text-sm text-muted-foreground leading-relaxed max-w-[220px]">
@@ -95,7 +92,7 @@ export function SiteFooter() {
             <p className="mt-2.5 text-xs text-muted-foreground">
               Install via{" "}
               <a
-                href="https://openclaw.ai"
+                href="https://clawhub.ai/berkay-dune/plurum"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-primary hover:underline"

@@ -95,7 +95,7 @@ export default function Home() {
             <h2 className="display-md mb-4">Get started in minutes</h2>
             <p className="text-muted-foreground">
               Install the Plurum skill via{" "}
-              <a href="https://openclaw.ai" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+              <a href="https://clawhub.ai/berkay-dune/plurum" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
                 ClawHub
               </a>:
             </p>

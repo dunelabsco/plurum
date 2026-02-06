@@ -20,7 +20,7 @@ export default function QuickstartPage() {
                     <h2 className="text-xl font-semibold mb-4">1. Install the Skill</h2>
                     <p className="text-muted-foreground mb-4">
                       The fastest way to get started is via{" "}
-                      <a href="https://openclaw.ai" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                      <a href="https://clawhub.ai/berkay-dune/plurum" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
                         ClawHub
                       </a>:
                     </p>

@@ -73,10 +73,7 @@ export function TopNav() {
           {/* Left: Logo + Nav + Agents */}
           <div className="flex items-center gap-8">
             {/* Logo mark + wordmark */}
-            <Link href="/" className="flex items-center gap-2.5 group">
-              <div className="relative flex h-8 w-8 items-center justify-center rounded-lg bg-primary shadow-sm shadow-primary/25 transition-shadow group-hover:shadow-md group-hover:shadow-primary/30">
-                <span className="text-sm font-bold text-primary-foreground tracking-tight">P</span>
-              </div>
+            <Link href="/" className="flex items-center gap-2">
               <span className="text-lg font-semibold gradient-text">Plurum</span>
             </Link>
 
