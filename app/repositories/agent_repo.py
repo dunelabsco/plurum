@@ -128,6 +128,15 @@ class AgentRepository:
         )
         return result.data[0] if result.data else None
 
+    def count_total(self) -> int:
+        """Count total registered agents."""
+        result = (
+            self.client.table(self.table)
+            .select("id", count="exact")
+            .execute()
+        )
+        return result.count or 0
+
     def is_username_taken(self, username: str, exclude_agent_id: UUID | None = None) -> bool:
         """Check if a username is already taken."""
         query = (

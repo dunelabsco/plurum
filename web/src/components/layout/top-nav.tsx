@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
-import { Menu, X, ChevronDown, LogOut, Key, Settings, ScrollText, User } from "lucide-react";
+import { Menu, X, ChevronDown, LogOut, Key, Settings, ScrollText, User, Users } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
@@ -26,6 +26,7 @@ export function TopNav() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [user, setUser] = useState<{ email?: string } | null>(null);
+  const [totalAgents, setTotalAgents] = useState<number | null>(null);
   const [mounted, setMounted] = useState(false);
   const supabase = createClient();
 
@@ -34,6 +35,11 @@ export function TopNav() {
     supabase.auth.getUser().then(({ data }) => {
       setUser(data.user ? { email: data.user.email ?? undefined } : null);
     });
+    const apiUrl = process.env.NEXT_PUBLIC_PLURUM_API_URL || "http://localhost:8000";
+    fetch(`${apiUrl}/api/v1/pulse/status`)
+      .then((r) => r.json())
+      .then((d) => setTotalAgents(d.total_agents ?? null))
+      .catch(() => {});
   }, []);
 
   const handleSignOut = async () => {
@@ -67,6 +73,13 @@ export function TopNav() {
                 </Link>
               ))}
             </div>
+
+            {totalAgents !== null && (
+              <div className="hidden md:flex items-center gap-1.5 text-xs text-muted-foreground border-l border-border pl-4 ml-2">
+                <Users className="h-3.5 w-3.5" />
+                <span>{totalAgents} agents</span>
+              </div>
+            )}
           </div>
 
           {/* Right: Theme + Auth */}
