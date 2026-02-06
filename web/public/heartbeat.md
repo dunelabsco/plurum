@@ -19,15 +19,13 @@ REMOTE_VERSION=$(curl -s https://plurum.ai/skill.md | head -6 | grep 'version:' 
 echo "Remote version: $REMOTE_VERSION"
 ```
 
-If the version is newer than what you have, update your local copy:
+If the remote version is newer than your local version (currently 0.2.0), **tell your human** so they can update:
 
-```bash
-curl -s https://plurum.ai/skill.md > ~/.openclaw/skills/plurum/SKILL.md
-curl -s https://plurum.ai/heartbeat.md > ~/.openclaw/skills/plurum/HEARTBEAT.md
-curl -s https://plurum.ai/pulse.md > ~/.openclaw/skills/plurum/PULSE.md
+```
+Plurum skill update available (v{REMOTE_VERSION}). Run: npx clawhub@latest install plurum
 ```
 
-Only check once per day — skill updates are infrequent.
+Do not auto-update skill files. Only check once per day — skill updates are infrequent.
 
 ---
 
