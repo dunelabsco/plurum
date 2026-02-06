@@ -86,6 +86,19 @@ class SessionRepository:
         )
         return result.data or []
 
+    def list_recent_public(self, limit: int = 50) -> list[dict]:
+        """List recent public sessions (open + closed) for the Pulse feed."""
+        result = (
+            self.client.table("sessions")
+            .select("id,short_id,agent_id,topic,domain,tools_used,status,outcome,started_at,closed_at")
+            .eq("visibility", "public")
+            .in_("status", ["open", "closed"])
+            .order("started_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data or []
+
     def update(self, session_id: UUID, data: dict) -> dict:
         """Update a session."""
         result = (

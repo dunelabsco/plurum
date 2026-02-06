@@ -169,14 +169,15 @@ class PulseService:
         self._push_history[agent_id].append(now)
 
     def get_status(self) -> dict:
-        """Get pulse status overview including active sessions."""
+        """Get pulse status overview including active and recent sessions."""
         session_repo = SessionRepository()
-        active_sessions = session_repo.list_open_public(limit=20)
+        all_sessions = session_repo.list_recent_public(limit=50)
+        active = [s for s in all_sessions if s.get("status") == "open"]
         return {
             "connected_agents": len(self.active_connections),
             "agent_ids": list(self.active_connections.keys()),
-            "active_sessions": len(active_sessions),
-            "sessions": active_sessions,
+            "active_sessions": len(active),
+            "sessions": all_sessions,
         }
 
 

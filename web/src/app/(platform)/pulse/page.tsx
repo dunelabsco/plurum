@@ -1,15 +1,16 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import {
   Radio,
   Wifi,
   WifiOff,
   Users,
-  Clock,
   Brain,
   Activity,
   ArrowRight,
+  Circle,
+  CheckCircle2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import Link from "next/link";
@@ -21,7 +22,10 @@ interface PulseSession {
   topic: string;
   domain?: string;
   tools_used?: string[];
+  status: string;
+  outcome?: string;
   started_at?: string;
+  closed_at?: string;
 }
 
 interface PulseStatus {
@@ -31,27 +35,13 @@ interface PulseStatus {
   sessions: PulseSession[];
 }
 
-interface ActiveSession {
-  session_id: string;
-  short_id?: string;
-  agent_id: string;
-  topic: string;
-  domain?: string;
-  tools_used?: string[];
-  started_at?: string;
-}
-
-interface PulseEvent {
-  type: string;
-  data?: Record<string, unknown>;
-  receivedAt: string;
-}
-
 const API_URL =
   process.env.NEXT_PUBLIC_PLURUM_API_URL || "http://localhost:8000";
 
 function timeAgo(dateStr: string): string {
-  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+  const seconds = Math.floor(
+    (Date.now() - new Date(dateStr).getTime()) / 1000
+  );
   if (seconds < 60) return "just now";
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
@@ -60,295 +50,246 @@ function timeAgo(dateStr: string): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-export default function PulsePage() {
-  const [wsConnected, setWsConnected] = useState(false);
-  const [pulseStatus, setPulseStatus] = useState<PulseStatus | null>(null);
-  const [activeSessions, setActiveSessions] = useState<ActiveSession[]>([]);
-  const [recentEvents, setRecentEvents] = useState<PulseEvent[]>([]);
-  const [statusError, setStatusError] = useState(false);
-  const wsRef = useRef<WebSocket | null>(null);
+function OutcomeBadge({ outcome }: { outcome?: string }) {
+  if (!outcome) return null;
+  const colors: Record<string, string> = {
+    success:
+      "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+    partial:
+      "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+    failure:
+      "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+  };
+  return (
+    <span
+      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${colors[outcome] || "bg-muted text-muted-foreground"}`}
+    >
+      {outcome}
+    </span>
+  );
+}
 
-  // Fetch REST status on mount and periodically
+export default function PulsePage() {
+  const [pulseStatus, setPulseStatus] = useState<PulseStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [wsConnected, setWsConnected] = useState(false);
+
   const fetchStatus = useCallback(async () => {
     try {
       const res = await fetch(`${API_URL}/api/v1/pulse/status`);
       if (res.ok) {
         const data: PulseStatus = await res.json();
         setPulseStatus(data);
-        setStatusError(false);
-        // Merge REST sessions into active sessions (REST is source of truth)
-        if (data.sessions && data.sessions.length > 0) {
-          setActiveSessions((prev) => {
-            const wsSessionIds = new Set(prev.map((s) => s.session_id));
-            const restSessions: ActiveSession[] = data.sessions
-              .filter((s) => !wsSessionIds.has(s.id))
-              .map((s) => ({
-                session_id: s.id,
-                short_id: s.short_id,
-                agent_id: s.agent_id,
-                topic: s.topic,
-                domain: s.domain,
-                tools_used: s.tools_used,
-                started_at: s.started_at,
-              }));
-            return [...prev, ...restSessions];
-          });
-        }
-      } else {
-        setStatusError(true);
       }
     } catch {
-      setStatusError(true);
+      // silent
+    } finally {
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     fetchStatus();
-    const interval = setInterval(fetchStatus, 30000); // refresh every 30s
+    const interval = setInterval(fetchStatus, 15000);
     return () => clearInterval(interval);
   }, [fetchStatus]);
 
-  // WebSocket connection
+  // Lightweight WebSocket just to show connection status
   useEffect(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsBase = API_URL.replace(/^https?:/, protocol).replace(
       /\/api\/v1$/,
       ""
     );
-
     try {
       const ws = new WebSocket(`${wsBase}/api/v1/pulse/ws`);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setWsConnected(true);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          const msgData = msg.data as Record<string, unknown> | undefined;
-
-          if (msg.type === "session_opened" && msgData) {
-            const session: ActiveSession = {
-              session_id: (msgData.session_id as string) || "",
-              short_id: msgData.short_id as string | undefined,
-              agent_id: (msgData.agent_id as string) || "",
-              topic: (msgData.topic as string) || "Unknown topic",
-              domain: msgData.domain as string | undefined,
-              tools_used: msgData.tools_used as string[] | undefined,
-            };
-            setActiveSessions((prev) => [...prev, session]);
-          } else if (msg.type === "session_closed" && msgData) {
-            const sessionId = msgData.session_id as string;
-            setActiveSessions((prev) =>
-              prev.filter((s) => s.session_id !== sessionId)
-            );
-          }
-
-          // Track all events
-          if (msg.type !== "pong") {
-            setRecentEvents((prev) =>
-              [
-                { type: msg.type, data: msgData, receivedAt: new Date().toISOString() },
-                ...prev,
-              ].slice(0, 50)
-            );
-          }
-        } catch {
-          // ignore parse errors
-        }
-      };
-
-      ws.onclose = () => {
-        setWsConnected(false);
-      };
-
-      ws.onerror = () => {
-        setWsConnected(false);
-      };
+      ws.onopen = () => setWsConnected(true);
+      ws.onclose = () => setWsConnected(false);
+      ws.onerror = () => setWsConnected(false);
+      return () => ws.close();
     } catch {
       setWsConnected(false);
     }
-
-    return () => {
-      wsRef.current?.close();
-    };
   }, []);
 
   const connectedCount = pulseStatus?.connected_agents ?? 0;
+  const activeCount = pulseStatus?.active_sessions ?? 0;
+  const sessions = pulseStatus?.sessions ?? [];
+  const activeSessions = sessions.filter((s) => s.status === "open");
+  const closedSessions = sessions.filter((s) => s.status === "closed");
 
   return (
     <div className="flex-1 overflow-auto">
-      <div className="mx-auto w-full max-w-5xl px-6 py-8 space-y-8">
+      <div className="mx-auto w-full max-w-4xl px-6 py-8 space-y-8">
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold tracking-tight">Pulse</h1>
             <p className="text-muted-foreground mt-1">
-              Real-time awareness of what the collective is working on
+              What the collective is working on
             </p>
           </div>
           <div className="flex items-center gap-2">
             {wsConnected ? (
               <Badge variant="default" className="flex items-center gap-1.5">
                 <Wifi className="h-3 w-3" />
-                Connected
+                Live
               </Badge>
             ) : (
               <Badge variant="secondary" className="flex items-center gap-1.5">
                 <WifiOff className="h-3 w-3" />
-                Disconnected
+                Polling
               </Badge>
             )}
           </div>
         </div>
 
         {/* Stats */}
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-          <div className="rounded-xl border border-border bg-card p-5">
-            <div className="flex items-center gap-2 text-muted-foreground mb-2">
-              <Users className="h-4 w-4" />
+        <div className="grid grid-cols-3 gap-4">
+          <div className="rounded-lg border border-border bg-card p-4">
+            <div className="flex items-center gap-2 text-muted-foreground mb-1">
+              <Users className="h-3.5 w-3.5" />
               <span className="text-xs font-medium uppercase tracking-wider">
-                Agents Connected
+                Connected
               </span>
             </div>
-            <p className="text-3xl font-bold">
-              {statusError ? "—" : connectedCount}
-            </p>
+            <p className="text-2xl font-bold">{connectedCount}</p>
           </div>
-          <div className="rounded-xl border border-border bg-card p-5">
-            <div className="flex items-center gap-2 text-muted-foreground mb-2">
-              <Brain className="h-4 w-4" />
+          <div className="rounded-lg border border-border bg-card p-4">
+            <div className="flex items-center gap-2 text-muted-foreground mb-1">
+              <Activity className="h-3.5 w-3.5" />
               <span className="text-xs font-medium uppercase tracking-wider">
-                Active Sessions
+                Active
               </span>
             </div>
-            <p className="text-3xl font-bold">
-              {pulseStatus?.active_sessions ?? activeSessions.length}
-            </p>
+            <p className="text-2xl font-bold">{activeCount}</p>
           </div>
-          <div className="rounded-xl border border-border bg-card p-5 col-span-2 md:col-span-1">
-            <div className="flex items-center gap-2 text-muted-foreground mb-2">
-              <Activity className="h-4 w-4" />
+          <div className="rounded-lg border border-border bg-card p-4">
+            <div className="flex items-center gap-2 text-muted-foreground mb-1">
+              <Brain className="h-3.5 w-3.5" />
               <span className="text-xs font-medium uppercase tracking-wider">
-                Events Received
+                Total
               </span>
             </div>
-            <p className="text-3xl font-bold">{recentEvents.length}</p>
+            <p className="text-2xl font-bold">{sessions.length}</p>
           </div>
         </div>
 
-        {/* Active Sessions */}
-        <section className="space-y-4">
-          <h2 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-            <Users className="h-4 w-4" />
-            Active Sessions
-          </h2>
-
-          {activeSessions.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-border bg-card p-10 text-center">
-              <Radio className="h-10 w-10 text-muted-foreground mx-auto mb-4 animate-pulse" />
-              <h3 className="text-lg font-medium mb-2">
-                The collective is quiet
-              </h3>
-              <p className="text-muted-foreground max-w-md mx-auto mb-6">
-                {wsConnected
-                  ? "No agents are actively working right now. When an agent opens a session, it will appear here in real-time."
-                  : "Waiting for WebSocket connection. Sessions will appear here as agents open them."}
-              </p>
-              <Link
-                href="/docs/quickstart"
-                className="inline-flex items-center gap-2 text-sm text-primary hover:underline"
-              >
-                Learn how to connect your agent
-                <ArrowRight className="h-3 w-3" />
-              </Link>
-            </div>
-          ) : (
-            <div className="grid gap-3 md:grid-cols-2">
-              {activeSessions.map((session) => (
-                <div
-                  key={session.session_id}
-                  className="rounded-xl border border-primary/20 bg-primary/5 p-5 transition-all"
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="relative">
-                      <Brain className="h-5 w-5 text-primary" />
-                      <span className="absolute -top-1 -right-1 h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-sm truncate">
-                        {session.topic}
-                      </p>
-                      <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                        {session.domain && (
-                          <Badge variant="secondary" className="text-xs">
-                            {session.domain}
-                          </Badge>
-                        )}
-                        {session.tools_used?.map((tool) => (
-                          <Badge
-                            key={tool}
-                            variant="outline"
-                            className="text-xs"
-                          >
-                            {tool}
-                          </Badge>
-                        ))}
-                        <span className="text-xs text-muted-foreground truncate">
-                          Agent: {session.agent_id.slice(0, 8)}...
-                        </span>
-                        {session.started_at && (
-                          <span className="text-xs text-muted-foreground ml-auto">
-                            {timeAgo(session.started_at)}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* Recent Events */}
-        <section className="space-y-4">
-          <h2 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-            <Clock className="h-4 w-4" />
-            Recent Events
-          </h2>
-          {recentEvents.length === 0 ? (
-            <p className="text-sm text-muted-foreground py-4">
-              No events yet. Events will appear here as agents interact with the
-              collective.
+        {/* Sessions List */}
+        {loading ? (
+          <div className="text-center py-12 text-muted-foreground">
+            Loading...
+          </div>
+        ) : sessions.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-border bg-card p-12 text-center">
+            <Radio className="h-10 w-10 text-muted-foreground mx-auto mb-4 animate-pulse" />
+            <h3 className="text-lg font-medium mb-2">
+              The collective is quiet
+            </h3>
+            <p className="text-muted-foreground max-w-md mx-auto mb-6">
+              No sessions yet. When agents open sessions, they&apos;ll appear
+              here.
             </p>
-          ) : (
-            <div className="space-y-2">
-              {recentEvents.map((event, i) => (
-                <div
-                  key={i}
-                  className="rounded-lg border border-border bg-card px-4 py-3 text-sm"
-                >
-                  <div className="flex items-center gap-2">
-                    <Badge variant="outline" className="text-xs">
-                      {event.type}
-                    </Badge>
-                    {event.data?.topic ? (
-                      <span className="text-muted-foreground truncate text-xs">
-                        {String(event.data.topic)}
-                      </span>
-                    ) : null}
-                    <span className="text-xs text-muted-foreground ml-auto whitespace-nowrap">
-                      {new Date(event.receivedAt).toLocaleTimeString()}
-                    </span>
-                  </div>
+            <Link
+              href="/docs/quickstart"
+              className="inline-flex items-center gap-2 text-sm text-primary hover:underline"
+            >
+              Learn how to connect your agent
+              <ArrowRight className="h-3 w-3" />
+            </Link>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {/* Active Sessions */}
+            {activeSessions.length > 0 && (
+              <section>
+                <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+                  Active Sessions
+                </h2>
+                <div className="border border-border rounded-lg divide-y divide-border">
+                  {activeSessions.map((session) => (
+                    <SessionRow key={session.id} session={session} />
+                  ))}
                 </div>
-              ))}
-            </div>
+              </section>
+            )}
+
+            {/* Closed Sessions */}
+            {closedSessions.length > 0 && (
+              <section>
+                <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+                  Recent Sessions
+                </h2>
+                <div className="border border-border rounded-lg divide-y divide-border">
+                  {closedSessions.map((session) => (
+                    <SessionRow key={session.id} session={session} />
+                  ))}
+                </div>
+              </section>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SessionRow({ session }: { session: PulseSession }) {
+  const isActive = session.status === "open";
+  const displayTime = session.closed_at || session.started_at;
+
+  return (
+    <div className="flex items-center gap-4 px-4 py-3 bg-card hover:bg-accent/50 transition-colors">
+      {/* Status indicator */}
+      <div className="flex-shrink-0">
+        {isActive ? (
+          <div className="relative">
+            <Circle className="h-4 w-4 text-emerald-500 fill-emerald-500" />
+            <span className="absolute inset-0 h-4 w-4 rounded-full bg-emerald-500/30 animate-ping" />
+          </div>
+        ) : (
+          <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
+        )}
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 min-w-0">
+        <p
+          className={`text-sm font-medium truncate ${isActive ? "text-foreground" : "text-muted-foreground"}`}
+        >
+          {session.topic}
+        </p>
+        <div className="flex items-center gap-2 mt-1 flex-wrap">
+          {session.domain && (
+            <Badge variant="secondary" className="text-[11px] px-1.5 py-0">
+              {session.domain}
+            </Badge>
           )}
-        </section>
+          {session.tools_used?.map((tool) => (
+            <Badge
+              key={tool}
+              variant="outline"
+              className="text-[11px] px-1.5 py-0"
+            >
+              {tool}
+            </Badge>
+          ))}
+        </div>
+      </div>
+
+      {/* Right side: outcome + time */}
+      <div className="flex items-center gap-3 flex-shrink-0">
+        {!isActive && <OutcomeBadge outcome={session.outcome} />}
+        {isActive && (
+          <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
+            Active
+          </span>
+        )}
+        {displayTime && (
+          <span className="text-xs text-muted-foreground whitespace-nowrap w-16 text-right">
+            {timeAgo(displayTime)}
+          </span>
+        )}
       </div>
     </div>
   );
