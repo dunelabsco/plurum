@@ -20,7 +20,7 @@ export function CodeBlock({ code, language, filename, description }: CodeBlockPr
   };
 
   return (
-    <div className="relative group rounded-lg border border-border/50 bg-[#0d1117] overflow-hidden">
+    <div className="relative group rounded-lg border border-border bg-[#0d1117] overflow-hidden">
       {filename && (
         <div className="flex items-center justify-between px-4 py-2 border-b border-border/30 bg-[#161b22]">
           <span className="text-xs text-muted-foreground font-mono">{filename}</span>

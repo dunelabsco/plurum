@@ -4,8 +4,6 @@ import { useEffect, useState, use } from "react";
 import Link from "next/link";
 import { ArrowLeft, AlertCircle, Share2 } from "lucide-react";
 import { toast } from "sonner";
-import { PageHeader } from "@/components/layout/page-header";
-import { ContentFooter } from "@/components/layout/content-footer";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getAgentProfile } from "@/lib/api";
@@ -13,7 +11,7 @@ import {
   AgentProfileHeader,
   ContributionGraph,
   AgentStatsCards,
-  TopBlueprintsList,
+  TopExperiencesList,
   AccomplishmentsSection,
 } from "@/components/agents";
 import type { AgentProfileResponse } from "@/types/agent-profile";
@@ -26,7 +24,7 @@ function ProfileSkeleton() {
   return (
     <div className="space-y-8">
       {/* Header skeleton */}
-      <div className="rounded-2xl border border-border/50 bg-card/30 p-6 md:p-8">
+      <div className="rounded-2xl border border-border bg-card p-6 md:p-8">
         <div className="flex flex-col md:flex-row md:items-center gap-6">
           <Skeleton className="h-16 w-16 rounded-full" />
           <div className="flex-1 space-y-2">
@@ -56,7 +54,7 @@ function ProfileSkeleton() {
         </div>
       </div>
 
-      {/* Blueprints skeleton */}
+      {/* Experiences skeleton */}
       <div className="space-y-4">
         <Skeleton className="h-6 w-32" />
         {[...Array(3)].map((_, i) => (
@@ -108,24 +106,19 @@ export default function AgentProfilePage({ params }: PageProps) {
 
   if (isLoading) {
     return (
-      <>
-        <PageHeader />
-        <div className="flex-1 overflow-auto">
-          <div className="mx-auto w-full max-w-5xl px-6 py-8">
-            <ProfileSkeleton />
-          </div>
+      <div className="flex-1 overflow-auto">
+        <div className="mx-auto w-full max-w-5xl px-6 py-8">
+          <ProfileSkeleton />
         </div>
-      </>
+      </div>
     );
   }
 
   if (error || !profile) {
     return (
-      <>
-        <PageHeader />
-        <div className="flex-1 overflow-auto">
-          <div className="mx-auto w-full max-w-5xl px-6 py-8">
-            <div className="rounded-xl border border-dashed border-destructive/30 bg-destructive/5 p-12 text-center">
+      <div className="flex-1 overflow-auto">
+        <div className="mx-auto w-full max-w-5xl px-6 py-8">
+          <div className="rounded-xl border border-dashed border-destructive/30 bg-destructive/5 p-12 text-center">
               <div className="flex justify-center mb-4">
                 <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-destructive/10">
                   <AlertCircle className="h-7 w-7 text-destructive" />
@@ -136,31 +129,27 @@ export default function AgentProfilePage({ params }: PageProps) {
                 {error || "This agent profile doesn't exist or has been removed."}
               </p>
               <Button asChild>
-                <Link href="/blueprints">
+                <Link href="/experiences">
                   <ArrowLeft className="mr-2 h-4 w-4" />
-                  Back to Blueprints
+                  Back to Experiences
                 </Link>
               </Button>
-            </div>
           </div>
         </div>
-      </>
+      </div>
     );
   }
 
   return (
-    <>
-      <PageHeader
-        actions={
+    <div className="flex-1 overflow-auto">
+      <div className="mx-auto w-full max-w-5xl px-6 py-8 space-y-8">
+        {/* Share Button */}
+        <div className="flex justify-end">
           <Button variant="outline" size="sm" onClick={handleShare}>
             <Share2 className="mr-2 h-4 w-4" />
             Share
           </Button>
-        }
-      />
-
-      <div className="flex-1 overflow-auto">
-        <div className="mx-auto w-full max-w-5xl px-6 py-8 space-y-8">
+        </div>
           {/* Profile Header */}
           <AgentProfileHeader
             agent={profile.agent}
@@ -168,22 +157,20 @@ export default function AgentProfilePage({ params }: PageProps) {
           />
 
           {/* Contribution Graph */}
-          <div className="rounded-xl border border-border/50 bg-card/30 p-5">
+          <div className="rounded-xl border border-border bg-card p-5">
             <ContributionGraph data={profile.contribution_graph} />
           </div>
 
           {/* Impact Stats */}
           <AgentStatsCards impactStats={profile.impact_stats} />
 
-          {/* Top Blueprints */}
-          <TopBlueprintsList blueprints={profile.top_blueprints} />
+          {/* Top Experiences */}
+          <TopExperiencesList experiences={profile.top_experiences} />
 
           {/* Accomplishments */}
           <AccomplishmentsSection accomplishments={profile.accomplishments} />
         </div>
 
-        <ContentFooter />
       </div>
-    </>
   );
 }

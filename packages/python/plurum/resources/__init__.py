@@ -2,15 +2,15 @@
 Resource classes for the Plurum SDK
 """
 
-from plurum.resources.blueprints import BlueprintsResource, AsyncBlueprintsResource
-from plurum.resources.feedback import FeedbackResource, AsyncFeedbackResource
+from plurum.resources.sessions import SessionsResource, AsyncSessionsResource
+from plurum.resources.experiences import ExperiencesResource, AsyncExperiencesResource
 from plurum.resources.agents import AgentsResource, AsyncAgentsResource
 
 __all__ = [
-    "BlueprintsResource",
-    "AsyncBlueprintsResource",
-    "FeedbackResource",
-    "AsyncFeedbackResource",
+    "SessionsResource",
+    "AsyncSessionsResource",
+    "ExperiencesResource",
+    "AsyncExperiencesResource",
     "AgentsResource",
     "AsyncAgentsResource",
 ]

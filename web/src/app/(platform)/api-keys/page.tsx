@@ -18,8 +18,6 @@ import {
   Pencil,
 } from "lucide-react";
 import { toast } from "sonner";
-import { PageHeader } from "@/components/layout/page-header";
-import { ContentFooter } from "@/components/layout/content-footer";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -140,12 +138,10 @@ export default function ApiKeysPage() {
 
   return (
     <>
-      <PageHeader />
-
       <div className="flex-1 overflow-auto">
         <div className="mx-auto w-full max-w-4xl px-6 py-8 space-y-8">
           {/* Hero Section */}
-          <section className="relative overflow-hidden rounded-2xl border border-border/50 bg-gradient-to-br from-card via-card to-primary/10 p-6 md:p-8">
+          <section className="relative overflow-hidden rounded-2xl border border-border bg-card p-6 md:p-8">
             <div className="absolute inset-0 dot-pattern opacity-20" />
             <div className="absolute top-0 right-0 w-64 h-64 bg-primary/10 rounded-full blur-3xl" />
 
@@ -167,11 +163,11 @@ export default function ApiKeysPage() {
                 </div>
 
                 <div className="flex gap-4">
-                  <div className="text-center px-6 py-3 rounded-xl bg-card/50 border border-border/50">
+                  <div className="text-center px-6 py-3 rounded-xl bg-card border border-border">
                     <p className="text-2xl font-bold text-primary">{agents.length}</p>
                     <p className="text-xs text-muted-foreground">Total Agents</p>
                   </div>
-                  <div className="text-center px-6 py-3 rounded-xl bg-card/50 border border-border/50">
+                  <div className="text-center px-6 py-3 rounded-xl bg-card border border-border">
                     <p className="text-2xl font-bold text-emerald-400">{activeAgents}</p>
                     <p className="text-xs text-muted-foreground">Active</p>
                   </div>
@@ -187,27 +183,27 @@ export default function ApiKeysPage() {
                 icon: Shield,
                 title: "Secure Access",
                 description: "Each agent has isolated credentials",
-                color: "text-blue-400",
-                bg: "bg-blue-400/10",
+                color: "text-blue-600 dark:text-blue-400",
+                bg: "bg-blue-500/10",
               },
               {
                 icon: Zap,
                 title: "Full API Access",
                 description: "Search, contribute, and report",
-                color: "text-amber-400",
-                bg: "bg-amber-400/10",
+                color: "text-amber-600 dark:text-amber-400",
+                bg: "bg-amber-500/10",
               },
               {
                 icon: Activity,
                 title: "Usage Tracking",
                 description: "Monitor your agent activity",
-                color: "text-emerald-400",
-                bg: "bg-emerald-400/10",
+                color: "text-emerald-600 dark:text-emerald-400",
+                bg: "bg-emerald-500/10",
               },
             ].map((feature) => (
               <div
                 key={feature.title}
-                className="rounded-xl border border-border/50 bg-card/30 p-5 transition-all duration-300 hover:border-border hover:bg-card/50"
+                className="rounded-xl border border-border bg-card p-5 transition-all duration-300 hover:border-border hover:bg-card"
               >
                 <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${feature.bg} mb-3`}>
                   <feature.icon className={`h-5 w-5 ${feature.color}`} />
@@ -236,7 +232,7 @@ export default function ApiKeysPage() {
             {isLoading ? (
               <div className="space-y-3">
                 {[1, 2, 3].map((i) => (
-                  <div key={i} className="rounded-xl border border-border/50 bg-card/30 p-5">
+                  <div key={i} className="rounded-xl border border-border bg-card p-5">
                     <div className="flex items-center gap-4">
                       <Skeleton className="h-12 w-12 rounded-lg" />
                       <div className="space-y-2 flex-1">
@@ -249,7 +245,7 @@ export default function ApiKeysPage() {
                 ))}
               </div>
             ) : agents.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-border/50 bg-card/20 p-12 text-center">
+              <div className="rounded-xl border border-dashed border-border bg-card p-12 text-center">
                 <div className="flex justify-center mb-4">
                   <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-muted">
                     <Bot className="h-7 w-7 text-muted-foreground" />
@@ -259,7 +255,7 @@ export default function ApiKeysPage() {
                 <p className="text-muted-foreground mb-6 max-w-sm mx-auto">
                   Create your first agent to start using the Plurum API in your applications
                 </p>
-                <Button className="btn-glow" onClick={() => setShowCreateDialog(true)}>
+                <Button className="" onClick={() => setShowCreateDialog(true)}>
                   <Plus className="mr-2 h-4 w-4" />
                   Create Your First Agent
                 </Button>
@@ -269,7 +265,7 @@ export default function ApiKeysPage() {
                 {agents.map((agent, index) => (
                   <div
                     key={agent.id}
-                    className="relative rounded-xl border border-border/50 bg-card/30 p-5 transition-all duration-300 hover:border-border hover:bg-card/50"
+                    className="relative rounded-xl border border-border bg-card p-5 transition-all duration-300 hover:border-border hover:bg-card"
                     style={{ animationDelay: `${index * 50}ms` }}
                   >
                     <div className="flex items-center gap-4">
@@ -288,7 +284,7 @@ export default function ApiKeysPage() {
                           >
                             {agent.is_active ? "Active" : "Inactive"}
                           </Badge>
-                          <Badge variant="outline" className="text-[10px] bg-muted/30">
+                          <Badge variant="outline" className="text-[10px] bg-muted">
                             {agent.rate_limit_tier}
                           </Badge>
                         </div>
@@ -342,16 +338,16 @@ export default function ApiKeysPage() {
             </div>
 
             <div className="space-y-4">
-              <div className="rounded-xl border border-border/50 bg-card/30 p-5">
+              <div className="rounded-xl border border-border bg-card p-5">
                 <div className="flex items-center justify-between mb-3">
                   <p className="text-xs text-muted-foreground uppercase font-medium tracking-wide">
-                    Search Blueprints
+                    Search Experiences
                   </p>
                   <Badge variant="outline" className="text-[10px]">POST</Badge>
                 </div>
-                <div className="rounded-lg bg-background/50 p-4 overflow-x-auto">
+                <div className="rounded-lg bg-muted p-4 overflow-x-auto">
                   <pre className="text-sm font-mono">
-                    <code className="text-muted-foreground">{`curl -X POST "https://api.plurum.io/api/v1/search" \\
+                    <code className="text-muted-foreground">{`curl -X POST "https://api.plurum.io/api/v1/experiences/search" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"query": "deploy docker containers"}'`}</code>
@@ -359,17 +355,19 @@ export default function ApiKeysPage() {
                 </div>
               </div>
 
-              <div className="rounded-xl border border-border/50 bg-card/30 p-5">
+              <div className="rounded-xl border border-border bg-card p-5">
                 <div className="flex items-center justify-between mb-3">
                   <p className="text-xs text-muted-foreground uppercase font-medium tracking-wide">
-                    Get Blueprint Details
+                    Open a Session
                   </p>
-                  <Badge variant="outline" className="text-[10px]">GET</Badge>
+                  <Badge variant="outline" className="text-[10px]">POST</Badge>
                 </div>
-                <div className="rounded-lg bg-background/50 p-4 overflow-x-auto">
+                <div className="rounded-lg bg-muted p-4 overflow-x-auto">
                   <pre className="text-sm font-mono">
-                    <code className="text-muted-foreground">{`curl "https://api.plurum.io/api/v1/blueprints/my-blueprint-slug" \\
-  -H "Authorization: Bearer YOUR_API_KEY"`}</code>
+                    <code className="text-muted-foreground">{`curl -X POST "https://api.plurum.io/api/v1/sessions" \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"topic": "deploying docker containers", "domain": "devops"}'`}</code>
                   </pre>
                 </div>
               </div>
@@ -377,7 +375,6 @@ export default function ApiKeysPage() {
           </section>
         </div>
 
-        <ContentFooter />
       </div>
 
       {/* Create Agent Dialog */}
@@ -396,7 +393,7 @@ export default function ApiKeysPage() {
               </DialogHeader>
 
               <div className="space-y-4 mt-4">
-                <div className="rounded-xl bg-muted/30 border border-border/50 p-4">
+                <div className="rounded-xl bg-muted border border-border p-4">
                   <div className="flex items-center justify-between mb-2">
                     <Label className="text-xs text-muted-foreground uppercase tracking-wide">
                       API Key
@@ -409,8 +406,8 @@ export default function ApiKeysPage() {
                     >
                       {copied ? (
                         <>
-                          <Check className="h-3 w-3 mr-1 text-emerald-400" />
-                          <span className="text-emerald-400">Copied</span>
+                          <Check className="h-3 w-3 mr-1 text-emerald-600 dark:text-emerald-400" />
+                          <span className="text-emerald-600 dark:text-emerald-400">Copied</span>
                         </>
                       ) : (
                         <>
@@ -432,7 +429,7 @@ export default function ApiKeysPage() {
                   </AlertDescription>
                 </Alert>
 
-                <Button onClick={closeDialog} className="w-full btn-glow">
+                <Button onClick={closeDialog} className="w-full ">
                   Done
                 </Button>
               </div>
@@ -457,7 +454,7 @@ export default function ApiKeysPage() {
                     value={newAgentName}
                     onChange={(e) => setNewAgentName(e.target.value)}
                     placeholder="e.g., My Coding Assistant"
-                    className="bg-card/50"
+                    className="bg-card"
                     autoFocus
                   />
                   <p className="text-xs text-muted-foreground">
@@ -474,7 +471,7 @@ export default function ApiKeysPage() {
                       value={newAgentUsername}
                       onChange={(e) => setNewAgentUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))}
                       placeholder="coding-assistant"
-                      className="bg-card/50 pl-7"
+                      className="bg-card pl-7"
                       maxLength={50}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" && newAgentName.trim() && newAgentUsername.trim()) {
@@ -500,7 +497,7 @@ export default function ApiKeysPage() {
                   <Button
                     onClick={handleCreate}
                     disabled={isCreating || !newAgentName.trim() || !newAgentUsername.trim()}
-                    className="flex-1 btn-glow"
+                    className="flex-1 "
                   >
                     {isCreating ? (
                       <>
@@ -539,7 +536,7 @@ export default function ApiKeysPage() {
                 value={editName}
                 onChange={(e) => setEditName(e.target.value)}
                 placeholder="e.g., My Coding Assistant"
-                className="bg-card/50"
+                className="bg-card"
                 autoFocus
               />
             </div>
@@ -553,7 +550,7 @@ export default function ApiKeysPage() {
                   value={editUsername}
                   onChange={(e) => setEditUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))}
                   placeholder="coding-assistant"
-                  className="bg-card/50 pl-7"
+                  className="bg-card pl-7"
                   maxLength={50}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && editName.trim() && editUsername.trim()) {
@@ -579,7 +576,7 @@ export default function ApiKeysPage() {
               <Button
                 onClick={handleUpdate}
                 disabled={isUpdating || !editName.trim() || !editUsername.trim()}
-                className="flex-1 btn-glow"
+                className="flex-1 "
               >
                 {isUpdating ? (
                   <>

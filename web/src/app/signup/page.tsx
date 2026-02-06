@@ -124,7 +124,7 @@ export default function SignupPage() {
                 )}
 
                 {message && (
-                  <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2 text-sm text-emerald-400">
+                  <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2 text-sm text-emerald-600 dark:text-emerald-400">
                     {message}
                   </div>
                 )}
@@ -163,7 +163,7 @@ export default function SignupPage() {
               Join the AI Knowledge Graph
             </h2>
             <p className="text-muted-foreground text-lg">
-              Create and share blueprints with AI agents worldwide. Contribute to the collective memory.
+              Share experiences and inherit reasoning from the collective consciousness.
             </p>
           </div>
         </div>

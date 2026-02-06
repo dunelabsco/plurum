@@ -1,12 +1,11 @@
 "use client";
 
 import {
-  Play,
+  FileText,
   CheckCircle2,
   TrendingUp,
   DollarSign,
-  Shield,
-  ShieldCheck,
+  Star,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ImpactStats } from "@/types/agent-profile";
@@ -21,22 +20,21 @@ interface AgentStatsCardsProps {
  */
 export function AgentStatsCards({ impactStats, className }: AgentStatsCardsProps) {
   const successRate = Math.round(impactStats.success_rate * 100);
-  const lowRiskShare = Math.round(impactStats.low_risk_share * 100);
 
   const stats = [
     {
-      label: "Total Runs",
-      value: impactStats.total_runs.toLocaleString(),
-      icon: Play,
-      color: "text-blue-400",
-      bg: "bg-blue-400/10",
+      label: "Total Reports",
+      value: impactStats.total_reports.toLocaleString(),
+      icon: FileText,
+      color: "text-blue-600 dark:text-blue-400",
+      bg: "bg-blue-500/10",
     },
     {
-      label: "Successful Runs",
-      value: impactStats.successful_runs.toLocaleString(),
+      label: "Successful Reports",
+      value: impactStats.successful_reports.toLocaleString(),
       icon: CheckCircle2,
-      color: "text-emerald-400",
-      bg: "bg-emerald-400/10",
+      color: "text-emerald-600 dark:text-emerald-400",
+      bg: "bg-emerald-500/10",
     },
     {
       label: "Success Rate",
@@ -44,40 +42,23 @@ export function AgentStatsCards({ impactStats, className }: AgentStatsCardsProps
       icon: TrendingUp,
       color:
         successRate >= 80
-          ? "text-emerald-400"
+          ? "text-emerald-600 dark:text-emerald-400"
           : successRate >= 50
-            ? "text-amber-400"
-            : "text-red-400",
+            ? "text-amber-600 dark:text-amber-400"
+            : "text-red-600 dark:text-red-400",
       bg:
         successRate >= 80
-          ? "bg-emerald-400/10"
+          ? "bg-emerald-500/10"
           : successRate >= 50
-            ? "bg-amber-400/10"
-            : "bg-red-400/10",
+            ? "bg-amber-500/10"
+            : "bg-red-500/10",
     },
     {
-      label: "Avg Risk Score",
-      value: impactStats.avg_risk_score.toFixed(0),
-      icon: Shield,
-      color:
-        impactStats.avg_risk_score <= 20
-          ? "text-emerald-400"
-          : impactStats.avg_risk_score <= 50
-            ? "text-amber-400"
-            : "text-red-400",
-      bg:
-        impactStats.avg_risk_score <= 20
-          ? "bg-emerald-400/10"
-          : impactStats.avg_risk_score <= 50
-            ? "bg-amber-400/10"
-            : "bg-red-400/10",
-    },
-    {
-      label: "Low Risk Versions",
-      value: `${lowRiskShare}%`,
-      icon: ShieldCheck,
-      color: "text-purple-400",
-      bg: "bg-purple-400/10",
+      label: "Avg Quality Score",
+      value: impactStats.avg_quality_score.toFixed(2),
+      icon: Star,
+      color: "text-purple-600 dark:text-purple-400",
+      bg: "bg-purple-500/10",
     },
     {
       label: "Total Cost Saved",
@@ -88,8 +69,8 @@ export function AgentStatsCards({ impactStats, className }: AgentStatsCardsProps
           })}`
         : "$0.00",
       icon: DollarSign,
-      color: "text-amber-400",
-      bg: "bg-amber-400/10",
+      color: "text-amber-600 dark:text-amber-400",
+      bg: "bg-amber-500/10",
     },
   ];
 
@@ -100,7 +81,7 @@ export function AgentStatsCards({ impactStats, className }: AgentStatsCardsProps
         {stats.map((stat) => (
           <div
             key={stat.label}
-            className="rounded-xl border border-border/50 bg-card/30 p-4 transition-all hover:border-border"
+            className="rounded-xl border border-border bg-card p-4 transition-all hover:border-border"
           >
             <div className="flex items-center gap-3">
               <div

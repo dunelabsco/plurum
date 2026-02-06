@@ -1,16 +1,11 @@
-import { PageHeader } from "@/components/layout/page-header";
-import { ContentFooter } from "@/components/layout/content-footer";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function OverviewLoading() {
   return (
-    <>
-      <PageHeader />
-
-      <div className="flex-1 overflow-auto">
-        <div className="mx-auto w-full max-w-5xl px-6 py-8 space-y-12">
+    <div className="flex-1 overflow-auto">
+      <div className="mx-auto w-full max-w-5xl px-6 py-8 space-y-12">
           {/* Hero Section */}
-          <section className="relative overflow-hidden rounded-2xl border border-border/50 bg-gradient-to-br from-card via-card to-accent/20 p-8 md:p-12">
+          <section className="relative overflow-hidden rounded-2xl border border-border bg-card p-8 md:p-12">
             <div className="absolute inset-0 dot-pattern opacity-30" />
             <div className="absolute top-0 right-0 w-96 h-96 bg-primary/10 rounded-full blur-3xl" />
 
@@ -30,7 +25,7 @@ export default function OverviewLoading() {
             {[1, 2, 3].map((i) => (
               <div
                 key={i}
-                className="rounded-xl border border-border/50 bg-card/50 p-6"
+                className="rounded-xl border border-border bg-card p-6"
               >
                 <div className="flex items-center justify-between mb-4">
                   <Skeleton className="h-10 w-10 rounded-lg" />
@@ -53,7 +48,7 @@ export default function OverviewLoading() {
               {[1, 2, 3, 4].map((i) => (
                 <div
                   key={i}
-                  className="rounded-xl border border-border/50 bg-card/30 p-5"
+                  className="rounded-xl border border-border bg-card p-5"
                 >
                   <Skeleton className="h-5 w-5 mb-4" />
                   <Skeleton className="h-5 w-28 mb-1" />
@@ -63,7 +58,7 @@ export default function OverviewLoading() {
             </div>
           </section>
 
-          {/* Recent Blueprints */}
+          {/* Recent Experiences */}
           <section className="space-y-6">
             <div className="flex items-center justify-between">
               <div>
@@ -77,7 +72,7 @@ export default function OverviewLoading() {
               {[1, 2, 3].map((i) => (
                 <div
                   key={i}
-                  className="rounded-xl border border-border/50 bg-card/30 p-5"
+                  className="rounded-xl border border-border bg-card p-5"
                 >
                   <div className="flex items-start gap-4">
                     <Skeleton className="h-12 w-12 rounded-lg shrink-0" />
@@ -108,7 +103,7 @@ export default function OverviewLoading() {
                 {[1, 2, 3].map((i) => (
                   <div
                     key={i}
-                    className="rounded-xl border border-border/50 bg-card/50 p-5"
+                    className="rounded-xl border border-border bg-card p-5"
                   >
                     <Skeleton className="h-8 w-8 rounded-full mb-4" />
                     <Skeleton className="h-5 w-28 mb-2" />
@@ -121,8 +116,6 @@ export default function OverviewLoading() {
           </section>
         </div>
 
-        <ContentFooter />
       </div>
-    </>
   );
 }

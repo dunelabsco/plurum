@@ -42,32 +42,64 @@ class EmbeddingService:
         sorted_data = sorted(response.data, key=lambda x: x.index)
         return [item.embedding for item in sorted_data]
 
-    def generate_blueprint_embedding(
+    def generate_topic_embedding(
         self,
-        title: str,
-        goal_description: str,
-        strategy: str,
-        tags: list[str] | None = None,
+        topic: str,
+        domain: str | None = None,
+        tools: list[str] | None = None,
     ) -> list[float]:
         """
-        Generate an embedding for a blueprint.
+        Generate an embedding for a session topic.
 
-        Combines title, goal, strategy, and tags into a single text
-        optimized for semantic search.
+        Used for matching sessions against experiences and other sessions.
         """
-        parts = [
-            f"Title: {title}",
-            f"Goal: {goal_description}",
-            f"Strategy: {strategy}",
-        ]
+        parts = [f"Topic: {topic}"]
 
-        if tags:
-            parts.append(f"Tags: {', '.join(tags)}")
+        if domain:
+            parts.append(f"Domain: {domain}")
+        if tools:
+            parts.append(f"Tools: {', '.join(tools)}")
+
+        combined_text = "\n".join(parts)
+        return self.generate_embedding(combined_text[:8000])
+
+    def generate_reasoning_embedding(
+        self,
+        goal: str,
+        dead_ends: list[dict] | None = None,
+        breakthroughs: list[dict] | None = None,
+        gotchas: list[dict] | None = None,
+        context: str | None = None,
+    ) -> list[float]:
+        """
+        Generate an embedding for an experience's reasoning content.
+
+        This is the key difference from the old system: we embed the actual
+        reasoning (dead ends, breakthroughs, gotchas) not just the title/goal.
+        This means search finds experiences based on what was LEARNED,
+        not just what was attempted.
+        """
+        parts = [f"Goal: {goal}"]
+
+        if dead_ends:
+            dead_end_texts = [f"Tried {d.get('what', '')} but {d.get('why', '')}" for d in dead_ends]
+            parts.append(f"Dead ends: {'; '.join(dead_end_texts)}")
+
+        if breakthroughs:
+            breakthrough_texts = [f"{b.get('insight', '')}: {b.get('detail', '')}" for b in breakthroughs]
+            parts.append(f"Breakthroughs: {'; '.join(breakthrough_texts)}")
+
+        if gotchas:
+            gotcha_texts = [g.get('warning', '') for g in gotchas]
+            parts.append(f"Watch out for: {'; '.join(gotcha_texts)}")
+
+        if context:
+            parts.append(f"Context: {context}")
 
         combined_text = "\n".join(parts)
 
         # Truncate if too long (OpenAI has token limits)
-        max_chars = 8000  # Safe limit
+        max_chars = 8000
         if len(combined_text) > max_chars:
             combined_text = combined_text[:max_chars]
 

@@ -41,11 +41,11 @@ export function AccomplishmentsSection({
           </div>
           <h2 className="text-lg font-semibold">Accomplishments</h2>
         </div>
-        <div className="rounded-xl border border-dashed border-border/50 bg-card/30 p-8 text-center">
+        <div className="rounded-xl border border-dashed border-border bg-card p-8 text-center">
           <Award className="h-8 w-8 mx-auto mb-2 text-muted-foreground/50" />
           <p className="text-muted-foreground">No achievements unlocked yet</p>
           <p className="text-sm text-muted-foreground/70 mt-1">
-            Publish blueprints and help others to earn badges
+            Share experiences and help others to earn badges
           </p>
         </div>
       </section>
@@ -81,7 +81,7 @@ export function AccomplishmentsSection({
           return (
             <div
               key={accomplishment.id}
-              className="group rounded-xl border border-border/50 bg-card/30 p-4 transition-all hover:border-amber-400/30 hover:bg-card/60"
+              className="group rounded-xl border border-border bg-card p-4 transition-all hover:border-amber-400/30 hover:bg-card"
             >
               <div className="flex items-start gap-3">
                 <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-amber-400/20 to-amber-400/5 ring-1 ring-amber-400/20 group-hover:ring-amber-400/40 transition-all">

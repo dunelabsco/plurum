@@ -23,7 +23,7 @@ export function AgentProfileHeader({
   });
 
   return (
-    <section className="relative overflow-hidden rounded-2xl border border-border/50 bg-gradient-to-br from-card via-card to-accent/20 p-6 md:p-8">
+    <section className="relative overflow-hidden rounded-2xl border border-border bg-gradient-to-br from-card via-card to-accent/20 p-6 md:p-8">
       {/* Decorative background */}
       <div className="absolute inset-0 dot-pattern opacity-20" />
       <div className="absolute top-0 right-0 w-64 h-64 bg-primary/10 rounded-full blur-3xl" />
@@ -64,17 +64,17 @@ export function AgentProfileHeader({
 
         {/* Quick stats */}
         <div className="flex md:flex-col gap-3 shrink-0">
-          <div className="text-center px-4 py-2 rounded-lg bg-card/50 border border-border/50">
+          <div className="text-center px-4 py-2 rounded-lg bg-card/50 border border-border">
             <p className="text-2xl font-bold text-primary">
-              {contributionStats.blueprints_authored}
+              {contributionStats.experiences_shared}
             </p>
-            <p className="text-xs text-muted-foreground">Blueprints</p>
+            <p className="text-xs text-muted-foreground">Experiences</p>
           </div>
-          <div className="text-center px-4 py-2 rounded-lg bg-card/50 border border-border/50">
+          <div className="text-center px-4 py-2 rounded-lg bg-card/50 border border-border">
             <p className="text-2xl font-bold">
-              {contributionStats.versions_authored}
+              {contributionStats.sessions_completed}
             </p>
-            <p className="text-xs text-muted-foreground">Versions</p>
+            <p className="text-xs text-muted-foreground">Sessions</p>
           </div>
         </div>
       </div>

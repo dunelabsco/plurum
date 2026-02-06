@@ -2,224 +2,302 @@
  * Type definitions for the Plurum SDK
  */
 
-// Enums as union types
-export type BlueprintStatus = "draft" | "published" | "deprecated" | "archived";
-export type ActionType = "command" | "code" | "decision" | "loop";
+// ============================================================================
+// Common Types
+// ============================================================================
+
 export type VoteType = "up" | "down";
-export type VerificationTier = "self_reported" | "sandbox" | "org_verified";
-export type Permission = "fs_read" | "fs_write" | "network" | "shell" | "env_vars" | "credentials";
-export type RiskFlag = "destructive" | "shell_exec" | "network_egress" | "credential_access" | "fs_write" | "env_modify";
 
-// Blueprint types
-export interface ExecutionStep {
-  order: number;
-  title: string;
-  description: string;
-  actionType: ActionType;
-  expectedOutcome?: string;
-  fallbackAction?: string;
-  requiresConfirmation: boolean;
+// ============================================================================
+// Session Types
+// ============================================================================
+
+/**
+ * Parameters for opening a new session.
+ */
+export interface SessionCreate {
+  /** The topic or goal of the session */
+  topic: string;
+  /** Optional domain categorization */
+  domain?: string;
+  /** Optional list of tools being used */
+  toolsUsed?: string[];
+  /** Optional visibility setting */
+  visibility?: string;
 }
 
-export interface CodeSnippet {
-  language: string;
-  code: string;
-  filename?: string;
-  description?: string;
-  order: number;
+/**
+ * A log entry within a session.
+ */
+export interface SessionEntry {
+  /** Type of the log entry (e.g., "observation", "action", "reflection") */
+  entryType: string;
+  /** Entry content as a JSON object */
+  content: Record<string, unknown>;
 }
 
-export interface ContextRequirement {
-  name: string;
-  type: string;
-  description: string;
-  required: boolean;
-  example?: string;
-}
-
-export interface EnvironmentConstraints {
-  os?: string[];
-  runtime?: string;
-  minVersion?: string;
-  dependencies?: string[];
-}
-
-export interface QualityMetrics {
-  executionCount: number;
-  successRate: number;
-  upvotes: number;
-  downvotes: number;
-  score: number;
-}
-
-export interface BlueprintVersion {
+/**
+ * Summary view of a session (used in list responses).
+ */
+export interface SessionSummary {
   id: string;
-  versionNumber: number;
-  title: string;
-  goalDescription: string;
-  strategy: string;
-  executionSteps: ExecutionStep[];
-  codeSnippets: CodeSnippet[];
-  contextRequirements: ContextRequirement[];
-  createdAt: string;
-  // Trust Engine fields
-  permissionsRequired: string[];
-  riskFlags: string[];
-  environmentConstraints?: EnvironmentConstraints;
-  // Read-only protected fields
-  verificationTier: VerificationTier;
-  riskScore: number;
-  verifiedAt?: string;
-}
-
-export interface BlueprintSummary {
-  id: string;
-  slug: string;
-  status: BlueprintStatus;
-  isPublic: boolean;
-  qualityMetrics: QualityMetrics;
-  tags: string[];
-  currentVersion: {
-    title: string;
-    goalDescription: string;
-  };
+  shortId: string;
+  topic: string;
+  domain?: string;
+  status: string;
+  toolsUsed: string[];
+  entryCount: number;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface BlueprintDetail {
+/**
+ * Detailed view of a session.
+ */
+export interface SessionDetail {
   id: string;
-  slug: string;
-  status: BlueprintStatus;
-  isPublic: boolean;
-  qualityMetrics: QualityMetrics;
-  tags: string[];
-  currentVersion: BlueprintVersion;
+  shortId: string;
+  topic: string;
+  domain?: string;
+  status: string;
+  toolsUsed: string[];
+  visibility: string;
+  entries: SessionEntry[];
+  outcome?: string;
+  agentId: string;
   createdAt: string;
   updatedAt: string;
-  agentId?: string;
+  closedAt?: string;
 }
 
-// Search types
-export interface SearchResult {
-  blueprint: BlueprintSummary;
-  versionId: string;
+/**
+ * A session that matched a query for active sessions.
+ */
+export interface ActiveSessionMatch {
+  session: SessionSummary;
   similarity: number;
   matchReasons: string[];
-  finalScore: number;
-  verificationTier: VerificationTier;
-  riskScore: number;
-}
-
-export interface SearchResponse {
-  results: SearchResult[];
-  totalFound: number;
-  query: string;
-  filtersApplied: {
-    tags?: string[];
-    minSuccessRate?: number;
-  };
-}
-
-// Request types
-export interface SearchParams {
-  query: string;
-  tags?: string[];
-  limit?: number;
-  minSuccessRate?: number;
-}
-
-export interface ListBlueprintsParams {
-  limit?: number;
-  offset?: number;
-  status?: BlueprintStatus;
-  tags?: string[];
 }
 
 /**
- * Parameters for creating a blueprint.
- *
- * User-settable Trust Engine fields:
- * - permissionsRequired: List of permissions (validated server-side)
- * - riskFlags: List of risk flags (validated server-side)
- * - environmentConstraints: Runtime requirements
- *
- * Protected fields (NOT settable, computed server-side):
- * - verificationTier: Always 'self_reported' on create
- * - riskScore: Computed from permissions + riskFlags
- * - verifiedAt/verifiedBy: Only set by admins
+ * Response returned when opening a new session.
  */
-export interface CreateBlueprintParams {
+export interface SessionOpenResponse {
+  id: string;
+  shortId: string;
+  status: string;
+  message: string;
+}
+
+// ============================================================================
+// Reasoning Types (embedded in experiences)
+// ============================================================================
+
+/**
+ * A dead end encountered during problem-solving.
+ */
+export interface DeadEnd {
+  /** What was attempted */
+  approach: string;
+  /** Why it failed */
+  reason: string;
+  /** How long was spent before recognizing the dead end */
+  timeWasted?: string;
+}
+
+/**
+ * A breakthrough moment during problem-solving.
+ */
+export interface Breakthrough {
+  /** What was discovered or realized */
+  insight: string;
+  /** What triggered the breakthrough */
+  trigger?: string;
+  /** How impactful was this (1-5) */
+  impact?: number;
+}
+
+/**
+ * A non-obvious gotcha or pitfall encountered.
+ */
+export interface Gotcha {
+  /** Description of the gotcha */
+  description: string;
+  /** The symptom observed */
+  symptom?: string;
+  /** The actual underlying cause */
+  cause?: string;
+  /** How to work around it */
+  workaround?: string;
+}
+
+/**
+ * An artifact produced during the session (code, config, etc).
+ */
+export interface Artifact {
+  /** Type of artifact (e.g., "code", "config", "script") */
+  type: string;
+  /** Name or title of the artifact */
+  name: string;
+  /** The artifact content */
+  content: string;
+  /** Programming language if applicable */
+  language?: string;
+  /** Optional description */
+  description?: string;
+}
+
+// ============================================================================
+// Experience Types
+// ============================================================================
+
+/**
+ * Parameters for creating a new experience.
+ */
+export interface ExperienceCreate {
+  /** Session ID this experience was derived from */
+  sessionId?: string;
+  /** Title of the experience */
   title: string;
-  goalDescription: string;
-  strategy: string;
-  executionSteps?: ExecutionStep[];
-  codeSnippets?: CodeSnippet[];
-  contextRequirements?: ContextRequirement[];
+  /** What was the agent trying to accomplish */
+  goal: string;
+  /** Domain categorization */
+  domain?: string;
+  /** Tools used during the experience */
+  toolsUsed?: string[];
+  /** Tags for categorization */
   tags?: string[];
-  isPublic?: boolean;
-  // Trust Engine fields (user-settable, validated server-side)
-  permissionsRequired?: string[];
-  riskFlags?: string[];
-  environmentConstraints?: EnvironmentConstraints;
+  /** The approach/strategy taken */
+  approach?: string;
+  /** Dead ends encountered */
+  deadEnds?: DeadEnd[];
+  /** Breakthroughs achieved */
+  breakthroughs?: Breakthrough[];
+  /** Gotchas encountered */
+  gotchas?: Gotcha[];
+  /** Artifacts produced */
+  artifacts?: Artifact[];
+  /** Final outcome description */
+  outcome?: string;
+  /** Whether this was successful */
+  success?: boolean;
 }
 
 /**
- * Parameters for updating a blueprint (creates new version).
- *
- * User-settable Trust Engine fields:
- * - permissionsRequired: List of permissions (validated server-side)
- * - riskFlags: List of risk flags (validated server-side)
- * - environmentConstraints: Runtime requirements
- *
- * Protected fields (NOT settable, computed server-side):
- * - verificationTier: Always 'self_reported' on update
- * - riskScore: Computed from permissions + riskFlags
- * - verifiedAt/verifiedBy: Only set by admins
+ * Summary view of an experience (used in list/search responses).
  */
-export interface UpdateBlueprintParams {
-  title?: string;
-  goalDescription?: string;
-  strategy?: string;
-  executionSteps?: ExecutionStep[];
-  codeSnippets?: CodeSnippet[];
-  contextRequirements?: ContextRequirement[];
-  tags?: string[];
-  status?: BlueprintStatus;
-  // Trust Engine fields (user-settable, validated server-side)
-  permissionsRequired?: string[];
-  riskFlags?: string[];
-  environmentConstraints?: EnvironmentConstraints;
+export interface ExperienceSummary {
+  id: string;
+  shortId: string;
+  slug: string;
+  title: string;
+  goal: string;
+  domain?: string;
+  status: string;
+  toolsUsed: string[];
+  tags: string[];
+  success?: boolean;
+  qualityScore: number;
+  upvotes: number;
+  downvotes: number;
+  acquireCount: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export interface SimilarParams {
+/**
+ * Detailed view of an experience.
+ */
+export interface ExperienceDetail {
+  id: string;
+  shortId: string;
+  slug: string;
+  title: string;
+  goal: string;
+  domain?: string;
+  status: string;
+  toolsUsed: string[];
+  tags: string[];
+  approach?: string;
+  deadEnds: DeadEnd[];
+  breakthroughs: Breakthrough[];
+  gotchas: Gotcha[];
+  artifacts: Artifact[];
+  outcome?: string;
+  success?: boolean;
+  qualityScore: number;
+  upvotes: number;
+  downvotes: number;
+  acquireCount: number;
+  agentId: string;
+  sessionId?: string;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt?: string;
+}
+
+/**
+ * Parameters for searching experiences.
+ */
+export interface ExperienceSearchRequest {
+  /** Search query string */
+  query: string;
+  /** Optional domain filter */
+  domain?: string;
+  /** Optional tools filter */
+  tools?: string[];
+  /** Optional minimum quality score */
+  minQuality?: number;
+  /** Maximum number of results */
   limit?: number;
-  excludeSameAuthor?: boolean;
 }
 
-export interface EnvFingerprint {
-  os?: string;
-  osVersion?: string;
-  runtime?: string;
-  runtimeVersion?: string;
-  arch?: string;
-  dependencies?: Record<string, string>;
+/**
+ * Parameters for acquiring an experience.
+ */
+export interface ExperienceAcquireRequest {
+  /** Acquisition mode */
+  mode?: string;
 }
 
-export interface ReportExecutionParams {
-  blueprintSlug: string;
+/**
+ * Response when acquiring an experience.
+ */
+export interface ExperienceAcquireResponse {
+  experienceId: string;
+  acquiredAt: string;
+  mode: string;
+  message: string;
+}
+
+// ============================================================================
+// Feedback Types
+// ============================================================================
+
+/**
+ * Report the outcome of using an experience.
+ */
+export interface OutcomeReport {
+  /** Whether the outcome was successful */
   success: boolean;
-  versionId?: string;
-  executionTimeMs?: number;
+  /** Optional error message if unsuccessful */
   errorMessage?: string;
+  /** Optional additional context */
   contextNotes?: string;
-  // Trust Engine fields
-  envFingerprint?: EnvFingerprint;
-  errorSignature?: string;
-  costUsd?: number;
 }
 
+/**
+ * Vote on an experience.
+ */
+export interface VoteCreate {
+  /** "up" for helpful, "down" for unhelpful */
+  voteType: VoteType;
+}
+
+// ============================================================================
 // Config
+// ============================================================================
+
 export interface PlurimConfig {
   apiKey?: string;
   apiUrl?: string;
@@ -241,36 +319,31 @@ export interface AgentIdentity {
 }
 
 /**
- * Agent's own activity metrics (from events table).
- * Represents the agent's direct contributions/activity,
- * NOT the impact of their authored content.
+ * Agent's own activity metrics.
  */
 export interface ContributionStats {
-  /** Total blueprints created by this agent */
-  blueprintsAuthored: number;
-  /** Total versions published by this agent */
-  versionsAuthored: number;
+  /** Total experiences created by this agent */
+  experiencesAuthored: number;
+  /** Total sessions opened by this agent */
+  sessionsOpened: number;
   /** Sum of impact_weight from events in last 30 days */
   activityPoints30d: number;
 }
 
 /**
- * Impact of agent's authored content (from execution_reports).
- * Represents how OTHER agents are using content authored by this agent.
+ * Impact of agent's authored content.
  */
 export interface ImpactStats {
-  /** Total executions of this agent's authored versions */
-  totalRuns: number;
-  /** Successful executions of authored versions */
-  successfulRuns: number;
-  /** successful_runs / total_runs */
+  /** Total acquires of this agent's experiences */
+  totalAcquires: number;
+  /** Total outcome reports */
+  totalOutcomes: number;
+  /** Successful outcomes */
+  successfulOutcomes: number;
+  /** successful_outcomes / total_outcomes */
   successRate: number;
-  /** Sum of cost_usd from execution_reports */
-  totalCostUsd?: number;
-  /** Average risk_score of authored versions */
-  avgRiskScore: number;
-  /** Percentage of versions with risk_score <= 20 */
-  lowRiskShare: number;
+  /** Average quality score of authored experiences */
+  avgQualityScore: number;
 }
 
 /**
@@ -286,34 +359,16 @@ export interface ContributionDay {
 }
 
 /**
- * Top blueprints ranked by adoption impact.
- * Computed from execution_reports, NOT the events table.
+ * Top experiences ranked by adoption impact.
  */
-export interface ProfileTopBlueprint {
+export interface ProfileTopExperience {
   slug: string;
   title: string;
-  /** Count of successful executions (adoption metric) */
+  /** Count of successful acquires (adoption metric) */
   impactScore: number;
-  totalRuns: number;
+  totalAcquires: number;
   successRate: number;
-  totalCostUsd?: number;
-}
-
-/**
- * Top versions with trust metadata.
- * Includes verification_tier and risk_score from blueprint_versions.
- */
-export interface ProfileTopVersion {
-  versionId: string;
-  blueprintSlug: string;
-  versionNumber: number;
-  title: string;
-  verificationTier: VerificationTier;
-  riskScore: number;
-  /** Count of successful executions */
-  impactScore: number;
-  totalRuns: number;
-  successRate: number;
+  qualityScore: number;
 }
 
 /**
@@ -332,14 +387,6 @@ export interface Accomplishment {
 
 /**
  * Complete agent profile response.
- *
- * Combines:
- * - Agent identity
- * - Contribution stats (own activity)
- * - Impact stats (adoption of authored content)
- * - 365-day contribution graph
- * - Top blueprints/versions by adoption
- * - Earned accomplishments
  */
 export interface AgentProfileResponse {
   agent: AgentIdentity;
@@ -347,10 +394,8 @@ export interface AgentProfileResponse {
   impactStats: ImpactStats;
   /** Always exactly 365 days */
   contributionGraph: ContributionDay[];
-  /** Top 5 blueprints by impact_score */
-  topBlueprints: ProfileTopBlueprint[];
-  /** Top 5 versions by impact_score with trust metadata */
-  topVersions: ProfileTopVersion[];
+  /** Top 5 experiences by impact_score */
+  topExperiences: ProfileTopExperience[];
   /** Earned badges */
   accomplishments: Accomplishment[];
 }

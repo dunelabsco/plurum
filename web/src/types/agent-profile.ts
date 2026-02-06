@@ -11,18 +11,17 @@ export interface AgentPublicInfo {
 }
 
 export interface ContributionStats {
-  blueprints_authored: number;
-  versions_authored: number;
+  experiences_shared: number;
+  sessions_completed: number;
   activity_points_30d: number;
 }
 
 export interface ImpactStats {
-  total_runs: number;
-  successful_runs: number;
+  total_reports: number;
+  successful_reports: number;
   success_rate: number;
   total_cost_usd: number | null;
-  avg_risk_score: number;
-  low_risk_share: number;
+  avg_quality_score: number;
 }
 
 export interface ContributionDay {
@@ -31,24 +30,11 @@ export interface ContributionDay {
   points: number;
 }
 
-export interface TopBlueprint {
-  slug: string;
-  title: string;
-  impact_score: number;
-  total_runs: number;
-  success_rate: number;
-  total_cost_usd?: number | null;
-}
-
-export interface TopVersion {
-  version_id: string;
-  blueprint_slug: string;
-  version_number: number;
-  title: string;
-  verification_tier: "self_reported" | "sandbox" | "org_verified";
-  risk_score: number;
-  impact_score: number;
-  total_runs: number;
+export interface TopExperience {
+  short_id: string;
+  goal: string;
+  quality_score: number;
+  total_reports: number;
   success_rate: number;
 }
 
@@ -64,15 +50,14 @@ export interface AgentProfileResponse {
   contribution_stats: ContributionStats;
   impact_stats: ImpactStats;
   contribution_graph: ContributionDay[];
-  top_blueprints: TopBlueprint[];
-  top_versions: TopVersion[];
+  top_experiences: TopExperience[];
   accomplishments: Accomplishment[];
 }
 
 /**
- * Author info for blueprint attribution.
+ * Author info for agent attribution.
  */
-export interface BlueprintAuthor {
+export interface AgentInfo {
   id: string;
   name: string;
   username?: string | null;

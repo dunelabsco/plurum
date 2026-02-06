@@ -15,8 +15,6 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { createClient } from "@/lib/supabase/client";
-import { PageHeader } from "@/components/layout/page-header";
-import { ContentFooter } from "@/components/layout/content-footer";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -90,26 +88,21 @@ export default function SettingsPage() {
 
   if (isLoading) {
     return (
-      <>
-        <PageHeader />
-        <div className="flex-1 flex items-center justify-center">
-          <div className="relative">
-            <div className="h-16 w-16 rounded-full border-4 border-primary/20 animate-pulse" />
-            <Loader2 className="absolute inset-0 m-auto h-8 w-8 animate-spin text-primary" />
-          </div>
+      <div className="flex-1 flex items-center justify-center">
+        <div className="relative">
+          <div className="h-16 w-16 rounded-full border-4 border-primary/20 animate-pulse" />
+          <Loader2 className="absolute inset-0 m-auto h-8 w-8 animate-spin text-primary" />
         </div>
-      </>
+      </div>
     );
   }
 
   return (
     <>
-      <PageHeader />
-
       <div className="flex-1 overflow-auto">
         <div className="mx-auto w-full max-w-2xl px-6 py-8 space-y-8">
           {/* Header */}
-          <section className="relative overflow-hidden rounded-2xl border border-border/50 bg-gradient-to-br from-card via-card to-primary/10 p-6 md:p-8">
+          <section className="relative overflow-hidden rounded-2xl border border-border bg-card p-6 md:p-8">
             <div className="absolute inset-0 dot-pattern opacity-20" />
             <div className="absolute top-0 right-0 w-64 h-64 bg-primary/10 rounded-full blur-3xl" />
 
@@ -153,14 +146,14 @@ export default function SettingsPage() {
               </div>
             </div>
 
-            <div className="rounded-xl border border-border/50 bg-card/30 p-6 space-y-6">
+            <div className="rounded-xl border border-border bg-card p-6 space-y-6">
               <div className="space-y-2">
                 <Label className="text-muted-foreground">Display Name</Label>
                 <Input
                   value={user?.name || ""}
                   disabled
                   placeholder="Not set"
-                  className="bg-muted/30"
+                  className="bg-muted"
                 />
                 <p className="text-xs text-muted-foreground">
                   Display name is managed through your authentication provider
@@ -175,9 +168,9 @@ export default function SettingsPage() {
                   <Input
                     value={user?.email || ""}
                     disabled
-                    className="bg-muted/30"
+                    className="bg-muted"
                   />
-                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted/30">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted">
                     <Mail className="h-4 w-4 text-muted-foreground" />
                   </div>
                 </div>
@@ -197,7 +190,7 @@ export default function SettingsPage() {
               </div>
             </div>
 
-            <div className="rounded-xl border border-border/50 bg-card/30 p-6">
+            <div className="rounded-xl border border-border bg-card p-6">
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="font-medium">Sign Out</h3>
@@ -229,13 +222,13 @@ export default function SettingsPage() {
               </div>
             </div>
 
-            <div className="rounded-xl border border-dashed border-border/50 bg-card/20 p-6">
+            <div className="rounded-xl border border-dashed border-border bg-card p-6">
               <div className="flex flex-col items-center text-center py-4">
                 <div className="flex gap-3 mb-4">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted/30">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted">
                     <Bell className="h-5 w-5 text-muted-foreground/50" />
                   </div>
-                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted/30">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted">
                     <Palette className="h-5 w-5 text-muted-foreground/50" />
                   </div>
                 </div>
@@ -248,7 +241,6 @@ export default function SettingsPage() {
           </section>
         </div>
 
-        <ContentFooter />
       </div>
 
       {/* Sign Out Dialog */}

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Plurum } from "./index.js";
-import { BlueprintsResource } from "./resources/blueprints.js";
-import { FeedbackResource } from "./resources/feedback.js";
+import { SessionsResource } from "./resources/sessions.js";
+import { ExperiencesResource } from "./resources/experiences.js";
 
 describe("Plurum", () => {
   beforeEach(() => {
@@ -19,8 +19,8 @@ describe("Plurum", () => {
       const client = new Plurum();
 
       expect(client).toBeInstanceOf(Plurum);
-      expect(client.blueprints).toBeInstanceOf(BlueprintsResource);
-      expect(client.feedback).toBeInstanceOf(FeedbackResource);
+      expect(client.sessions).toBeInstanceOf(SessionsResource);
+      expect(client.experiences).toBeInstanceOf(ExperiencesResource);
     });
 
     it("should create client with API key", () => {
@@ -53,24 +53,42 @@ describe("Plurum", () => {
   });
 
   describe("resources", () => {
-    it("should have blueprints resource", () => {
+    it("should have sessions resource", () => {
       const client = new Plurum();
 
-      expect(client.blueprints).toBeDefined();
-      expect(typeof client.blueprints.search).toBe("function");
-      expect(typeof client.blueprints.get).toBe("function");
-      expect(typeof client.blueprints.list).toBe("function");
-      expect(typeof client.blueprints.create).toBe("function");
-      expect(typeof client.blueprints.update).toBe("function");
-      expect(typeof client.blueprints.similar).toBe("function");
+      expect(client.sessions).toBeDefined();
+      expect(typeof client.sessions.open).toBe("function");
+      expect(typeof client.sessions.get).toBe("function");
+      expect(typeof client.sessions.list).toBe("function");
+      expect(typeof client.sessions.logEntry).toBe("function");
+      expect(typeof client.sessions.close).toBe("function");
+      expect(typeof client.sessions.abandon).toBe("function");
+      expect(typeof client.sessions.contribute).toBe("function");
+      expect(typeof client.sessions.listContributions).toBe("function");
     });
 
-    it("should have feedback resource", () => {
+    it("should have experiences resource", () => {
       const client = new Plurum();
 
-      expect(client.feedback).toBeDefined();
-      expect(typeof client.feedback.vote).toBe("function");
-      expect(typeof client.feedback.reportExecution).toBe("function");
+      expect(client.experiences).toBeDefined();
+      expect(typeof client.experiences.create).toBe("function");
+      expect(typeof client.experiences.get).toBe("function");
+      expect(typeof client.experiences.list).toBe("function");
+      expect(typeof client.experiences.search).toBe("function");
+      expect(typeof client.experiences.acquire).toBe("function");
+      expect(typeof client.experiences.publish).toBe("function");
+      expect(typeof client.experiences.reportOutcome).toBe("function");
+      expect(typeof client.experiences.vote).toBe("function");
+      expect(typeof client.experiences.findSimilar).toBe("function");
+    });
+
+    it("should have agents resource", () => {
+      const client = new Plurum();
+
+      expect(client.agents).toBeDefined();
+      expect(typeof client.agents.register).toBe("function");
+      expect(typeof client.agents.me).toBe("function");
+      expect(typeof client.agents.rotateKey).toBe("function");
     });
   });
 });

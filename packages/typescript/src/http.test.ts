@@ -95,7 +95,7 @@ describe("HttpClient", () => {
       });
 
       const client = new HttpClient({ apiUrl: "http://localhost:8000" });
-      await client.get("/api/v1/blueprints", { limit: 10, status: "published" });
+      await client.get("/api/v1/experiences", { limit: 10, status: "published" });
 
       const calledUrl = mockFetch.mock.calls[0][0];
       expect(calledUrl).toContain("limit=10");
@@ -109,7 +109,7 @@ describe("HttpClient", () => {
       });
 
       const client = new HttpClient({ apiUrl: "http://localhost:8000" });
-      await client.get("/api/v1/blueprints", { tags: ["docker", "aws"] });
+      await client.get("/api/v1/experiences", { tags: ["docker", "aws"] });
 
       const calledUrl = mockFetch.mock.calls[0][0];
       expect(calledUrl).toContain("tags=docker");
@@ -123,7 +123,7 @@ describe("HttpClient", () => {
       });
 
       const client = new HttpClient({ apiUrl: "http://localhost:8000" });
-      await client.get("/api/v1/blueprints", { limit: 10, status: undefined });
+      await client.get("/api/v1/experiences", { limit: 10, status: undefined });
 
       const calledUrl = mockFetch.mock.calls[0][0];
       expect(calledUrl).toContain("limit=10");

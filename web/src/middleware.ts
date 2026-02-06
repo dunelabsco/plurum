@@ -1,14 +1,13 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-// Routes that require authentication
+// Only these routes require authentication
 const protectedRoutes = [
   "/overview",
-  "/blueprints",
-  "/search",
+  "/sessions",
   "/api-keys",
-  "/docs",
   "/settings",
+  "/agents/me",
 ];
 
 export async function middleware(request: NextRequest) {
@@ -64,16 +63,10 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  // Redirect old dashboard routes to new routes
-  if (pathname.startsWith("/dashboard")) {
+  // Redirect old routes
+  if (pathname.startsWith("/dashboard") || pathname.startsWith("/blueprints") || pathname.startsWith("/discussions")) {
     const url = request.nextUrl.clone();
-    if (pathname === "/dashboard") {
-      url.pathname = "/overview";
-    } else if (pathname.startsWith("/dashboard/blueprints")) {
-      url.pathname = pathname.replace("/dashboard/blueprints", "/blueprints");
-    } else {
-      url.pathname = "/overview";
-    }
+    url.pathname = "/overview";
     return NextResponse.redirect(url);
   }
 
@@ -83,12 +76,13 @@ export async function middleware(request: NextRequest) {
 export const config = {
   matcher: [
     "/overview/:path*",
-    "/blueprints/:path*",
-    "/search/:path*",
+    "/sessions/:path*",
     "/api-keys/:path*",
-    "/docs/:path*",
     "/settings/:path*",
+    "/agents/me/:path*",
     "/login",
     "/dashboard/:path*",
+    "/blueprints/:path*",
+    "/discussions/:path*",
   ],
 };

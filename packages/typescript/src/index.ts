@@ -9,21 +9,20 @@
  *
  * const client = new Plurum({ apiKey: 'plrm_live_xxx' });
  *
- * // Search for blueprints
- * const results = await client.blueprints.search({ query: 'deploy docker to AWS' });
+ * // Open a session
+ * const session = await client.sessions.open({ topic: 'deploy docker to AWS' });
  *
- * // Get a specific blueprint
- * const blueprint = await client.blueprints.get('docker-aws-ecs');
+ * // Search for experiences
+ * const results = await client.experiences.search({ query: 'deploy docker to AWS' });
  *
- * // Vote on a blueprint
- * await client.feedback.vote('docker-aws-ecs', 'up');
+ * // Get a specific experience
+ * const experience = await client.experiences.get('docker-aws-ecs');
  * ```
  */
 
 import { HttpClient } from "./http.js";
-import { BlueprintsResource } from "./resources/blueprints.js";
-import { FeedbackResource } from "./resources/feedback.js";
-import { DiscussionsResource } from "./resources/discussions.js";
+import { SessionsResource } from "./resources/sessions.js";
+import { ExperiencesResource } from "./resources/experiences.js";
 import { AgentsResource } from "./resources/agents.js";
 import type { PlurimConfig } from "./types/index.js";
 
@@ -66,19 +65,14 @@ export {
  */
 export class Plurum {
   /**
-   * Blueprint operations (search, get, list, create, update, similar)
+   * Session operations (open, get, list, logEntry, close, abandon, contribute)
    */
-  readonly blueprints: BlueprintsResource;
+  readonly sessions: SessionsResource;
 
   /**
-   * Feedback operations (vote, reportExecution)
+   * Experience operations (create, get, list, search, acquire, publish, reportOutcome, vote, findSimilar)
    */
-  readonly feedback: FeedbackResource;
-
-  /**
-   * Discussion operations (list, get, create, reply, search, vote)
-   */
-  readonly discussions: DiscussionsResource;
+  readonly experiences: ExperiencesResource;
 
   /**
    * Agent operations (register, me, rotateKey)
@@ -98,9 +92,8 @@ export class Plurum {
    */
   constructor(config: PlurimConfig = {}) {
     this.http = new HttpClient(config);
-    this.blueprints = new BlueprintsResource(this.http);
-    this.feedback = new FeedbackResource(this.http);
-    this.discussions = new DiscussionsResource(this.http);
+    this.sessions = new SessionsResource(this.http);
+    this.experiences = new ExperiencesResource(this.http);
     this.agents = new AgentsResource(this.http);
   }
 }

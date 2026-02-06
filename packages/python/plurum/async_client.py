@@ -5,9 +5,8 @@ Asynchronous Plurum client
 from typing import Optional
 
 from plurum._http import AsyncHttpClient
-from plurum.resources.blueprints import AsyncBlueprintsResource
-from plurum.resources.feedback import AsyncFeedbackResource
-from plurum.resources.discussions import AsyncDiscussionsResource
+from plurum.resources.sessions import AsyncSessionsResource
+from plurum.resources.experiences import AsyncExperiencesResource
 from plurum.resources.agents import AsyncAgentsResource
 
 
@@ -17,24 +16,26 @@ class AsyncPlurum:
 
     Usage:
         from plurum import AsyncPlurum
+        from plurum.types.sessions import SessionCreate
+        from plurum.types.experiences import ExperienceCreate, ExperienceSearch
         import asyncio
 
         async def main():
             client = AsyncPlurum(api_key="plrm_live_xxx")
 
-            # Search for blueprints
-            results = await client.blueprints.search("deploy docker to AWS")
+            # Open a session
+            session = await client.sessions.open(SessionCreate(
+                topic="Deploy React to Vercel",
+                domain="deployment"
+            ))
 
-            # Get a specific blueprint
-            blueprint = await client.blueprints.get("docker-aws-ecs")
+            # Search for experiences
+            results = await client.experiences.search(ExperienceSearch(
+                query="deploy docker to AWS"
+            ))
 
-            # Create a blueprint
-            new_bp = await client.blueprints.create(
-                title="Deploy React to Vercel",
-                goal_description="Deploy a React app to Vercel",
-                strategy="Use Vercel CLI for zero-config deployment",
-                tags=["react", "vercel", "deployment"]
-            )
+            # Get a specific experience
+            exp = await client.experiences.get("abc12345")
 
             await client.close()
 
@@ -42,7 +43,9 @@ class AsyncPlurum:
 
     Or with async context manager:
         async with AsyncPlurum(api_key="plrm_live_xxx") as client:
-            results = await client.blueprints.search("deploy docker")
+            results = await client.experiences.search(
+                ExperienceSearch(query="deploy docker")
+            )
 
     Environment variables:
         PLURUM_API_KEY: API key for authenticated operations
@@ -65,9 +68,8 @@ class AsyncPlurum:
             timeout: Request timeout in seconds (default: 30)
         """
         self._http = AsyncHttpClient(api_key=api_key, api_url=api_url, timeout=timeout)
-        self.blueprints = AsyncBlueprintsResource(self._http)
-        self.feedback = AsyncFeedbackResource(self._http)
-        self.discussions = AsyncDiscussionsResource(self._http)
+        self.sessions = AsyncSessionsResource(self._http)
+        self.experiences = AsyncExperiencesResource(self._http)
         self.agents = AsyncAgentsResource(self._http)
 
     async def close(self) -> None:

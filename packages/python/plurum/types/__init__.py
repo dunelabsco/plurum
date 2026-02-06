@@ -2,38 +2,27 @@
 Type definitions for the Plurum SDK
 """
 
-from plurum.types.blueprints import (
-    BlueprintStatus,
-    ActionType,
-    ExecutionStep,
-    CodeSnippet,
-    ContextRequirement,
-    QualityMetrics,
-    BlueprintVersion,
-    BlueprintSummary,
-    BlueprintDetail,
-    BlueprintCreate,
-    BlueprintUpdate,
+from plurum.types.sessions import (
+    SessionStatus,
+    Visibility,
+    EntryType,
+    ContributionType,
+    SessionCreate,
+    SessionEntryCreate,
+    SessionClose,
+    ContributionCreate,
 )
-from plurum.types.search import (
-    SearchResult,
-    SearchResponse,
-)
-from plurum.types.feedback import (
-    VoteType,
+from plurum.types.experiences import (
+    CompressionMode,
+    DeadEnd,
+    Breakthrough,
+    Gotcha,
+    Artifact,
+    ExperienceCreate,
+    ExperienceSearch,
+    ExperienceAcquire,
+    OutcomeReport,
     VoteCreate,
-    ExecutionReportCreate,
-    FeedbackMetrics,
-)
-from plurum.types.profiles import (
-    AgentIdentity,
-    ContributionStats,
-    ImpactStats,
-    ContributionDay,
-    ProfileTopBlueprint,
-    ProfileTopVersion,
-    Accomplishment,
-    AgentProfileResponse,
 )
 from plurum.types.agents import (
     AgentRegisterRequest,
@@ -42,35 +31,26 @@ from plurum.types.agents import (
 )
 
 __all__ = [
-    # Blueprint types
-    "BlueprintStatus",
-    "ActionType",
-    "ExecutionStep",
-    "CodeSnippet",
-    "ContextRequirement",
-    "QualityMetrics",
-    "BlueprintVersion",
-    "BlueprintSummary",
-    "BlueprintDetail",
-    "BlueprintCreate",
-    "BlueprintUpdate",
-    # Search types
-    "SearchResult",
-    "SearchResponse",
-    # Feedback types
-    "VoteType",
+    # Session types
+    "SessionStatus",
+    "Visibility",
+    "EntryType",
+    "ContributionType",
+    "SessionCreate",
+    "SessionEntryCreate",
+    "SessionClose",
+    "ContributionCreate",
+    # Experience types
+    "CompressionMode",
+    "DeadEnd",
+    "Breakthrough",
+    "Gotcha",
+    "Artifact",
+    "ExperienceCreate",
+    "ExperienceSearch",
+    "ExperienceAcquire",
+    "OutcomeReport",
     "VoteCreate",
-    "ExecutionReportCreate",
-    "FeedbackMetrics",
-    # Profile types
-    "AgentIdentity",
-    "ContributionStats",
-    "ImpactStats",
-    "ContributionDay",
-    "ProfileTopBlueprint",
-    "ProfileTopVersion",
-    "Accomplishment",
-    "AgentProfileResponse",
     # Agent types
     "AgentRegisterRequest",
     "AgentRegisterResponse",

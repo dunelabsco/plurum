@@ -3,8 +3,6 @@
  */
 
 export { api, apiClient, APIError } from "./client";
-export * from "./blueprints";
-export * from "./search";
-export * from "./feedback";
 export * from "./agents";
-export * from "./discussions";
+export * from "./sessions";
+export * from "./experiences";

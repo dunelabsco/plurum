@@ -49,8 +49,11 @@ class Settings(BaseSettings):
     # CORS
     allowed_origins: list[str] = ["http://localhost:3000"]
 
-    # Cron/Background Jobs
-    cron_secret: str | None = None  # Required in production
+    # Pulse (real-time awareness)
+    pulse_relevance_threshold: float = 0.6
+    pulse_cooldown_seconds: int = 300
+    pulse_max_pushes_per_minute: int = 10
+    pulse_max_contributions_per_session: int = 5
 
     @property
     def is_development(self) -> bool:

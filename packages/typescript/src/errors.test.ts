@@ -58,8 +58,8 @@ describe("NotFoundError", () => {
   });
 
   it("should accept custom message", () => {
-    const error = new NotFoundError("Blueprint not found");
-    expect(error.message).toBe("Blueprint not found");
+    const error = new NotFoundError("Experience not found");
+    expect(error.message).toBe("Experience not found");
   });
 
   it("should be instance of PlurimError", () => {

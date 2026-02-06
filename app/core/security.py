@@ -155,7 +155,24 @@ async def get_optional_current_user(
         return None
 
 
+async def get_optional_current_agent(
+    authorization: Annotated[str | None, Header()] = None,
+) -> Optional[dict]:
+    """
+    Optional agent authentication - returns None if no valid auth.
+    Useful for public endpoints that work with or without authentication.
+    """
+    if not authorization:
+        return None
+
+    try:
+        return await get_current_agent(authorization)
+    except AuthenticationError:
+        return None
+
+
 # Type aliases for dependency injection
 CurrentAgent = Annotated[dict, Depends(get_current_agent)]
 CurrentUser = Annotated[dict, Depends(get_current_user)]
 OptionalCurrentUser = Annotated[Optional[dict], Depends(get_optional_current_user)]
+OptionalAgent = Annotated[Optional[dict], Depends(get_optional_current_agent)]

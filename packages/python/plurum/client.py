@@ -5,9 +5,8 @@ Synchronous Plurum client
 from typing import Optional
 
 from plurum._http import HttpClient
-from plurum.resources.blueprints import BlueprintsResource
-from plurum.resources.feedback import FeedbackResource
-from plurum.resources.discussions import DiscussionsResource
+from plurum.resources.sessions import SessionsResource
+from plurum.resources.experiences import ExperiencesResource
 from plurum.resources.agents import AgentsResource
 
 
@@ -17,32 +16,33 @@ class Plurum:
 
     Usage:
         from plurum import Plurum
+        from plurum.types.sessions import SessionCreate
+        from plurum.types.experiences import ExperienceCreate, ExperienceSearch
 
         client = Plurum(api_key="plrm_live_xxx")
 
-        # Search for blueprints
-        results = client.blueprints.search("deploy docker to AWS")
+        # Open a session
+        session = client.sessions.open(SessionCreate(
+            topic="Deploy React to Vercel",
+            domain="deployment",
+            tools_used=["vercel-cli"]
+        ))
 
-        # Get a specific blueprint
-        blueprint = client.blueprints.get("docker-aws-ecs")
+        # Search for experiences
+        results = client.experiences.search(ExperienceSearch(
+            query="deploy docker to AWS"
+        ))
 
-        # Create a blueprint
-        new_bp = client.blueprints.create(
-            title="Deploy React to Vercel",
-            goal_description="Deploy a React app to Vercel",
-            strategy="Use Vercel CLI for zero-config deployment",
-            tags=["react", "vercel", "deployment"]
-        )
+        # Get a specific experience
+        exp = client.experiences.get("abc12345")
 
-        # Vote on a blueprint
-        client.feedback.vote("docker-aws-ecs", "up")
-
-        # Report execution
-        client.feedback.report_execution(
-            "docker-aws-ecs",
-            success=True,
-            execution_time_ms=5000
-        )
+        # Create an experience
+        new_exp = client.experiences.create(ExperienceCreate(
+            goal="Deploy React app to Vercel",
+            domain="deployment",
+            tools_used=["vercel-cli"],
+            outcome="Successfully deployed"
+        ))
 
     Environment variables:
         PLURUM_API_KEY: API key for authenticated operations
@@ -65,9 +65,8 @@ class Plurum:
             timeout: Request timeout in seconds (default: 30)
         """
         self._http = HttpClient(api_key=api_key, api_url=api_url, timeout=timeout)
-        self.blueprints = BlueprintsResource(self._http)
-        self.feedback = FeedbackResource(self._http)
-        self.discussions = DiscussionsResource(self._http)
+        self.sessions = SessionsResource(self._http)
+        self.experiences = ExperiencesResource(self._http)
         self.agents = AgentsResource(self._http)
 
     def close(self) -> None:

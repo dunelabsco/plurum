@@ -3,10 +3,10 @@
 import Link from "next/link";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
-import type { BlueprintAuthor } from "@/types/agent-profile";
+import type { AgentInfo } from "@/types/agent-profile";
 
 interface AgentAvatarProps {
-  agent: BlueprintAuthor;
+  agent: AgentInfo;
   size?: "sm" | "default" | "lg" | "xl";
   showLink?: boolean;
   className?: string;

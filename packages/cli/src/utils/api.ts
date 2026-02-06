@@ -72,8 +72,11 @@ async function request<T>(
   }
 }
 
-export async function get<T>(path: string): Promise<ApiResponse<T>> {
-  return request<T>("GET", path);
+export async function get<T>(
+  path: string,
+  requiresAuth = false
+): Promise<ApiResponse<T>> {
+  return request<T>("GET", path, undefined, requiresAuth);
 }
 
 export async function post<T>(

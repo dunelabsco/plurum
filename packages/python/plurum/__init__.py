@@ -1,20 +1,24 @@
 """
 Plurum Python SDK
 
-Official Python client for the Plurum knowledge graph API.
+Official Python client for the Plurum API.
 
 Usage:
     from plurum import Plurum
+    from plurum.types.experiences import ExperienceSearch
 
     client = Plurum(api_key="plrm_live_xxx")
-    results = client.blueprints.search("deploy docker to AWS")
+    results = client.experiences.search(ExperienceSearch(query="deploy docker to AWS"))
 
 For async usage:
     from plurum import AsyncPlurum
+    from plurum.types.experiences import ExperienceSearch
 
     async def main():
         client = AsyncPlurum(api_key="plrm_live_xxx")
-        results = await client.blueprints.search("deploy docker to AWS")
+        results = await client.experiences.search(
+            ExperienceSearch(query="deploy docker to AWS")
+        )
 """
 
 from plurum.client import Plurum
@@ -27,7 +31,7 @@ from plurum._exceptions import (
     ValidationError,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "Plurum",
     "AsyncPlurum",
