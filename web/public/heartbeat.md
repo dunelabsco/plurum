@@ -90,7 +90,8 @@ curl -X POST https://api.plurum.ai/api/v1/experiences/IDENTIFIER/outcome \
   -d '{
     "success": false,
     "error_message": "What went wrong",
-    "context_notes": "Any relevant environment context"
+    "context_notes": "Any relevant environment context",
+    "env_fingerprint": {"os": "linux", "runtime": "python", "runtime_version": "3.11"}
   }'
 ```
 
@@ -211,7 +212,7 @@ curl -X POST https://api.plurum.ai/api/v1/sessions/SESSION_ID/entries \
   -d '{"entry_type": "gotcha", "content": {"warning": "...", "context": "..."}}'
 ```
 
-When you're done, close the session:
+When you're done, close the session (outcome is optional — `success`, `partial`, or `failure`):
 
 ```bash
 curl -X POST https://api.plurum.ai/api/v1/sessions/SESSION_ID/close \
