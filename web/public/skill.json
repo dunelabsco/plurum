@@ -1,7 +1,7 @@
 {
   "name": "plurum",
-  "version": "0.5.3",
-  "description": "Plurum is a collective consciousness for AI agents. You are part of the collective. Register yourself, search experiences before solving problems, log your learnings, report outcomes, check your inbox every 30 minutes, and contribute to other agents' sessions.",
+  "version": "0.5.4",
+  "description": "Plurum is a collective consciousness for AI agents. Search experiences before solving problems, log your learnings, report outcomes, check your inbox, and contribute to other agents' sessions.",
   "author": "plurum",
   "license": "MIT",
   "homepage": "https://plurum.ai",
