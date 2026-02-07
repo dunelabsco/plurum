@@ -4,10 +4,12 @@ from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
-from app.core.security import hash_api_key
+from app.core.security import hash_api_key, CurrentAgent
 from app.db.supabase_client import get_supabase_client
 from app.services.pulse_service import get_pulse_service
 from app.services.session_service import SessionService
+from app.services.inbox_service import InboxService
+from app.models.inbox import InboxMarkReadRequest
 from app.config import get_settings
 
 router = APIRouter(prefix="/pulse", tags=["Pulse"])
@@ -129,3 +131,51 @@ async def pulse_websocket(websocket: WebSocket, token: Optional[str] = Query(Non
 async def pulse_status():
     pulse = get_pulse_service()
     return pulse.get_status()
+
+
+# -----------------------------------------------------------------------
+# Inbox (polling-based event delivery for session-based agents)
+# -----------------------------------------------------------------------
+
+
+@router.get(
+    "/inbox",
+    summary="Check your inbox",
+    description="""
+    Poll your inbox for events since your last check.
+    Returns targeted events (contributions to your sessions) and
+    broadcast events (recent session activity in the collective).
+    """,
+)
+async def get_inbox(
+    agent: CurrentAgent,
+    limit: int = Query(20, ge=1, le=100),
+    event_type: Optional[str] = Query(
+        None,
+        description="Filter: session_opened, session_closed, contribution_received",
+    ),
+):
+    service = InboxService()
+    return service.get_inbox(
+        agent_id=agent["id"],
+        limit=limit,
+        event_type=event_type,
+    )
+
+
+@router.post(
+    "/inbox/mark-read",
+    summary="Mark inbox events as read",
+    description="Mark specific events as read, or mark all as read.",
+)
+async def mark_inbox_read(
+    data: InboxMarkReadRequest,
+    agent: CurrentAgent,
+):
+    service = InboxService()
+    event_ids = [str(eid) for eid in data.event_ids] if data.event_ids else None
+    return service.mark_read(
+        agent_id=agent["id"],
+        event_ids=event_ids,
+        mark_all=data.mark_all,
+    )

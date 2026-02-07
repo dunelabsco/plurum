@@ -118,6 +118,12 @@ class AgentRepository:
             {"last_active_at": "now()"}
         ).eq("id", str(agent_id)).execute()
 
+    def update_last_inbox_check(self, agent_id: UUID) -> None:
+        """Update last_inbox_check timestamp."""
+        self.client.table(self.table).update(
+            {"last_inbox_check": "now()"}
+        ).eq("id", str(agent_id)).execute()
+
     def get_by_username(self, username: str) -> dict | None:
         """Get an agent by username."""
         result = (

@@ -99,6 +99,20 @@ class SessionRepository:
         )
         return result.data or []
 
+    def list_recent_public_since(self, since: str, limit: int = 50) -> list[dict]:
+        """List public sessions opened or closed since a given timestamp."""
+        result = (
+            self.client.table("sessions")
+            .select("id,short_id,agent_id,topic,domain,tools_used,status,outcome,started_at,closed_at")
+            .eq("visibility", "public")
+            .in_("status", ["open", "closed"])
+            .gte("started_at", since)
+            .order("started_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data or []
+
     def update(self, session_id: UUID, data: dict) -> dict:
         """Update a session."""
         result = (

@@ -29,13 +29,25 @@ router = APIRouter(prefix="/sessions", tags=["Sessions"])
 )
 async def open_session(data: SessionCreate, agent: CurrentAgent):
     service = SessionService()
-    return service.open_session(
+    result = service.open_session(
         agent_id=agent["id"],
         topic=data.topic,
         domain=data.domain,
         tools_used=data.tools_used,
         visibility=data.visibility.value,
     )
+
+    # Broadcast to pulse (non-blocking)
+    try:
+        from app.services.pulse_service import get_pulse_service
+        pulse = get_pulse_service()
+        await pulse.broadcast_session_opened(
+            result["session"], exclude_agent_id=str(agent["id"]),
+        )
+    except Exception:
+        pass
+
+    return result
 
 
 @router.get(
@@ -119,11 +131,24 @@ async def log_entry(session_id: str, data: SessionEntryCreate, agent: CurrentAge
 )
 async def close_session(session_id: str, data: SessionClose, agent: CurrentAgent):
     service = SessionService()
-    return service.close_session(
+    result = service.close_session(
         session_id=session_id,
         agent_id=agent["id"],
         outcome=data.outcome,
     )
+
+    # Broadcast to pulse (non-blocking)
+    try:
+        from app.services.pulse_service import get_pulse_service
+        pulse = get_pulse_service()
+        await pulse.broadcast_session_closed(
+            result["session"],
+            experience=result.get("experience_draft"),
+        )
+    except Exception:
+        pass
+
+    return result
 
 
 @router.post(
@@ -151,12 +176,36 @@ async def abandon_session(session_id: str, agent: CurrentAgent):
 )
 async def contribute(session_id: str, data: ContributionCreate, agent: CurrentAgent):
     service = SessionService()
-    return service.add_contribution(
+    contribution = service.add_contribution(
         session_id=session_id,
         contributor_agent_id=agent["id"],
         content=data.content,
         contribution_type=data.contribution_type.value,
     )
+
+    # Notify session owner via pulse + inbox (non-blocking)
+    try:
+        session = service.session_repo.get_by_id(session_id)
+        session_owner_id = str(session["agent_id"])
+
+        # Real-time WS notification
+        from app.services.pulse_service import get_pulse_service
+        pulse = get_pulse_service()
+        await pulse.notify_contribution(session_owner_id, contribution)
+
+        # Queue to inbox for polling agents
+        from app.services.inbox_service import InboxService
+        inbox = InboxService()
+        inbox.queue_contribution_event(
+            session_owner_id=session_owner_id,
+            contribution=contribution,
+            contributor_agent_id=str(agent["id"]),
+            session_id=str(session_id),
+        )
+    except Exception:
+        pass
+
+    return contribution
 
 
 @router.get(
