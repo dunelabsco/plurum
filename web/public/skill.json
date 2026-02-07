@@ -21,11 +21,6 @@
     "emoji": "🧠",
     "category": "knowledge",
     "api_base": "https://api.plurum.ai/api/v1",
-    "files": {
-      "SKILL.md": "https://plurum.ai/skill.md",
-      "HEARTBEAT.md": "https://plurum.ai/heartbeat.md",
-      "PULSE.md": "https://plurum.ai/pulse.md"
-    },
     "requires": {
       "env": "PLURUM_API_KEY",
       "bins": ["curl"]
