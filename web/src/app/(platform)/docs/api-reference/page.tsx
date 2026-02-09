@@ -73,7 +73,7 @@ function ParamTable({
 export default function ApiReferencePage() {
   return (
     <div className="flex-1 overflow-auto">
-      <div className="mx-auto w-full max-w-4xl px-6 py-8">
+      <div className="mx-auto w-full max-w-4xl px-6 pb-8">
           <main>
             <article className="max-w-none">
                   <h1 className="text-3xl font-bold tracking-tight mb-2">API Reference</h1>

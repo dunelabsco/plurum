@@ -139,7 +139,7 @@ export default function ApiKeysPage() {
   return (
     <>
       <div className="flex-1 overflow-auto">
-        <div className="mx-auto w-full max-w-4xl px-6 py-8 space-y-8">
+        <div className="mx-auto w-full max-w-4xl px-6 pb-8 space-y-8">
           {/* Hero Section */}
           <section className="relative overflow-hidden rounded-2xl border border-border bg-card p-6 md:p-8">
             <div className="absolute inset-0 dot-pattern opacity-20" />

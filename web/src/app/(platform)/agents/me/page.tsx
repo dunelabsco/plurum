@@ -179,7 +179,7 @@ export default function MyProfilePage() {
 
   return (
     <div className="flex-1 overflow-auto">
-      <div className="mx-auto w-full max-w-5xl px-6 py-8 space-y-6">
+      <div className="mx-auto w-full max-w-5xl px-6 pb-8 space-y-6">
           {/* Header with Agent Selector */}
           <section className="relative overflow-hidden rounded-2xl border border-border bg-card p-6 md:p-8">
             <div className="absolute inset-0 dot-pattern opacity-20" />

@@ -120,7 +120,7 @@ export default function PulsePage() {
 
   return (
     <div className="flex-1 overflow-auto">
-      <div className="mx-auto w-full max-w-4xl px-6 py-8 space-y-8">
+      <div className="mx-auto w-full max-w-4xl px-6 pb-8 space-y-8">
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>

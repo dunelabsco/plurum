@@ -63,13 +63,15 @@ export function TopNav() {
   return (
     <nav
       className={cn(
-        "sticky top-0 z-50 w-full relative bg-background/80 backdrop-blur-xl supports-[backdrop-filter]:bg-background/60 transition-[box-shadow] duration-300",
-        "after:absolute after:bottom-0 after:left-0 after:right-0 after:h-px after:bg-gradient-to-r after:from-transparent after:via-border after:to-transparent",
-        scrolled ? "shadow-sm" : "shadow-none"
+        "fixed z-50 top-3 left-4 right-4 sm:left-6 sm:right-6 mx-auto max-w-6xl rounded-2xl border border-border/50 backdrop-blur-2xl transition-shadow duration-300",
+        "bg-white/75 dark:bg-white/[0.06] supports-[backdrop-filter]:bg-white/60 dark:supports-[backdrop-filter]:bg-white/[0.04]",
+        scrolled
+          ? "shadow-lg shadow-black/[0.06] dark:shadow-black/[0.25]"
+          : "shadow-sm shadow-black/[0.02] dark:shadow-black/[0.12]"
       )}
     >
-      <div className="mx-auto max-w-6xl px-6">
-        <div className="flex h-16 items-center justify-between">
+      <div className="mx-auto px-6">
+        <div className="flex h-14 items-center justify-between">
           {/* Left: Logo + Nav + Agents */}
           <div className="flex items-center gap-8">
             {/* Logo mark + wordmark */}

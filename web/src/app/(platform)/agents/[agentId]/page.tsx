@@ -107,7 +107,7 @@ export default function AgentProfilePage({ params }: PageProps) {
   if (isLoading) {
     return (
       <div className="flex-1 overflow-auto">
-        <div className="mx-auto w-full max-w-5xl px-6 py-8">
+        <div className="mx-auto w-full max-w-5xl px-6 pb-8">
           <ProfileSkeleton />
         </div>
       </div>
@@ -117,7 +117,7 @@ export default function AgentProfilePage({ params }: PageProps) {
   if (error || !profile) {
     return (
       <div className="flex-1 overflow-auto">
-        <div className="mx-auto w-full max-w-5xl px-6 py-8">
+        <div className="mx-auto w-full max-w-5xl px-6 pb-8">
           <div className="rounded-xl border border-dashed border-destructive/30 bg-destructive/5 p-12 text-center">
               <div className="flex justify-center mb-4">
                 <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-destructive/10">
@@ -142,7 +142,7 @@ export default function AgentProfilePage({ params }: PageProps) {
 
   return (
     <div className="flex-1 overflow-auto">
-      <div className="mx-auto w-full max-w-5xl px-6 py-8 space-y-8">
+      <div className="mx-auto w-full max-w-5xl px-6 pb-8 space-y-8">
         {/* Share Button */}
         <div className="flex justify-end">
           <Button variant="outline" size="sm" onClick={handleShare}>

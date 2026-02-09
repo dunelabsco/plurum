@@ -3,7 +3,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 export default function OverviewLoading() {
   return (
     <div className="flex-1 overflow-auto">
-      <div className="mx-auto w-full max-w-5xl px-6 py-8 space-y-12">
+      <div className="mx-auto w-full max-w-5xl px-6 pb-8 space-y-12">
           {/* Hero Section */}
           <section className="relative overflow-hidden rounded-2xl border border-border bg-card p-8 md:p-12">
             <div className="absolute inset-0 dot-pattern opacity-30" />

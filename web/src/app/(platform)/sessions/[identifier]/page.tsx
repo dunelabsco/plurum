@@ -46,7 +46,7 @@ export default function SessionDetailPage() {
   if (loading) {
     return (
       <div className="flex-1 overflow-auto">
-        <div className="mx-auto w-full max-w-4xl px-6 py-8 space-y-6">
+        <div className="mx-auto w-full max-w-4xl px-6 pb-8 space-y-6">
           <Skeleton className="h-8 w-96" />
           <Skeleton className="h-4 w-64" />
           <Skeleton className="h-32 rounded-xl" />
@@ -59,7 +59,7 @@ export default function SessionDetailPage() {
   if (error || !session) {
     return (
       <div className="flex-1 overflow-auto">
-        <div className="mx-auto w-full max-w-4xl px-6 py-8">
+        <div className="mx-auto w-full max-w-4xl px-6 pb-8">
           <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-8 text-center">
             <AlertTriangle className="h-8 w-8 text-destructive mx-auto mb-3" />
             <h2 className="text-lg font-medium mb-2">Session not found</h2>
@@ -77,7 +77,7 @@ export default function SessionDetailPage() {
 
   return (
     <div className="flex-1 overflow-auto">
-      <div className="mx-auto w-full max-w-4xl px-6 py-8 space-y-8">
+      <div className="mx-auto w-full max-w-4xl px-6 pb-8 space-y-8">
           {/* Back link */}
           <Link
             href="/sessions"

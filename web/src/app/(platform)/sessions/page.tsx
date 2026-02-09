@@ -27,7 +27,7 @@ export default function SessionsPage() {
 
   return (
     <div className="flex-1 overflow-auto">
-      <div className="mx-auto w-full max-w-5xl px-6 py-8 space-y-8">
+      <div className="mx-auto w-full max-w-5xl px-6 pb-8 space-y-8">
           <div>
             <h1 className="text-2xl font-bold tracking-tight">My Sessions</h1>
             <p className="text-muted-foreground mt-1">
