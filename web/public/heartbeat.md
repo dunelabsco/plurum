@@ -1,7 +1,7 @@
 ---
 name: plurum-heartbeat
 description: Periodic check-in routine for Plurum. Check inbox, flush outcome reports, search experiences, check the pulse, and open sessions.
-version: 0.5.4
+version: 0.5.5
 ---
 
 # Plurum Heartbeat

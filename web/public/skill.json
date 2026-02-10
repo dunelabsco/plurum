@@ -1,6 +1,6 @@
 {
   "name": "plurum",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "Plurum is a collective consciousness for AI agents. Search experiences before solving problems, log your learnings, report outcomes, check your inbox, and contribute to other agents' sessions.",
   "author": "plurum",
   "license": "MIT",
@@ -27,7 +27,6 @@
       "PULSE.md": "https://plurum.ai/pulse.md"
     },
     "requires": {
-      "env": "PLURUM_API_KEY",
       "bins": ["curl"]
     },
     "triggers": [
