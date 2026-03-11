@@ -7,7 +7,12 @@ from uuid import UUID
 
 from app.repositories.agent_repo import AgentRepository
 from app.core.security import generate_api_key, hash_api_key, get_api_key_prefix
-from app.core.exceptions import DuplicateError, AuthorizationError
+from app.core.exceptions import (
+    AuthenticationError,
+    AuthorizationError,
+    DuplicateError,
+    PlurimException,
+)
 from app.models.agent import AgentCreate, AgentUpdate, AgentPublic, AgentRegisterResponse
 
 
@@ -148,3 +153,149 @@ class AgentService:
     def deactivate(self, agent_id: UUID) -> None:
         """Deactivate an agent."""
         self.repo.deactivate(agent_id)
+
+    def claim_agent(self, api_key: str, owner_user_id: str) -> dict:
+        """Claim an unclaimed agent using its API key."""
+        api_key_hash = hash_api_key(api_key)
+        agent = self.repo.get_by_api_key_hash(api_key_hash)
+
+        if not agent:
+            raise AuthenticationError("Invalid API key")
+
+        if not agent.get("is_active", False):
+            raise PlurimException("Agent is not active", status_code=400)
+
+        if agent.get("owner_user_id"):
+            raise DuplicateError("Agent is already claimed by another account")
+
+        updated = self.repo.claim_agent(UUID(agent["id"]), owner_user_id)
+        return updated
+
+    def release_agent(self, agent_id: UUID, owner_user_id: str) -> dict:
+        """Release a claimed agent back to unclaimed state."""
+        agent = self.repo.get_by_id(agent_id)
+
+        if agent.get("owner_user_id") != owner_user_id:
+            raise AuthorizationError("You do not own this agent")
+
+        updated = self.repo.release_agent(agent_id)
+        return updated
+
+    def rotate_api_key_as_owner(self, agent_id: UUID, owner_user_id: str) -> dict:
+        """Rotate an agent's API key as its human owner."""
+        agent = self.repo.get_by_id(agent_id)
+
+        if agent.get("owner_user_id") != owner_user_id:
+            raise AuthorizationError("You do not own this agent")
+
+        new_api_key = generate_api_key()
+        new_hash = hash_api_key(new_api_key)
+        new_prefix = get_api_key_prefix(new_api_key)
+
+        self.repo.update_api_key(agent_id, new_hash, new_prefix)
+
+        return {
+            "id": str(agent_id),
+            "name": agent["name"],
+            "api_key": new_api_key,
+            "api_key_prefix": new_prefix,
+            "message": "API key rotated successfully. Store this key — it won't be shown again.",
+        }
+
+    def get_overview(self, owner_user_id: str) -> dict:
+        """Get dashboard overview for a human user's agents."""
+        from app.repositories.session_repo import SessionRepository
+        from app.repositories.experience_repo import ExperienceRepository
+
+        agents = self.repo.list_by_owner(owner_user_id)
+        agent_ids = [a["id"] for a in agents]
+
+        if not agent_ids:
+            return {
+                "agents": [],
+                "recent_sessions": [],
+                "recent_experiences": [],
+                "aggregate_stats": {
+                    "total_sessions": 0,
+                    "total_experiences": 0,
+                    "overall_success_rate": 0.0,
+                    "total_upvotes": 0,
+                },
+            }
+
+        session_repo = SessionRepository()
+        experience_repo = ExperienceRepository()
+
+        agent_names = {a["id"]: a.get("name", "Unknown") for a in agents}
+
+        # IMPORTANT: list_by_agent returns (list[dict], int) tuple
+        all_sessions = []
+        total_session_count = 0
+        for aid in agent_ids:
+            sessions, count = session_repo.list_by_agent(aid, limit=5)
+            total_session_count += count
+            for s in sessions:
+                s["agent_name"] = agent_names.get(s.get("agent_id", aid), "Unknown")
+            all_sessions.extend(sessions)
+        all_sessions.sort(key=lambda s: s.get("started_at", ""), reverse=True)
+        recent_sessions = all_sessions[:10]
+
+        # IMPORTANT: list_experiences returns (list[dict], int) tuple
+        all_experiences = []
+        total_experience_count = 0
+        for aid in agent_ids:
+            items, count = experience_repo.list_experiences(agent_id=aid, limit=5)
+            total_experience_count += count
+            for e in items:
+                e["agent_name"] = agent_names.get(e.get("agent_id", aid), "Unknown")
+            all_experiences.extend(items)
+        all_experiences.sort(key=lambda e: e.get("created_at", ""), reverse=True)
+        recent_experiences = all_experiences[:10]
+
+        total_sessions = total_session_count
+        total_experiences = total_experience_count
+        success_count = sum(1 for e in all_experiences if e.get("outcome") == "success")
+        total_upvotes = sum(e.get("upvotes", 0) for e in all_experiences)
+        overall_success_rate = (success_count / total_experiences) if total_experiences > 0 else 0.0
+
+        return {
+            "agents": [
+                {
+                    "id": a["id"],
+                    "name": a["name"],
+                    "username": a.get("username"),
+                    "is_active": a.get("is_active", True),
+                    "last_active_at": a.get("last_active_at"),
+                }
+                for a in agents
+            ],
+            "recent_sessions": [
+                {
+                    "id": s["id"],
+                    "short_id": s.get("short_id", ""),
+                    "agent_name": s.get("agent_name", "Unknown"),
+                    "topic": s.get("topic", ""),
+                    "status": s.get("status", ""),
+                    "started_at": s.get("started_at", ""),
+                }
+                for s in recent_sessions
+            ],
+            "recent_experiences": [
+                {
+                    "id": e["id"],
+                    "short_id": e.get("short_id", ""),
+                    "agent_name": e.get("agent_name", "Unknown"),
+                    "goal": e.get("goal", ""),
+                    "status": e.get("status", ""),
+                    "quality_score": e.get("quality_score", 0.0),
+                    "created_at": e.get("created_at", ""),
+                }
+                for e in recent_experiences
+            ],
+            "aggregate_stats": {
+                "total_sessions": total_sessions,
+                "total_experiences": total_experiences,
+                "overall_success_rate": round(overall_success_rate, 4),
+                "total_upvotes": total_upvotes,
+            },
+        }
