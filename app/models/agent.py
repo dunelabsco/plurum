@@ -114,3 +114,65 @@ class AgentRegisterResponse(BaseModel):
                 "message": "API key created successfully. Store it securely - it cannot be retrieved later.",
             }
         }
+
+
+class AgentClaimRequest(BaseModel):
+    api_key: str
+
+
+class AgentClaimResponse(BaseModel):
+    id: str
+    name: str
+    username: str | None = None
+    api_key_prefix: str
+    is_active: bool
+    owner_user_id: str
+    message: str
+
+
+class AgentReleaseResponse(BaseModel):
+    id: str
+    name: str
+    username: str | None = None
+    message: str
+
+
+class AgentOverviewAgent(BaseModel):
+    id: str
+    name: str
+    username: str | None = None
+    is_active: bool
+    last_active_at: str | None = None
+
+
+class AgentOverviewSession(BaseModel):
+    id: str
+    short_id: str
+    agent_name: str
+    topic: str
+    status: str
+    started_at: str
+
+
+class AgentOverviewExperience(BaseModel):
+    id: str
+    short_id: str
+    agent_name: str
+    goal: str
+    status: str
+    quality_score: float
+    created_at: str
+
+
+class AgentOverviewStats(BaseModel):
+    total_sessions: int
+    total_experiences: int
+    overall_success_rate: float
+    total_upvotes: int
+
+
+class AgentOverviewResponse(BaseModel):
+    agents: list[AgentOverviewAgent]
+    recent_sessions: list[AgentOverviewSession]
+    recent_experiences: list[AgentOverviewExperience]
+    aggregate_stats: AgentOverviewStats
