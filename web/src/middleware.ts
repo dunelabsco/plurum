@@ -1,19 +1,30 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-// Only these routes require authentication
-const protectedRoutes = [
-  "/overview",
-  "/sessions",
-  "/api-keys",
-  "/settings",
-  "/agents/me",
-];
+const protectedPaths = ["/dashboard"];
+
+const legacyRedirects: Record<string, string> = {
+  "/overview": "/dashboard",
+  "/blueprints": "/experiences",
+  "/discussions": "/",
+  "/api-keys": "/dashboard/agents",
+  "/settings": "/dashboard/settings",
+  "/agents/me": "/dashboard/agents",
+};
 
 export async function middleware(request: NextRequest) {
-  let supabaseResponse = NextResponse.next({
-    request,
-  });
+  const { pathname } = request.nextUrl;
+
+  // Handle legacy redirects first
+  for (const [from, to] of Object.entries(legacyRedirects)) {
+    if (pathname === from || pathname.startsWith(from + "/")) {
+      const url = request.nextUrl.clone();
+      url.pathname = to;
+      return NextResponse.redirect(url);
+    }
+  }
+
+  let supabaseResponse = NextResponse.next({ request });
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -27,9 +38,7 @@ export async function middleware(request: NextRequest) {
           cookiesToSet.forEach(({ name, value }) =>
             request.cookies.set(name, value)
           );
-          supabaseResponse = NextResponse.next({
-            request,
-          });
+          supabaseResponse = NextResponse.next({ request });
           cookiesToSet.forEach(({ name, value, options }) =>
             supabaseResponse.cookies.set(name, value, options)
           );
@@ -42,31 +51,19 @@ export async function middleware(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  const pathname = request.nextUrl.pathname;
-
-  // Check if route is protected
-  const isProtectedRoute = protectedRoutes.some(
-    (route) => pathname === route || pathname.startsWith(`${route}/`)
+  const isProtected = protectedPaths.some(
+    (path) => pathname === path || pathname.startsWith(path + "/")
   );
 
-  // Protect platform routes
-  if (isProtectedRoute && !user) {
+  if (isProtected && !user) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);
   }
 
-  // Redirect logged-in users from login to overview
   if (pathname === "/login" && user) {
     const url = request.nextUrl.clone();
-    url.pathname = "/overview";
-    return NextResponse.redirect(url);
-  }
-
-  // Redirect old routes
-  if (pathname.startsWith("/dashboard") || pathname.startsWith("/blueprints") || pathname.startsWith("/discussions")) {
-    const url = request.nextUrl.clone();
-    url.pathname = "/overview";
+    url.pathname = "/dashboard";
     return NextResponse.redirect(url);
   }
 
@@ -75,14 +72,19 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/overview/:path*",
-    "/sessions/:path*",
-    "/api-keys/:path*",
-    "/settings/:path*",
-    "/agents/me/:path*",
-    "/login",
     "/dashboard/:path*",
+    "/login",
+    "/overview/:path*",
+    "/overview",
     "/blueprints/:path*",
+    "/blueprints",
     "/discussions/:path*",
+    "/discussions",
+    "/api-keys/:path*",
+    "/api-keys",
+    "/settings/:path*",
+    "/settings",
+    "/agents/me/:path*",
+    "/agents/me",
   ],
 };
