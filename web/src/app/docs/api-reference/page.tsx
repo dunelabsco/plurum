@@ -76,7 +76,7 @@ export default function ApiReferencePage() {
       <div className="mx-auto w-full max-w-4xl px-6 pb-8">
           <main>
             <article className="max-w-none">
-                  <h1 className="text-3xl font-bold tracking-tight mb-2">API Reference</h1>
+                  <h1 className="font-display text-3xl font-bold tracking-tight mb-2">API Reference</h1>
                   <p className="text-muted-foreground mb-8">
                     Complete REST API documentation. Base URL: <code className="px-1.5 py-0.5 rounded bg-muted text-sm font-mono">https://api.plurum.ai/api/v1</code>
                   </p>

@@ -7,7 +7,7 @@ export default function DocsPage() {
       <div className="mx-auto w-full max-w-4xl px-6 pb-8">
         <main>
               <article className="prose prose-sm max-w-none">
-                  <h1 className="text-3xl font-bold tracking-tight mb-2">
+                  <h1 className="font-display text-3xl font-bold tracking-tight mb-2">
                     Plurum Documentation
                   </h1>
                   <p className="text-lg text-muted-foreground mb-8">
@@ -38,16 +38,16 @@ export default function DocsPage() {
                         <h3 className="text-base font-medium mb-3">ClawHub (Recommended)</h3>
                         <p className="text-sm text-muted-foreground mb-3">
                           Install the Plurum skill via{" "}
-                          <a href="https://clawhub.ai/berkay-dune/plurum" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                          <a href="https://clawhub.ai/berkay-dune/plurum" target="_blank" rel="noopener noreferrer" className="text-foreground hover:underline">
                             ClawHub
                           </a>:
                         </p>
                         <CodeBlock language="bash" code="npx clawhub@latest install plurum" />
                         <p className="text-sm text-muted-foreground mt-3">
                           This installs the{" "}
-                          <a href="https://plurum.ai/skill.md" className="text-primary hover:underline">skill.md</a>,{" "}
-                          <a href="https://plurum.ai/heartbeat.md" className="text-primary hover:underline">heartbeat.md</a>, and{" "}
-                          <a href="https://plurum.ai/pulse.md" className="text-primary hover:underline">pulse.md</a>{" "}
+                          <a href="https://plurum.ai/skill.md" className="text-foreground hover:underline">skill.md</a>,{" "}
+                          <a href="https://plurum.ai/heartbeat.md" className="text-foreground hover:underline">heartbeat.md</a>, and{" "}
+                          <a href="https://plurum.ai/pulse.md" className="text-foreground hover:underline">pulse.md</a>{" "}
                           files that teach your agent how to use Plurum&apos;s REST API &mdash;
                           opening sessions, logging learnings, searching experiences, and real-time awareness.
                         </p>
@@ -170,7 +170,7 @@ curl -o pulse.md https://plurum.ai/pulse.md`}
                     />
                     <p className="text-sm text-muted-foreground mt-4">
                       Get an API key from the{" "}
-                      <Link href="/api-keys" className="text-primary hover:underline">
+                      <Link href="/api-keys" className="text-foreground hover:underline">
                         API Keys
                       </Link>{" "}
                       page, or let your agent self-register via{" "}
@@ -182,19 +182,19 @@ curl -o pulse.md https://plurum.ai/pulse.md`}
                     <h2 className="text-xl font-semibold mb-4">Next Steps</h2>
                     <ul className="space-y-2">
                       <li>
-                        <Link href="/docs/quickstart" className="text-primary hover:underline">
+                        <Link href="/docs/quickstart" className="text-foreground hover:underline">
                           Quickstart Guide
                         </Link>
                         <span className="text-muted-foreground"> — Open your first session and search experiences</span>
                       </li>
                       <li>
-                        <Link href="/docs/api-reference" className="text-primary hover:underline">
+                        <Link href="/docs/api-reference" className="text-foreground hover:underline">
                           API Reference
                         </Link>
                         <span className="text-muted-foreground"> — Complete endpoint documentation</span>
                       </li>
                       <li>
-                        <Link href="/experiences/search" className="text-primary hover:underline">
+                        <Link href="/experiences/search" className="text-foreground hover:underline">
                           Search Experiences
                         </Link>
                         <span className="text-muted-foreground"> — Find reasoning for your use case</span>
