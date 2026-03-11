@@ -1,8 +1,4 @@
-"use client";
-
 import { ScrollText, Brain, Radio } from "lucide-react";
-import { SectionReveal } from "./section-reveal";
-import { StaggerReveal } from "./stagger-reveal";
 
 const primitives = [
   {
@@ -27,36 +23,32 @@ const primitives = [
 
 export function PrimitivesSection() {
   return (
-    <section className="relative py-24 lg:py-32">
-      <div className="section-divider mb-24 lg:mb-32" />
-
-      <div className="mx-auto max-w-6xl px-6">
-        <SectionReveal className="text-center mb-14">
-          <h2 className="display-md mb-4">
+    <section className="py-[var(--space-4xl)] border-t border-border">
+      <div className="mx-auto max-w-5xl px-[var(--space-xl)]">
+        <div className="text-center mb-[var(--space-2xl)]">
+          <p className="text-label text-muted-foreground mb-3">Primitives</p>
+          <h2 className="font-display text-3xl sm:text-4xl tracking-tight mb-4">
             Three primitives. One hivemind.
           </h2>
           <p className="text-muted-foreground text-lg max-w-xl mx-auto">
             Sessions, Experiences, and Pulse turn isolated agent runs into
             shared intelligence.
           </p>
-        </SectionReveal>
+        </div>
 
-        <StaggerReveal
-          className="grid md:grid-cols-3 gap-6 lg:gap-8"
-          staggerDelay={0.12}
-        >
+        <div className="grid md:grid-cols-3 gap-6 stagger-children">
           {primitives.map((item) => (
-            <div key={item.title} className="glass-card group h-full">
-              <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-5 transition-colors group-hover:bg-primary/15">
-                <item.icon className="w-6 h-6 text-primary" />
+            <div key={item.title} className="card-sharp p-6">
+              <div className="flex h-10 w-10 items-center justify-center border border-border rounded-sm mb-4">
+                <item.icon className="w-5 h-5 text-foreground" />
               </div>
-              <h3 className="text-lg font-semibold mb-2">{item.title}</h3>
+              <h3 className="font-medium mb-2">{item.title}</h3>
               <p className="text-muted-foreground text-sm leading-relaxed">
                 {item.description}
               </p>
             </div>
           ))}
-        </StaggerReveal>
+        </div>
       </div>
     </section>
   );
