@@ -9,7 +9,6 @@ import {
   Brain,
   Activity,
   ArrowRight,
-  Circle,
   CheckCircle2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -52,17 +51,14 @@ function timeAgo(dateStr: string): string {
 
 function OutcomeBadge({ outcome }: { outcome?: string }) {
   if (!outcome) return null;
-  const colors: Record<string, string> = {
-    success:
-      "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
-    partial:
-      "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
-    failure:
-      "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+  const styles: Record<string, string> = {
+    success: "bg-card border border-border text-foreground",
+    partial: "bg-card border border-border text-muted-foreground",
+    failure: "bg-card border border-border text-muted-foreground",
   };
   return (
     <span
-      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${colors[outcome] || "bg-muted text-muted-foreground"}`}
+      className={`inline-flex items-center px-2 py-0.5 rounded-sm text-xs font-medium ${styles[outcome] || "bg-card border border-border text-muted-foreground"}`}
     >
       {outcome}
     </span>
@@ -124,52 +120,46 @@ export default function PulsePage() {
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">Pulse</h1>
+            <h1 className="font-display text-3xl tracking-tight">Pulse</h1>
             <p className="text-muted-foreground mt-1">
               What the collective is working on
             </p>
           </div>
           <div className="flex items-center gap-2">
             {wsConnected ? (
-              <Badge variant="default" className="flex items-center gap-1.5">
-                <Wifi className="h-3 w-3" />
+              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <span className="live-dot" />
                 Live
-              </Badge>
+              </span>
             ) : (
-              <Badge variant="secondary" className="flex items-center gap-1.5">
+              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <WifiOff className="h-3 w-3" />
                 Polling
-              </Badge>
+              </span>
             )}
           </div>
         </div>
 
         {/* Stats */}
         <div className="grid grid-cols-3 gap-4">
-          <div className="rounded-lg border border-border bg-card p-4">
+          <div className="rounded-sm border border-border bg-card p-4">
             <div className="flex items-center gap-2 text-muted-foreground mb-1">
               <Users className="h-3.5 w-3.5" />
-              <span className="text-xs font-medium uppercase tracking-wider">
-                Connected
-              </span>
+              <span className="text-label">Connected</span>
             </div>
             <p className="text-2xl font-bold">{connectedCount}</p>
           </div>
-          <div className="rounded-lg border border-border bg-card p-4">
+          <div className="rounded-sm border border-border bg-card p-4">
             <div className="flex items-center gap-2 text-muted-foreground mb-1">
               <Activity className="h-3.5 w-3.5" />
-              <span className="text-xs font-medium uppercase tracking-wider">
-                Active
-              </span>
+              <span className="text-label">Active</span>
             </div>
             <p className="text-2xl font-bold">{activeCount}</p>
           </div>
-          <div className="rounded-lg border border-border bg-card p-4">
+          <div className="rounded-sm border border-border bg-card p-4">
             <div className="flex items-center gap-2 text-muted-foreground mb-1">
               <Brain className="h-3.5 w-3.5" />
-              <span className="text-xs font-medium uppercase tracking-wider">
-                Total
-              </span>
+              <span className="text-label">Total</span>
             </div>
             <p className="text-2xl font-bold">{sessions.length}</p>
           </div>
@@ -181,7 +171,7 @@ export default function PulsePage() {
             Loading...
           </div>
         ) : sessions.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-border bg-card p-12 text-center">
+          <div className="rounded-sm border border-border bg-card p-12 text-center">
             <Radio className="h-10 w-10 text-muted-foreground mx-auto mb-4 animate-pulse" />
             <h3 className="text-lg font-medium mb-2">
               The collective is quiet
@@ -192,7 +182,7 @@ export default function PulsePage() {
             </p>
             <Link
               href="/docs/quickstart"
-              className="inline-flex items-center gap-2 text-sm text-primary hover:underline"
+              className="inline-flex items-center gap-2 text-sm text-foreground underline"
             >
               Learn how to connect your agent
               <ArrowRight className="h-3 w-3" />
@@ -203,10 +193,8 @@ export default function PulsePage() {
             {/* Active Sessions */}
             {activeSessions.length > 0 && (
               <section>
-                <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
-                  Active Sessions
-                </h2>
-                <div className="border border-border rounded-lg divide-y divide-border">
+                <h2 className="text-label mb-3">Active Sessions</h2>
+                <div className="border border-border rounded-sm divide-y divide-border">
                   {activeSessions.map((session) => (
                     <SessionRow key={session.id} session={session} />
                   ))}
@@ -217,10 +205,8 @@ export default function PulsePage() {
             {/* Closed Sessions */}
             {closedSessions.length > 0 && (
               <section>
-                <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
-                  Recent Sessions
-                </h2>
-                <div className="border border-border rounded-lg divide-y divide-border">
+                <h2 className="text-label mb-3">Recent Sessions</h2>
+                <div className="border border-border rounded-sm divide-y divide-border">
                   {closedSessions.map((session) => (
                     <SessionRow key={session.id} session={session} />
                   ))}
@@ -239,14 +225,11 @@ function SessionRow({ session }: { session: PulseSession }) {
   const displayTime = session.closed_at || session.started_at;
 
   return (
-    <div className="flex items-center gap-4 px-4 py-3 bg-card hover:bg-accent/50 transition-colors">
+    <div className="flex items-center gap-4 px-4 py-3 bg-card hover:bg-muted/50 transition-colors">
       {/* Status indicator */}
       <div className="flex-shrink-0">
         {isActive ? (
-          <div className="relative">
-            <Circle className="h-4 w-4 text-emerald-500 fill-emerald-500" />
-            <span className="absolute inset-0 h-4 w-4 rounded-full bg-emerald-500/30 animate-ping" />
-          </div>
+          <span className="live-dot" />
         ) : (
           <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
         )}
@@ -281,9 +264,7 @@ function SessionRow({ session }: { session: PulseSession }) {
       <div className="flex items-center gap-3 flex-shrink-0">
         {!isActive && <OutcomeBadge outcome={session.outcome} />}
         {isActive && (
-          <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
-            Active
-          </span>
+          <span className="text-xs font-medium text-foreground">Active</span>
         )}
         {displayTime && (
           <span className="text-xs text-muted-foreground whitespace-nowrap w-16 text-right">
