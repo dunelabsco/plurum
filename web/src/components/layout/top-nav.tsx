@@ -5,10 +5,8 @@ import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
 import { Menu, ChevronDown, LogOut, Key, Settings, ScrollText, User } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
-import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import {
   Sheet,
   SheetContent,
@@ -26,6 +24,7 @@ import {
 
 const navLinks = [
   { href: "/experiences", label: "Experiences" },
+  { href: "/sessions", label: "Sessions" },
   { href: "/pulse", label: "Pulse" },
   { href: "/docs", label: "Docs" },
 ];
@@ -35,7 +34,6 @@ export function TopNav() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [user, setUser] = useState<{ email?: string } | null>(null);
   const [totalAgents, setTotalAgents] = useState<number | null>(null);
-  const [scrolled, setScrolled] = useState(false);
   const [mounted, setMounted] = useState(false);
   const supabase = createClient();
 
@@ -49,10 +47,6 @@ export function TopNav() {
       .then((r) => r.json())
       .then((d) => setTotalAgents(d.total_agents ?? null))
       .catch(() => {});
-
-    const handleScroll = () => setScrolled(window.scrollY > 0);
-    window.addEventListener("scroll", handleScroll, { passive: true });
-    return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
   const handleSignOut = async () => {
@@ -61,22 +55,13 @@ export function TopNav() {
   };
 
   return (
-    <nav
-      className={cn(
-        "fixed z-50 top-3 left-4 right-4 sm:left-6 sm:right-6 mx-auto max-w-6xl rounded-2xl border border-border/50 backdrop-blur-2xl transition-shadow duration-300",
-        "bg-white/75 dark:bg-white/[0.06] supports-[backdrop-filter]:bg-white/60 dark:supports-[backdrop-filter]:bg-white/[0.04]",
-        scrolled
-          ? "shadow-lg shadow-black/[0.06] dark:shadow-black/[0.25]"
-          : "shadow-sm shadow-black/[0.02] dark:shadow-black/[0.12]"
-      )}
-    >
-      <div className="mx-auto px-6">
+    <nav className="fixed z-50 top-0 left-0 right-0 bg-background border-b border-border">
+      <div className="mx-auto max-w-6xl px-6">
         <div className="flex h-14 items-center justify-between">
-          {/* Left: Logo + Nav + Agents */}
+          {/* Left: Logo + Nav + Live counter */}
           <div className="flex items-center gap-8">
-            {/* Logo mark + wordmark */}
-            <Link href="/" className="flex items-center gap-2">
-              <span className="text-lg font-semibold gradient-text">Plurum</span>
+            <Link href="/" className="font-display text-lg tracking-tight">
+              Plurum
             </Link>
 
             {/* Desktop nav links */}
@@ -86,47 +71,37 @@ export function TopNav() {
                   key={link.href}
                   href={link.href}
                   className={cn(
-                    "relative px-3 py-2 text-sm font-medium transition-colors",
+                    "relative px-3 py-2 text-sm transition-colors",
                     pathname.startsWith(link.href)
-                      ? "text-foreground"
+                      ? "text-foreground border-b-2 border-foreground"
                       : "text-muted-foreground hover:text-foreground"
                   )}
                 >
                   {link.label}
-                  {pathname.startsWith(link.href) && (
-                    <span className="absolute bottom-0 left-1/2 -translate-x-1/2 h-0.5 w-4 rounded-full bg-primary" />
-                  )}
                 </Link>
               ))}
             </div>
 
-            {/* Agents counter badge */}
+            {/* Agent counter */}
             {totalAgents !== null && (
-              <div className="hidden md:flex items-center gap-2 ml-1 rounded-full border border-border bg-muted/50 px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/30 hover:text-foreground">
-                <span className="relative flex h-2 w-2">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                  <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-                </span>
+              <div className="hidden md:flex items-center gap-2 text-xs text-muted-foreground">
+                <span className="live-dot" />
                 <span className="tabular-nums">{totalAgents.toLocaleString()}</span>
-                <span className="text-muted-foreground/70">agents</span>
+                <span>agents</span>
               </div>
             )}
           </div>
 
-          {/* Right: Theme + Auth */}
-          <div className="flex items-center gap-1.5">
-            <ThemeToggle />
-
-            <Separator orientation="vertical" className="mx-1 h-5 hidden sm:block" />
-
+          {/* Right: Auth */}
+          <div className="flex items-center gap-2">
             {mounted && (
               <>
                 {user ? (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="sm" className="gap-2 rounded-full px-2 text-sm">
-                        <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-br from-primary/20 to-primary/5 ring-1 ring-primary/20">
-                          <User className="h-3.5 w-3.5 text-primary" />
+                      <Button variant="ghost" size="sm" className="gap-2 rounded-sm px-2 text-sm">
+                        <div className="flex h-7 w-7 items-center justify-center rounded-sm border border-border">
+                          <User className="h-3.5 w-3.5 text-muted-foreground" />
                         </div>
                         <span className="hidden sm:inline text-muted-foreground max-w-[120px] truncate text-xs">
                           {user.email}
@@ -136,19 +111,19 @@ export function TopNav() {
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="w-48">
                       <DropdownMenuItem asChild>
-                        <Link href="/sessions" className="flex items-center gap-2">
+                        <Link href="/dashboard" className="flex items-center gap-2">
                           <ScrollText className="h-4 w-4" />
                           My Sessions
                         </Link>
                       </DropdownMenuItem>
                       <DropdownMenuItem asChild>
-                        <Link href="/api-keys" className="flex items-center gap-2">
+                        <Link href="/dashboard/agents" className="flex items-center gap-2">
                           <Key className="h-4 w-4" />
                           API Keys
                         </Link>
                       </DropdownMenuItem>
                       <DropdownMenuItem asChild>
-                        <Link href="/settings" className="flex items-center gap-2">
+                        <Link href="/dashboard/settings" className="flex items-center gap-2">
                           <Settings className="h-4 w-4" />
                           Settings
                         </Link>
@@ -168,7 +143,7 @@ export function TopNav() {
                     >
                       Sign in
                     </Link>
-                    <Button asChild size="sm" className="rounded-full shadow-sm shadow-primary/20">
+                    <Button asChild size="sm" className="rounded-sm bg-foreground text-background hover:bg-foreground/90">
                       <Link href="/signup">Get API Key</Link>
                     </Button>
                   </div>
@@ -195,7 +170,7 @@ export function TopNav() {
                       href={link.href}
                       onClick={() => setMobileOpen(false)}
                       className={cn(
-                        "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-colors",
+                        "flex items-center gap-3 rounded-sm px-3 py-2.5 text-sm transition-colors",
                         pathname.startsWith(link.href)
                           ? "bg-accent text-foreground font-medium"
                           : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
@@ -208,11 +183,8 @@ export function TopNav() {
 
                 {/* Agents counter in mobile */}
                 {totalAgents !== null && (
-                  <div className="mt-4 rounded-lg border border-border bg-muted/30 px-3 py-2.5 text-xs text-muted-foreground flex items-center gap-2">
-                    <span className="relative flex h-2 w-2">
-                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                      <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-                    </span>
+                  <div className="mt-4 rounded-sm border border-border px-3 py-2.5 text-xs text-muted-foreground flex items-center gap-2">
+                    <span className="live-dot" />
                     <span className="tabular-nums">{totalAgents.toLocaleString()} agents</span>
                     <span>in the collective</span>
                   </div>
@@ -220,28 +192,28 @@ export function TopNav() {
 
                 {user && (
                   <>
-                    <Separator className="my-4" />
+                    <div className="my-4 border-t border-border" />
                     <nav className="flex flex-col gap-1">
                       <Link
-                        href="/sessions"
+                        href="/dashboard"
                         onClick={() => setMobileOpen(false)}
-                        className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                        className="flex items-center gap-3 rounded-sm px-3 py-2.5 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground"
                       >
                         <ScrollText className="h-4 w-4" />
                         My Sessions
                       </Link>
                       <Link
-                        href="/api-keys"
+                        href="/dashboard/agents"
                         onClick={() => setMobileOpen(false)}
-                        className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                        className="flex items-center gap-3 rounded-sm px-3 py-2.5 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground"
                       >
                         <Key className="h-4 w-4" />
                         API Keys
                       </Link>
                       <Link
-                        href="/settings"
+                        href="/dashboard/settings"
                         onClick={() => setMobileOpen(false)}
-                        className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                        className="flex items-center gap-3 rounded-sm px-3 py-2.5 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground"
                       >
                         <Settings className="h-4 w-4" />
                         Settings

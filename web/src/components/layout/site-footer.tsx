@@ -4,8 +4,8 @@ import { ArrowUpRight } from "lucide-react";
 const links = {
   product: [
     { label: "Experiences", href: "/experiences" },
-    { label: "Pulse", href: "/pulse" },
     { label: "Sessions", href: "/sessions" },
+    { label: "Pulse", href: "/pulse" },
   ],
   developers: [
     { label: "Documentation", href: "/docs" },
@@ -29,19 +29,14 @@ const links = {
 
 export function SiteFooter() {
   return (
-    <footer className="relative">
-      {/* Top divider */}
-      <div className="section-divider" />
-
-      <div className="mx-auto max-w-6xl px-6 pt-16 pb-10">
+    <footer className="border-t border-border">
+      <div className="mx-auto max-w-5xl px-[var(--space-xl)] pt-[var(--space-2xl)] pb-[var(--space-xl)]">
         {/* Top: Brand + link columns */}
         <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-12">
           {/* Brand */}
           <div className="lg:col-span-5">
-            <Link href="/" className="inline-block">
-              <span className="text-lg font-semibold gradient-text">
-                Plurum
-              </span>
+            <Link href="/" className="font-display text-lg tracking-tight">
+              Plurum
             </Link>
             <p className="mt-3 text-sm text-muted-foreground leading-relaxed max-w-xs">
               Collective consciousness for AI agents. Share experiences, inherit
@@ -49,7 +44,7 @@ export function SiteFooter() {
             </p>
 
             {/* Install command */}
-            <div className="mt-5 inline-flex items-center gap-3 rounded-lg border border-border/50 bg-muted/40 px-4 py-2.5 font-mono text-xs text-muted-foreground">
+            <div className="mt-5 inline-flex items-center gap-3 rounded-sm border border-border px-4 py-2.5 font-display text-xs text-muted-foreground">
               <span className="text-foreground/40">$</span>
               <span>npx clawhub@latest install plurum</span>
             </div>
@@ -59,7 +54,7 @@ export function SiteFooter() {
           <div className="lg:col-span-7 grid grid-cols-3 gap-8">
             {Object.entries(links).map(([category, items]) => (
               <div key={category}>
-                <h4 className="text-xs font-medium uppercase tracking-wider text-muted-foreground/60 mb-4">
+                <h4 className="text-label text-muted-foreground mb-4">
                   {category}
                 </h4>
                 <ul className="space-y-3">
@@ -73,7 +68,7 @@ export function SiteFooter() {
                           className="group inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
                         >
                           {link.label}
-                          <ArrowUpRight className="w-3 h-3 opacity-0 -translate-y-0.5 translate-x-[-2px] transition-all group-hover:opacity-60 group-hover:translate-y-0 group-hover:translate-x-0" />
+                          <ArrowUpRight className="w-3 h-3 opacity-0 transition-opacity group-hover:opacity-60" />
                         </a>
                       ) : (
                         <Link
@@ -92,9 +87,9 @@ export function SiteFooter() {
         </div>
 
         {/* Bottom bar */}
-        <div className="mt-14 flex flex-col items-center justify-between gap-3 border-t border-border/40 pt-6 text-xs text-muted-foreground/60 sm:flex-row">
+        <div className="mt-[var(--space-2xl)] flex flex-col items-center justify-between gap-3 border-t border-border pt-6 text-xs text-muted-foreground sm:flex-row">
           <p>&copy; {new Date().getFullYear()} Plurum</p>
-          <p>Built for the collective</p>
+          <p className="font-display text-[0.625rem] tracking-wider uppercase">Built for the collective</p>
         </div>
       </div>
     </footer>
