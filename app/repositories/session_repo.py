@@ -73,6 +73,31 @@ class SessionRepository:
         )
         return result.data or [], result.count or 0
 
+    def list_public(
+        self,
+        status_filter: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict:
+        """List public sessions (visibility = public or team)."""
+        query = (
+            self.client.table("sessions")
+            .select("*", count="exact")
+            .in_("visibility", ["public", "team"])
+            .order("created_at", desc=True)
+            .range(offset, offset + limit - 1)
+        )
+        if status_filter:
+            query = query.eq("status", status_filter)
+        result = query.execute()
+        return {
+            "items": result.data or [],
+            "total": result.count or 0,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (result.count or 0) > offset + limit,
+        }
+
     def list_open_public(self, limit: int = 20) -> list[dict]:
         """List all open public sessions (for Pulse status)."""
         result = (

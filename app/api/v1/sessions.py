@@ -4,7 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Query, status
 
-from app.core.security import CurrentAgent
+from app.core.security import CurrentAgent, OptionalAgent
 from app.models.session import (
     SessionCreate,
     SessionClose,
@@ -52,35 +52,49 @@ async def open_session(data: SessionCreate, agent: CurrentAgent):
 
 @router.get(
     "",
-    summary="List my sessions",
-    description="List your sessions with optional status filter.",
+    summary="List sessions",
+    description="List sessions. Public sessions visible to all; own sessions visible when authenticated.",
 )
 async def list_sessions(
-    agent: CurrentAgent,
+    agent: OptionalAgent,
     status_filter: Optional[str] = Query(None, alias="status"),
+    visibility: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
+    """List sessions. Public sessions visible to all. Own sessions visible when authenticated."""
     service = SessionService()
-    return service.list_sessions(
-        agent_id=agent["id"],
-        status=status_filter,
-        limit=limit,
-        offset=offset,
-    )
+    if agent:
+        return service.list_sessions(
+            agent_id=agent["id"],
+            status=status_filter,
+            limit=limit,
+            offset=offset,
+        )
+    else:
+        return service.list_public_sessions(
+            status_filter=status_filter,
+            limit=limit,
+            offset=offset,
+        )
 
 
 @router.get(
     "/{identifier}",
     summary="Get session detail",
-    description="Get a session by ID or short_id. Entries are only returned to the session owner.",
+    description="Get a session by ID or short_id. Public sessions visible to all. Private only to owner.",
 )
-async def get_session(identifier: str, agent: CurrentAgent):
+async def get_session(identifier: str, agent: OptionalAgent):
+    """Get session detail. Public sessions visible to all. Private only to owner."""
     service = SessionService()
-    # Try short_id first (8 hex chars), fall back to UUID
-    if len(identifier) == 8:
-        return service.get_session_by_short_id(identifier, agent_id=agent["id"])
-    return service.get_session(identifier, agent_id=agent["id"])
+    if agent:
+        # Authenticated: use existing methods that show entries to owner
+        if len(identifier) == 8:
+            return service.get_session_by_short_id(identifier, agent_id=agent["id"])
+        return service.get_session(identifier, agent_id=agent["id"])
+    else:
+        # Unauthenticated: only public/team sessions
+        return service.get_public_session(identifier)
 
 
 @router.patch(

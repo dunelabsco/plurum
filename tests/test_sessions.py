@@ -1,10 +1,10 @@
-"""Tests for session endpoints — all auth-required."""
+"""Tests for session endpoints."""
 
 from unittest.mock import MagicMock, patch
 
 
 class TestSessionAuthRequired:
-    """All session endpoints require authentication."""
+    """Write endpoints still require authentication."""
 
     def test_open_session_no_auth(self, client):
         """Open session requires auth."""
@@ -17,15 +17,51 @@ class TestSessionAuthRequired:
         )
         assert response.status_code == 401
 
-    def test_list_sessions_no_auth(self, client):
-        """List sessions requires auth."""
-        response = client.get("/api/v1/sessions")
-        assert response.status_code == 401
+    def test_list_sessions_no_auth_returns_public(self, client, mock_supabase):
+        """List sessions without auth returns public sessions."""
+        with patch("app.services.session_service.SessionService.list_public_sessions") as mock_list:
+            mock_list.return_value = {"items": [], "total": 0, "limit": 20, "offset": 0, "has_more": False}
+            response = client.get("/api/v1/sessions")
+        assert response.status_code == 200
 
-    def test_get_session_no_auth(self, client):
-        """Get session requires auth."""
-        response = client.get("/api/v1/sessions/Ab3xKp9z")
-        assert response.status_code == 401
+    def test_get_session_no_auth_returns_public(self, client, mock_supabase):
+        """Get public session without auth succeeds."""
+        with patch("app.services.session_service.SessionService.get_public_session") as mock_get:
+            mock_get.return_value = {
+                "id": "test-id", "short_id": "Ab3xKp9z", "topic": "test",
+                "status": "open", "visibility": "public", "entries": []
+            }
+            response = client.get("/api/v1/sessions/Ab3xKp9z")
+        assert response.status_code == 200
+
+
+class TestPublicSessionAccess:
+    """Tests for unauthenticated session browsing."""
+
+    def test_list_public_sessions_no_auth(self, client, mock_supabase):
+        """List public sessions without authentication."""
+        with patch("app.services.session_service.SessionService.list_public_sessions") as mock_list:
+            mock_list.return_value = {"items": [], "total": 0, "limit": 20, "offset": 0, "has_more": False}
+            response = client.get("/api/v1/sessions?visibility=public")
+        assert response.status_code == 200
+
+    def test_get_public_session_no_auth(self, client, mock_supabase):
+        """View a public session without authentication."""
+        with patch("app.services.session_service.SessionService.get_public_session") as mock_get:
+            mock_get.return_value = {
+                "id": "test-id", "short_id": "abc12345", "topic": "test",
+                "status": "open", "visibility": "public", "entries": []
+            }
+            response = client.get("/api/v1/sessions/abc12345")
+        assert response.status_code == 200
+
+    def test_get_private_session_no_auth_rejected(self, client, mock_supabase):
+        """Cannot view a private session without authentication."""
+        with patch("app.services.session_service.SessionService.get_public_session") as mock_get:
+            from app.core.exceptions import NotFoundError
+            mock_get.side_effect = NotFoundError("Session", "private123")
+            response = client.get("/api/v1/sessions/private123")
+        assert response.status_code == 404
 
 
 class TestSessionOperations:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from app.core.exceptions import AuthorizationError, ValidationError
+from app.core.exceptions import AuthorizationError, NotFoundError, ValidationError
 from app.repositories.session_repo import SessionRepository
 from app.repositories.experience_repo import ExperienceRepository
 from app.services.embedding_service import get_embedding_service
@@ -162,6 +162,34 @@ class SessionService:
         else:
             session["entries"] = []
 
+        return session
+
+    def list_public_sessions(
+        self,
+        status_filter: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict:
+        """List public sessions (no auth required)."""
+        return self.session_repo.list_public(
+            status_filter=status_filter,
+            limit=limit,
+            offset=offset,
+        )
+
+    def get_public_session(self, identifier: str) -> dict:
+        """Get a public session by ID or short_id. Raises NotFoundError for private sessions."""
+        if len(identifier) == 8:
+            session = self.session_repo.get_by_short_id(identifier)
+        else:
+            session = self.session_repo.get_by_id(identifier)
+
+        # Only private is restricted. Public and team are both visible.
+        if session.get("visibility") == "private":
+            raise NotFoundError("Session", identifier)
+
+        entries = self.session_repo.list_entries(session["id"])
+        session["entries"] = entries
         return session
 
     def list_sessions(
