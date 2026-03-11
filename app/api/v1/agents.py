@@ -5,7 +5,11 @@ from fastapi import APIRouter, Request, status
 from app.core.security import CurrentAgent, CurrentUser
 from app.core.rate_limiter import limiter
 from app.services.agent_service import AgentService
-from app.models.agent import AgentCreate, AgentUpdate, AgentPublic, AgentRegisterResponse
+from app.models.agent import (
+    AgentCreate, AgentUpdate, AgentPublic, AgentRegisterResponse,
+    AgentClaimRequest, AgentClaimResponse, AgentReleaseResponse,
+    AgentOverviewResponse,
+)
 
 router = APIRouter(prefix="/agents", tags=["Agents"])
 
@@ -91,6 +95,13 @@ async def list_my_agents(user: CurrentUser):
     return service.list_by_owner(user["id"])
 
 
+@router.get("/me/overview", status_code=status.HTTP_200_OK)
+async def get_overview(user: CurrentUser):
+    """Get dashboard overview for human user's agents."""
+    service = AgentService()
+    return service.get_overview(user["id"])
+
+
 @router.post(
     "/me/rotate-key",
     response_model=AgentRegisterResponse,
@@ -101,6 +112,23 @@ async def rotate_api_key(agent: CurrentAgent):
     """Rotate the current agent's API key."""
     service = AgentService()
     return service.rotate_api_key(agent["id"])
+
+
+@router.post("/claim", status_code=status.HTTP_200_OK)
+@limiter.limit("10/hour")
+async def claim_agent(request: Request, data: AgentClaimRequest, user: CurrentUser):
+    """Claim an unclaimed agent using its API key."""
+    service = AgentService()
+    agent = service.claim_agent(data.api_key, user["id"])
+    return {
+        "id": agent["id"],
+        "name": agent["name"],
+        "username": agent.get("username"),
+        "api_key_prefix": agent.get("api_key_prefix", ""),
+        "is_active": agent.get("is_active", True),
+        "owner_user_id": agent.get("owner_user_id"),
+        "message": "Agent claimed successfully.",
+    }
 
 
 @router.patch(
@@ -118,3 +146,26 @@ async def update_agent(agent_id: str, data: AgentUpdate, user: CurrentUser):
     """Update an agent's profile."""
     service = AgentService()
     return service.update(agent_id, data, owner_user_id=user["id"])
+
+
+@router.post("/{agent_id}/release", status_code=status.HTTP_200_OK)
+async def release_agent(agent_id: str, user: CurrentUser):
+    """Release a claimed agent back to unclaimed state."""
+    service = AgentService()
+    from uuid import UUID
+    agent = service.release_agent(UUID(agent_id), user["id"])
+    return {
+        "id": agent["id"],
+        "name": agent["name"],
+        "username": agent.get("username"),
+        "message": "Agent released successfully.",
+    }
+
+
+@router.post("/{agent_id}/rotate-key", status_code=status.HTTP_200_OK)
+async def rotate_agent_key_as_owner(agent_id: str, user: CurrentUser):
+    """Rotate an agent's API key as its human owner."""
+    service = AgentService()
+    from uuid import UUID
+    result = service.rotate_api_key_as_owner(UUID(agent_id), user["id"])
+    return result
