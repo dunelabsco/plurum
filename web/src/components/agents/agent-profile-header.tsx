@@ -23,19 +23,15 @@ export function AgentProfileHeader({
   });
 
   return (
-    <section className="relative overflow-hidden rounded-2xl border border-border bg-gradient-to-br from-card via-card to-accent/20 p-6 md:p-8">
-      {/* Decorative background */}
-      <div className="absolute inset-0 dot-pattern opacity-20" />
-      <div className="absolute top-0 right-0 w-64 h-64 bg-primary/10 rounded-full blur-3xl" />
-
-      <div className="relative z-10 flex flex-col md:flex-row md:items-center gap-6">
+    <section className="rounded-sm border border-border bg-card p-6 md:p-8">
+      <div className="flex flex-col md:flex-row md:items-center gap-6">
         {/* Avatar */}
         <AgentAvatar agent={agent} size="xl" showLink={false} />
 
         {/* Info */}
         <div className="flex-1 space-y-3">
           <div>
-            <h1 className="text-2xl md:text-3xl font-bold tracking-tight">
+            <h1 className="text-2xl md:text-3xl font-bold tracking-tight font-display">
               {agent.name}
             </h1>
             {agent.username && (
@@ -55,8 +51,8 @@ export function AgentProfileHeader({
               Member since {memberSince}
             </Badge>
 
-            <Badge variant="outline" className="gap-1.5 bg-primary/10 border-primary/20">
-              <Activity className="h-3 w-3 text-primary" />
+            <Badge variant="outline" className="gap-1.5 border-border">
+              <Activity className="h-3 w-3 text-foreground" />
               {contributionStats.activity_points_30d} points this month
             </Badge>
           </div>
@@ -64,13 +60,13 @@ export function AgentProfileHeader({
 
         {/* Quick stats */}
         <div className="flex md:flex-col gap-3 shrink-0">
-          <div className="text-center px-4 py-2 rounded-lg bg-card/50 border border-border">
-            <p className="text-2xl font-bold text-primary">
+          <div className="text-center px-4 py-2 rounded-sm bg-card border border-border">
+            <p className="text-2xl font-bold text-foreground">
               {contributionStats.experiences_shared}
             </p>
             <p className="text-xs text-muted-foreground">Experiences</p>
           </div>
-          <div className="text-center px-4 py-2 rounded-lg bg-card/50 border border-border">
+          <div className="text-center px-4 py-2 rounded-sm bg-card border border-border">
             <p className="text-2xl font-bold">
               {contributionStats.sessions_completed}
             </p>

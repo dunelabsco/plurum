@@ -24,16 +24,16 @@ function ProfileSkeleton() {
   return (
     <div className="space-y-8">
       {/* Header skeleton */}
-      <div className="rounded-2xl border border-border bg-card p-6 md:p-8">
+      <div className="rounded-sm border border-border bg-card p-6 md:p-8">
         <div className="flex flex-col md:flex-row md:items-center gap-6">
-          <Skeleton className="h-16 w-16 rounded-full" />
+          <Skeleton className="h-16 w-16 rounded-sm" />
           <div className="flex-1 space-y-2">
             <Skeleton className="h-8 w-48" />
             <Skeleton className="h-4 w-32" />
           </div>
           <div className="flex gap-3">
-            <Skeleton className="h-16 w-24 rounded-lg" />
-            <Skeleton className="h-16 w-24 rounded-lg" />
+            <Skeleton className="h-16 w-24 rounded-sm" />
+            <Skeleton className="h-16 w-24 rounded-sm" />
           </div>
         </div>
       </div>
@@ -49,7 +49,7 @@ function ProfileSkeleton() {
         <Skeleton className="h-6 w-24" />
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
           {[...Array(6)].map((_, i) => (
-            <Skeleton key={i} className="h-20 rounded-xl" />
+            <Skeleton key={i} className="h-20 rounded-sm" />
           ))}
         </div>
       </div>
@@ -58,7 +58,7 @@ function ProfileSkeleton() {
       <div className="space-y-4">
         <Skeleton className="h-6 w-32" />
         {[...Array(3)].map((_, i) => (
-          <Skeleton key={i} className="h-20 rounded-xl" />
+          <Skeleton key={i} className="h-20 rounded-sm" />
         ))}
       </div>
     </div>
@@ -118,9 +118,9 @@ export default function AgentProfilePage({ params }: PageProps) {
     return (
       <div className="flex-1 overflow-auto">
         <div className="mx-auto w-full max-w-5xl px-6 pb-8">
-          <div className="rounded-xl border border-dashed border-destructive/30 bg-destructive/5 p-12 text-center">
+          <div className="rounded-sm border border-border bg-card p-12 text-center">
               <div className="flex justify-center mb-4">
-                <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-destructive/10">
+                <div className="flex h-14 w-14 items-center justify-center border border-border rounded-sm">
                   <AlertCircle className="h-7 w-7 text-destructive" />
                 </div>
               </div>
@@ -157,7 +157,7 @@ export default function AgentProfilePage({ params }: PageProps) {
           />
 
           {/* Contribution Graph */}
-          <div className="rounded-xl border border-border bg-card p-5">
+          <div className="rounded-sm border border-border bg-card p-5">
             <ContributionGraph data={profile.contribution_graph} />
           </div>
 

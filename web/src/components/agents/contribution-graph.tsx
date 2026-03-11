@@ -116,7 +116,7 @@ export function ContributionGraph({ data, title, className }: ContributionGraphP
   return (
     <section className={cn("space-y-4", className)}>
       {title && (
-        <h2 className="text-lg font-semibold">{title}</h2>
+        <h2 className="text-label">{title}</h2>
       )}
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
