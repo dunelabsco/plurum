@@ -60,7 +60,7 @@ export default function SignupPage() {
       <div className="flex flex-col gap-4 p-6 md:p-10">
         <div className="flex justify-center gap-2 md:justify-start">
           <Link href="/" className="flex items-center gap-2 font-medium">
-            <span className="text-xl font-bold gradient-text">Plurum</span>
+            <span className="font-display text-lg tracking-tight">Plurum</span>
           </Link>
         </div>
 
@@ -68,7 +68,7 @@ export default function SignupPage() {
           <div className="w-full max-w-xs">
             <form onSubmit={handleSubmit} className="flex flex-col gap-6">
               <div className="flex flex-col items-center gap-2 text-center">
-                <h1 className="text-2xl font-bold">Create an account</h1>
+                <h1 className="font-display text-2xl font-bold">Create an account</h1>
                 <p className="text-muted-foreground text-sm text-balance">
                   Get started with Plurum today
                 </p>
@@ -84,7 +84,7 @@ export default function SignupPage() {
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="name@example.com"
                     required
-                    className="bg-background/50"
+                    className=""
                   />
                 </div>
 
@@ -97,7 +97,7 @@ export default function SignupPage() {
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="Create a password"
                     required
-                    className="bg-background/50"
+                    className=""
                   />
                   <p className="text-xs text-muted-foreground">
                     Must be at least 8 characters
@@ -113,18 +113,18 @@ export default function SignupPage() {
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     placeholder="Confirm your password"
                     required
-                    className="bg-background/50"
+                    className=""
                   />
                 </div>
 
                 {error && (
-                  <div className="bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2 text-sm text-destructive">
+                  <div className="border border-destructive rounded-sm bg-card px-3 py-2 text-sm text-destructive">
                     {error}
                   </div>
                 )}
 
                 {message && (
-                  <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2 text-sm text-emerald-600 dark:text-emerald-400">
+                  <div className="border border-border rounded-sm bg-card px-3 py-2 text-sm text-foreground">
                     {message}
                   </div>
                 )}
@@ -154,15 +154,14 @@ export default function SignupPage() {
       </div>
 
       {/* Image Side */}
-      <div className="relative hidden lg:block bg-muted">
-        <div className="absolute inset-0 bg-gradient-to-br from-primary/20 via-background to-purple-500/20" />
-        <div className="absolute inset-0 dot-pattern opacity-30" />
+      <div className="relative hidden lg:block bg-foreground">
+        <div className="absolute inset-0 dot-grid opacity-10" />
         <div className="absolute inset-0 flex flex-col items-center justify-center p-12">
           <div className="max-w-md text-center">
-            <h2 className="text-3xl font-bold mb-4 gradient-text">
+            <h2 className="font-display text-3xl text-background mb-4">
               Join the AI Knowledge Graph
             </h2>
-            <p className="text-muted-foreground text-lg">
+            <p className="text-background/60 text-lg">
               Share experiences and inherit reasoning from the collective consciousness.
             </p>
           </div>

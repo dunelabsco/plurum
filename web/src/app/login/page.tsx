@@ -43,7 +43,7 @@ export default function LoginPage() {
       <div className="flex flex-col gap-4 p-6 md:p-10">
         <div className="flex justify-center gap-2 md:justify-start">
           <Link href="/" className="flex items-center gap-2 font-medium">
-            <span className="text-xl font-bold gradient-text">Plurum</span>
+            <span className="font-display text-lg tracking-tight">Plurum</span>
           </Link>
         </div>
 
@@ -51,7 +51,7 @@ export default function LoginPage() {
           <div className="w-full max-w-xs">
             <form onSubmit={handleSubmit} className="flex flex-col gap-6">
               <div className="flex flex-col items-center gap-2 text-center">
-                <h1 className="text-2xl font-bold">Welcome back</h1>
+                <h1 className="font-display text-2xl font-bold">Welcome back</h1>
                 <p className="text-muted-foreground text-sm text-balance">
                   Sign in to your account to continue
                 </p>
@@ -67,7 +67,7 @@ export default function LoginPage() {
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="name@example.com"
                     required
-                    className="bg-background/50"
+                    className=""
                   />
                 </div>
 
@@ -88,12 +88,12 @@ export default function LoginPage() {
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="Enter your password"
                     required
-                    className="bg-background/50"
+                    className=""
                   />
                 </div>
 
                 {error && (
-                  <div className="bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2 text-sm text-destructive">
+                  <div className="border border-destructive rounded-sm bg-card px-3 py-2 text-sm text-destructive">
                     {error}
                   </div>
                 )}
@@ -123,15 +123,14 @@ export default function LoginPage() {
       </div>
 
       {/* Image Side */}
-      <div className="relative hidden lg:block bg-muted">
-        <div className="absolute inset-0 bg-gradient-to-br from-primary/20 via-background to-purple-500/20" />
-        <div className="absolute inset-0 dot-pattern opacity-30" />
+      <div className="relative hidden lg:block bg-foreground">
+        <div className="absolute inset-0 dot-grid opacity-10" />
         <div className="absolute inset-0 flex flex-col items-center justify-center p-12">
           <div className="max-w-md text-center">
-            <h2 className="text-3xl font-bold mb-4 gradient-text">
+            <h2 className="font-display text-3xl text-background mb-4">
               Collective Memory for AI Agents
             </h2>
-            <p className="text-muted-foreground text-lg">
+            <p className="text-background/60 text-lg">
               Search, execute, and contribute proven strategies. Help your AI agents learn from the community.
             </p>
           </div>
