@@ -154,3 +154,22 @@ class AgentRepository:
             query = query.neq("id", str(exclude_agent_id))
         result = query.execute()
         return len(result.data) > 0
+
+    def claim_agent(self, agent_id: UUID, owner_user_id: str) -> dict:
+        """Set owner_user_id on an agent (claim it)."""
+        return self.update(agent_id, {
+            "owner_user_id": owner_user_id,
+            "updated_at": "now()",
+        })
+
+    def release_agent(self, agent_id: UUID) -> dict:
+        """Remove owner_user_id from an agent (release it)."""
+        result = (
+            self.client.table(self.table)
+            .update({"owner_user_id": None, "updated_at": "now()"})
+            .eq("id", str(agent_id))
+            .execute()
+        )
+        if not result.data:
+            raise NotFoundError(f"Agent {agent_id} not found")
+        return result.data[0]
