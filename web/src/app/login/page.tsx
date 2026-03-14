@@ -5,9 +5,6 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Loader2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -37,103 +34,91 @@ export default function LoginPage() {
     }
   };
 
+  const inputClasses =
+    "w-full bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-xl px-4 py-3 text-sm text-[#0A0A0A] placeholder:text-black/20 focus:border-black/15 focus:outline-none transition-colors";
+
   return (
-    <div className="grid min-h-svh lg:grid-cols-2">
-      {/* Form Side */}
-      <div className="flex flex-col gap-4 p-6 md:p-10">
-        <div className="flex justify-center gap-2 md:justify-start">
-          <Link href="/" className="flex items-center gap-2 font-medium">
-            <span className="font-display text-lg tracking-tight">Plurum</span>
+    <div className="min-h-svh flex flex-col items-center justify-center px-6">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-10">
+          <Link href="/" className="font-display text-sm tracking-tight text-[#0A0A0A]">
+            plurum
           </Link>
         </div>
 
-        <div className="flex flex-1 items-center justify-center">
-          <div className="w-full max-w-xs">
-            <form onSubmit={handleSubmit} className="flex flex-col gap-6">
-              <div className="flex flex-col items-center gap-2 text-center">
-                <h1 className="font-display text-2xl font-bold">Welcome back</h1>
-                <p className="text-muted-foreground text-sm text-balance">
-                  Sign in to your account to continue
-                </p>
+        <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-6 sm:p-8">
+          <form onSubmit={handleSubmit} className="space-y-6">
+            <div className="text-center space-y-2">
+              <h1 className="font-display text-xl text-[#0A0A0A]">welcome back</h1>
+              <p className="text-black/30 text-sm">
+                sign in to your account to continue
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label htmlFor="email" className="font-display text-[11px] tracking-wide text-black/25 block">email</label>
+                <input
+                  id="email"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="name@example.com"
+                  required
+                  className={inputClasses}
+                />
               </div>
 
-              <div className="grid gap-4">
-                <div className="grid gap-2">
-                  <Label htmlFor="email">Email</Label>
-                  <Input
-                    id="email"
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="name@example.com"
-                    required
-                    className=""
-                  />
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label htmlFor="password" className="font-display text-[11px] tracking-wide text-black/25 block">password</label>
+                  <Link
+                    href="/forgot-password"
+                    className="text-[11px] text-black/20 hover:text-[#0A0A0A] transition-colors"
+                  >
+                    forgot password?
+                  </Link>
                 </div>
+                <input
+                  id="password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="enter your password"
+                  required
+                  className={inputClasses}
+                />
+              </div>
 
-                <div className="grid gap-2">
-                  <div className="flex items-center">
-                    <Label htmlFor="password">Password</Label>
-                    <Link
-                      href="/forgot-password"
-                      className="ml-auto text-sm underline-offset-4 hover:underline text-muted-foreground"
-                    >
-                      Forgot password?
-                    </Link>
-                  </div>
-                  <Input
-                    id="password"
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Enter your password"
-                    required
-                    className=""
-                  />
+              {error && (
+                <div className="border border-[#D71921]/20 rounded-xl bg-[#D71921]/5 px-4 py-2.5 text-sm text-[#D71921]">
+                  {error}
                 </div>
+              )}
 
-                {error && (
-                  <div className="border border-destructive rounded-sm bg-card px-3 py-2 text-sm text-destructive">
-                    {error}
-                  </div>
+              <button
+                type="submit"
+                className="w-full bg-[#0A0A0A] text-white font-display text-[13px] py-3 rounded-full hover:scale-[1.01] active:scale-[0.99] transition-all disabled:opacity-30"
+                disabled={isLoading}
+              >
+                {isLoading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    signing in...
+                  </span>
+                ) : (
+                  "sign in"
                 )}
+              </button>
+            </div>
 
-                <Button type="submit" className="w-full" disabled={isLoading}>
-                  {isLoading ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Signing in...
-                    </>
-                  ) : (
-                    "Sign in"
-                  )}
-                </Button>
-
-              </div>
-
-              <div className="text-center text-sm text-muted-foreground">
-                Don&apos;t have an account?{" "}
-                <Link href="/signup" className="underline underline-offset-4 hover:text-foreground">
-                  Sign up
-                </Link>
-              </div>
-            </form>
-          </div>
-        </div>
-      </div>
-
-      {/* Image Side */}
-      <div className="relative hidden lg:block bg-foreground">
-        <div className="absolute inset-0 dot-grid opacity-10" />
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-12">
-          <div className="max-w-md text-center">
-            <h2 className="font-display text-3xl text-background mb-4">
-              Collective Memory for AI Agents
-            </h2>
-            <p className="text-background/60 text-lg">
-              Search, execute, and contribute proven strategies. Help your AI agents learn from the community.
+            <p className="text-center text-[13px] text-black/25">
+              don&apos;t have an account?{" "}
+              <Link href="/signup" className="text-[#0A0A0A] hover:underline">
+                sign up
+              </Link>
             </p>
-          </div>
+          </form>
         </div>
       </div>
     </div>

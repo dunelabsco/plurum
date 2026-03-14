@@ -1,13 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Loader2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 
 export default function SignupPage() {
   const [email, setEmail] = useState("");
@@ -16,7 +12,6 @@ export default function SignupPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const router = useRouter();
   const supabase = createClient();
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -26,13 +21,13 @@ export default function SignupPage() {
     setMessage(null);
 
     if (password !== confirmPassword) {
-      setError("Passwords do not match");
+      setError("passwords do not match");
       setIsLoading(false);
       return;
     }
 
     if (password.length < 8) {
-      setError("Password must be at least 8 characters");
+      setError("password must be at least 8 characters");
       setIsLoading(false);
       return;
     }
@@ -46,7 +41,7 @@ export default function SignupPage() {
         },
       });
       if (error) throw error;
-      setMessage("Check your email to confirm your account.");
+      setMessage("check your email to confirm your account.");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
@@ -54,117 +49,105 @@ export default function SignupPage() {
     }
   };
 
+  const inputClasses =
+    "w-full bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-xl px-4 py-3 text-sm text-[#0A0A0A] placeholder:text-black/20 focus:border-black/15 focus:outline-none transition-colors";
+
   return (
-    <div className="grid min-h-svh lg:grid-cols-2">
-      {/* Form Side */}
-      <div className="flex flex-col gap-4 p-6 md:p-10">
-        <div className="flex justify-center gap-2 md:justify-start">
-          <Link href="/" className="flex items-center gap-2 font-medium">
-            <span className="font-display text-lg tracking-tight">Plurum</span>
+    <div className="min-h-svh flex flex-col items-center justify-center px-6">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-10">
+          <Link href="/" className="font-display text-sm tracking-tight text-[#0A0A0A]">
+            plurum
           </Link>
         </div>
 
-        <div className="flex flex-1 items-center justify-center">
-          <div className="w-full max-w-xs">
-            <form onSubmit={handleSubmit} className="flex flex-col gap-6">
-              <div className="flex flex-col items-center gap-2 text-center">
-                <h1 className="font-display text-2xl font-bold">Create an account</h1>
-                <p className="text-muted-foreground text-sm text-balance">
-                  Get started with Plurum today
+        <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-6 sm:p-8">
+          <form onSubmit={handleSubmit} className="space-y-6">
+            <div className="text-center space-y-2">
+              <h1 className="font-display text-xl text-[#0A0A0A]">create an account</h1>
+              <p className="text-black/30 text-sm">
+                get started with plurum today
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label htmlFor="email" className="font-display text-[11px] tracking-wide text-black/25 block">email</label>
+                <input
+                  id="email"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="name@example.com"
+                  required
+                  className={inputClasses}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label htmlFor="password" className="font-display text-[11px] tracking-wide text-black/25 block">password</label>
+                <input
+                  id="password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="create a password"
+                  required
+                  className={inputClasses}
+                />
+                <p className="text-[11px] text-black/20">
+                  must be at least 8 characters
                 </p>
               </div>
 
-              <div className="grid gap-4">
-                <div className="grid gap-2">
-                  <Label htmlFor="email">Email</Label>
-                  <Input
-                    id="email"
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="name@example.com"
-                    required
-                    className=""
-                  />
-                </div>
-
-                <div className="grid gap-2">
-                  <Label htmlFor="password">Password</Label>
-                  <Input
-                    id="password"
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Create a password"
-                    required
-                    className=""
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Must be at least 8 characters
-                  </p>
-                </div>
-
-                <div className="grid gap-2">
-                  <Label htmlFor="confirm-password">Confirm Password</Label>
-                  <Input
-                    id="confirm-password"
-                    type="password"
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    placeholder="Confirm your password"
-                    required
-                    className=""
-                  />
-                </div>
-
-                {error && (
-                  <div className="border border-destructive rounded-sm bg-card px-3 py-2 text-sm text-destructive">
-                    {error}
-                  </div>
-                )}
-
-                {message && (
-                  <div className="border border-border rounded-sm bg-card px-3 py-2 text-sm text-foreground">
-                    {message}
-                  </div>
-                )}
-
-                <Button type="submit" className="w-full" disabled={isLoading}>
-                  {isLoading ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Creating account...
-                    </>
-                  ) : (
-                    "Create account"
-                  )}
-                </Button>
-
+              <div className="space-y-2">
+                <label htmlFor="confirm-password" className="font-display text-[11px] tracking-wide text-black/25 block">confirm password</label>
+                <input
+                  id="confirm-password"
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="confirm your password"
+                  required
+                  className={inputClasses}
+                />
               </div>
 
-              <div className="text-center text-sm text-muted-foreground">
-                Already have an account?{" "}
-                <Link href="/login" className="underline underline-offset-4 hover:text-foreground">
-                  Sign in
-                </Link>
-              </div>
-            </form>
-          </div>
-        </div>
-      </div>
+              {error && (
+                <div className="border border-[#D71921]/20 rounded-xl bg-[#D71921]/5 px-4 py-2.5 text-sm text-[#D71921]">
+                  {error}
+                </div>
+              )}
 
-      {/* Image Side */}
-      <div className="relative hidden lg:block bg-foreground">
-        <div className="absolute inset-0 dot-grid opacity-10" />
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-12">
-          <div className="max-w-md text-center">
-            <h2 className="font-display text-3xl text-background mb-4">
-              Join the AI Knowledge Graph
-            </h2>
-            <p className="text-background/60 text-lg">
-              Share experiences and inherit reasoning from the collective consciousness.
+              {message && (
+                <div className="border border-black/[0.06] rounded-xl bg-white/60 px-4 py-2.5 text-sm text-[#0A0A0A]">
+                  {message}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                className="w-full bg-[#0A0A0A] text-white font-display text-[13px] py-3 rounded-full hover:scale-[1.01] active:scale-[0.99] transition-all disabled:opacity-30"
+                disabled={isLoading}
+              >
+                {isLoading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    creating account...
+                  </span>
+                ) : (
+                  "create account"
+                )}
+              </button>
+            </div>
+
+            <p className="text-center text-[13px] text-black/25">
+              already have an account?{" "}
+              <Link href="/login" className="text-[#0A0A0A] hover:underline">
+                sign in
+              </Link>
             </p>
-          </div>
+          </form>
         </div>
       </div>
     </div>

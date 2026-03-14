@@ -4,8 +4,6 @@ import { useEffect, useState, use } from "react";
 import Link from "next/link";
 import { ArrowLeft, AlertCircle, Share2 } from "lucide-react";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 import { getAgentProfile } from "@/lib/api";
 import {
   AgentProfileHeader,
@@ -22,45 +20,17 @@ interface PageProps {
 
 function ProfileSkeleton() {
   return (
-    <div className="space-y-8">
-      {/* Header skeleton */}
-      <div className="rounded-sm border border-border bg-card p-6 md:p-8">
-        <div className="flex flex-col md:flex-row md:items-center gap-6">
-          <Skeleton className="h-16 w-16 rounded-sm" />
-          <div className="flex-1 space-y-2">
-            <Skeleton className="h-8 w-48" />
-            <Skeleton className="h-4 w-32" />
-          </div>
-          <div className="flex gap-3">
-            <Skeleton className="h-16 w-24 rounded-sm" />
-            <Skeleton className="h-16 w-24 rounded-sm" />
-          </div>
-        </div>
-      </div>
-
-      {/* Graph skeleton */}
-      <div className="space-y-4">
-        <Skeleton className="h-4 w-64" />
-        <Skeleton className="h-24 w-full rounded-lg" />
-      </div>
-
-      {/* Stats skeleton */}
-      <div className="space-y-4">
-        <Skeleton className="h-6 w-24" />
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-          {[...Array(6)].map((_, i) => (
-            <Skeleton key={i} className="h-20 rounded-sm" />
-          ))}
-        </div>
-      </div>
-
-      {/* Experiences skeleton */}
-      <div className="space-y-4">
-        <Skeleton className="h-6 w-32" />
-        {[...Array(3)].map((_, i) => (
-          <Skeleton key={i} className="h-20 rounded-sm" />
+    <div className="space-y-8 pt-8">
+      <div className="bg-white/30 rounded-2xl h-32 animate-pulse" />
+      <div className="bg-white/30 rounded-2xl h-24 animate-pulse" />
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+        {[...Array(6)].map((_, i) => (
+          <div key={i} className="bg-white/30 rounded-2xl h-20 animate-pulse" />
         ))}
       </div>
+      {[...Array(3)].map((_, i) => (
+        <div key={i} className="bg-white/30 rounded-2xl h-20 animate-pulse" />
+      ))}
     </div>
   );
 }
@@ -105,72 +75,66 @@ export default function AgentProfilePage({ params }: PageProps) {
   };
 
   if (isLoading) {
-    return (
-      <div className="flex-1 overflow-auto">
-        <div className="mx-auto w-full max-w-5xl px-6 pb-8">
-          <ProfileSkeleton />
-        </div>
-      </div>
-    );
+    return <ProfileSkeleton />;
   }
 
   if (error || !profile) {
     return (
-      <div className="flex-1 overflow-auto">
-        <div className="mx-auto w-full max-w-5xl px-6 pb-8">
-          <div className="rounded-sm border border-border bg-card p-12 text-center">
-              <div className="flex justify-center mb-4">
-                <div className="flex h-14 w-14 items-center justify-center border border-border rounded-sm">
-                  <AlertCircle className="h-7 w-7 text-destructive" />
-                </div>
-              </div>
-              <h3 className="text-lg font-medium mb-2">Profile not found</h3>
-              <p className="text-muted-foreground mb-6 max-w-sm mx-auto">
-                {error || "This agent profile doesn't exist or has been removed."}
-              </p>
-              <Button asChild>
-                <Link href="/experiences">
-                  <ArrowLeft className="mr-2 h-4 w-4" />
-                  Back to Experiences
-                </Link>
-              </Button>
+      <div className="pt-8">
+        <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-12 text-center">
+          <div className="flex justify-center mb-4">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[#D71921]/10">
+              <AlertCircle className="h-6 w-6 text-[#D71921]" strokeWidth={1.5} />
+            </div>
           </div>
+          <h3 className="font-display text-base text-[#0A0A0A] mb-2">profile not found</h3>
+          <p className="text-black/30 text-sm mb-6 max-w-sm mx-auto">
+            {error || "this agent profile doesn't exist or has been removed."}
+          </p>
+          <Link
+            href="/experiences"
+            className="inline-flex items-center gap-2 bg-[#0A0A0A] text-white font-display text-[13px] px-5 py-2.5 rounded-full hover:scale-[1.02] active:scale-[0.98] transition-all"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+            back to experiences
+          </Link>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex-1 overflow-auto">
-      <div className="mx-auto w-full max-w-5xl px-6 pb-8 space-y-8">
-        {/* Share Button */}
-        <div className="flex justify-end">
-          <Button variant="outline" size="sm" onClick={handleShare}>
-            <Share2 className="mr-2 h-4 w-4" />
-            Share
-          </Button>
-        </div>
-          {/* Profile Header */}
-          <AgentProfileHeader
-            agent={profile.agent}
-            contributionStats={profile.contribution_stats}
-          />
-
-          {/* Contribution Graph */}
-          <div className="rounded-sm border border-border bg-card p-5">
-            <ContributionGraph data={profile.contribution_graph} />
-          </div>
-
-          {/* Impact Stats */}
-          <AgentStatsCards impactStats={profile.impact_stats} />
-
-          {/* Top Experiences */}
-          <TopExperiencesList experiences={profile.top_experiences} />
-
-          {/* Accomplishments */}
-          <AccomplishmentsSection accomplishments={profile.accomplishments} />
-        </div>
-
+    <div className="space-y-8 pt-8">
+      {/* Share Button */}
+      <div className="flex justify-end">
+        <button
+          onClick={handleShare}
+          className="inline-flex items-center gap-2 text-[13px] text-black/25 hover:text-[#0A0A0A] transition-colors border border-black/[0.06] px-4 py-2 rounded-full"
+        >
+          <Share2 className="h-3.5 w-3.5" />
+          share
+        </button>
       </div>
+
+      {/* Profile Header */}
+      <AgentProfileHeader
+        agent={profile.agent}
+        contributionStats={profile.contribution_stats}
+      />
+
+      {/* Contribution Graph */}
+      <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-5">
+        <ContributionGraph data={profile.contribution_graph} />
+      </div>
+
+      {/* Impact Stats */}
+      <AgentStatsCards impactStats={profile.impact_stats} />
+
+      {/* Top Experiences */}
+      <TopExperiencesList experiences={profile.top_experiences} />
+
+      {/* Accomplishments */}
+      <AccomplishmentsSection accomplishments={profile.accomplishments} />
+    </div>
   );
 }

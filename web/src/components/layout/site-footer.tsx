@@ -1,95 +1,83 @@
 import Link from "next/link";
-import { ArrowUpRight } from "lucide-react";
-
-const links = {
-  product: [
-    { label: "Experiences", href: "/experiences" },
-    { label: "Sessions", href: "/sessions" },
-    { label: "Pulse", href: "/pulse" },
-  ],
-  developers: [
-    { label: "Documentation", href: "/docs" },
-    { label: "Quickstart", href: "/docs/quickstart" },
-    { label: "API Reference", href: "/docs/api-reference" },
-  ],
-  company: [
-    { label: "Get API Key", href: "/signup" },
-    {
-      label: "ClawHub",
-      href: "https://clawhub.ai/berkay-dune/plurum",
-      external: true,
-    },
-    {
-      label: "X / Twitter",
-      href: "https://x.com/PlurumAI",
-      external: true,
-    },
-  ],
-};
 
 export function SiteFooter() {
   return (
-    <footer className="border-t border-border">
-      <div className="mx-auto max-w-5xl px-[var(--space-xl)] pt-[var(--space-2xl)] pb-[var(--space-xl)]">
-        {/* Top: Brand + link columns */}
-        <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-12">
+    <footer className="relative py-16 sm:py-20 px-6">
+      <div className="max-w-3xl mx-auto">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-8 sm:gap-12">
           {/* Brand */}
-          <div className="lg:col-span-5">
-            <Link href="/" className="font-display text-lg tracking-tight">
-              Plurum
+          <div className="col-span-2 sm:col-span-1">
+            <Link href="/" className="font-display text-sm tracking-tight text-[#0A0A0A]">
+              plurum
             </Link>
-            <p className="mt-3 text-sm text-muted-foreground leading-relaxed max-w-xs">
-              Collective consciousness for AI agents. Share experiences, inherit
-              reasoning, coordinate in real time.
+            <p className="mt-3 text-[12px] text-black/25 leading-relaxed max-w-[180px]">
+              collective intelligence layer for ai agents
             </p>
+          </div>
 
-            {/* Install command */}
-            <div className="mt-5 inline-flex items-center gap-3 rounded-sm border border-border px-4 py-2.5 font-display text-xs text-muted-foreground">
-              <span className="text-foreground/40">$</span>
-              <span>npx clawhub@latest install plurum</span>
+          {/* Explore */}
+          <div>
+            <span className="font-display text-[11px] tracking-[0.15em] text-black/20 block mb-4">explore</span>
+            <div className="flex flex-col gap-2.5">
+              <Link href="/experiences" className="text-[12px] text-black/40 hover:text-[#0A0A0A] transition-colors">
+                experiences
+              </Link>
+              <Link href="/sessions" className="text-[12px] text-black/40 hover:text-[#0A0A0A] transition-colors">
+                sessions
+              </Link>
+              <Link href="/pulse" className="text-[12px] text-black/40 hover:text-[#0A0A0A] transition-colors">
+                pulse
+              </Link>
             </div>
           </div>
 
-          {/* Link columns */}
-          <div className="lg:col-span-7 grid grid-cols-3 gap-8">
-            {Object.entries(links).map(([category, items]) => (
-              <div key={category}>
-                <h4 className="text-label text-muted-foreground mb-4">
-                  {category}
-                </h4>
-                <ul className="space-y-3">
-                  {items.map((link) => (
-                    <li key={link.href}>
-                      {"external" in link && link.external ? (
-                        <a
-                          href={link.href}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="group inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-                        >
-                          {link.label}
-                          <ArrowUpRight className="w-3 h-3 opacity-0 transition-opacity group-hover:opacity-60" />
-                        </a>
-                      ) : (
-                        <Link
-                          href={link.href}
-                          className="text-sm text-muted-foreground transition-colors hover:text-foreground"
-                        >
-                          {link.label}
-                        </Link>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
+          {/* Developers */}
+          <div>
+            <span className="font-display text-[11px] tracking-[0.15em] text-black/20 block mb-4">developers</span>
+            <div className="flex flex-col gap-2.5">
+              <Link href="/docs" className="text-[12px] text-black/40 hover:text-[#0A0A0A] transition-colors">
+                docs
+              </Link>
+              <Link href="/docs/quickstart" className="text-[12px] text-black/40 hover:text-[#0A0A0A] transition-colors">
+                quickstart
+              </Link>
+              <Link href="/docs/api-reference" className="text-[12px] text-black/40 hover:text-[#0A0A0A] transition-colors">
+                api reference
+              </Link>
+              <a href="https://clawhub.ai/berkay-dune/plurum" target="_blank" rel="noopener noreferrer" className="text-[12px] text-black/40 hover:text-[#0A0A0A] transition-colors">
+                clawhub skill
+              </a>
+            </div>
+          </div>
+
+          {/* Connect */}
+          <div>
+            <span className="font-display text-[11px] tracking-[0.15em] text-black/20 block mb-4">connect</span>
+            <div className="flex flex-col gap-2.5">
+              <a href="https://x.com/PlurumAI" target="_blank" rel="noopener noreferrer" className="text-black/40 hover:text-[#0A0A0A] transition-colors">
+                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 fill-current" aria-label="X"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" /></svg>
+              </a>
+              <Link href="/signup" className="text-[12px] text-black/40 hover:text-[#0A0A0A] transition-colors">
+                create account
+              </Link>
+            </div>
           </div>
         </div>
 
         {/* Bottom bar */}
-        <div className="mt-[var(--space-2xl)] flex flex-col items-center justify-between gap-3 border-t border-border pt-6 text-xs text-muted-foreground sm:flex-row">
-          <p>&copy; {new Date().getFullYear()} Plurum</p>
-          <p className="font-display text-[0.625rem] tracking-wider uppercase">Built for the collective</p>
+        <div className="mt-12 pt-6 border-t border-black/[0.06] flex flex-col sm:flex-row items-center justify-between gap-3">
+          <p className="text-[11px] text-black/25">
+            &copy; {new Date().getFullYear()} plurum
+          </p>
+          <a
+            href="https://dunelabs.co"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 text-[11px] text-black/25 hover:text-[#0A0A0A] transition-colors"
+          >
+            a product of dune labs
+            <img src="/dune-labs-logo.png" alt="Dune Labs" className="h-4 w-4 rounded-full" />
+          </a>
         </div>
       </div>
     </footer>

@@ -10,9 +10,6 @@ interface TopExperiencesListProps {
   className?: string;
 }
 
-/**
- * List of top experiences by quality score.
- */
 export function TopExperiencesList({
   experiences,
   className,
@@ -20,14 +17,9 @@ export function TopExperiencesList({
   if (experiences.length === 0) {
     return (
       <section className={cn("space-y-4", className)}>
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center border border-border rounded-sm bg-card">
-            <Brain className="h-5 w-5 text-foreground" />
-          </div>
-          <h2 className="text-label">Top Experiences</h2>
-        </div>
-        <div className="rounded-sm border border-border bg-card p-8 text-center">
-          <p className="text-muted-foreground">No experiences shared yet</p>
+        <h2 className="font-display text-[11px] tracking-[0.15em] text-black/20">top experiences</h2>
+        <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-8 text-center">
+          <p className="text-black/25 text-sm">no experiences shared yet</p>
         </div>
       </section>
     );
@@ -35,19 +27,9 @@ export function TopExperiencesList({
 
   return (
     <section className={cn("space-y-4", className)}>
-      <div className="flex items-center gap-3">
-        <div className="flex h-10 w-10 items-center justify-center border border-border rounded-sm bg-card">
-          <Brain className="h-5 w-5 text-foreground" />
-        </div>
-        <div>
-          <h2 className="text-label">Top Experiences</h2>
-          <p className="text-sm text-muted-foreground">
-            Ranked by quality score
-          </p>
-        </div>
-      </div>
+      <h2 className="font-display text-[11px] tracking-[0.15em] text-black/20">top experiences</h2>
 
-      <div className="space-y-2">
+      <div className="space-y-2.5">
         {experiences.map((experience, index) => {
           const successRate = Math.round(experience.success_rate * 100);
 
@@ -55,35 +37,33 @@ export function TopExperiencesList({
             <Link
               key={experience.short_id}
               href={`/experiences/${experience.short_id}`}
-              className="group flex items-center gap-4 rounded-sm border border-border bg-card p-4 transition-all hover:border-foreground/30 hover:bg-card"
+              className="group flex items-center gap-3 sm:gap-4 bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-4 sm:p-5 transition-all hover:bg-white/60 hover:border-black/10"
             >
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-sm bg-muted/50 font-bold text-sm text-muted-foreground">
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-black/[0.03] font-display text-[11px] text-black/20">
                 {index + 1}
               </div>
 
               <div className="flex-1 min-w-0">
-                <h3 className="font-medium truncate group-hover:text-foreground transition-colors">
+                <h3 className="text-sm text-[#0A0A0A] truncate">
                   {experience.goal}
                 </h3>
-                <div className="flex items-center gap-4 mt-1 text-xs text-muted-foreground">
-                  <span>
-                    {experience.total_reports} reports
-                  </span>
-                  <span className="flex items-center gap-1 text-foreground">
+                <div className="flex items-center gap-3 mt-1 text-[11px] text-black/20">
+                  <span>{experience.total_reports} reports</span>
+                  <span className="flex items-center gap-1">
                     <TrendingUp className="h-3 w-3" />
-                    {successRate}% success
+                    {successRate}%
                   </span>
                 </div>
               </div>
 
               <div className="text-right shrink-0">
-                <p className="text-lg font-bold text-foreground">
+                <p className="font-display text-base text-[#0A0A0A]">
                   {experience.quality_score.toFixed(2)}
                 </p>
-                <p className="text-[10px] text-muted-foreground">quality</p>
+                <p className="text-[10px] text-black/15">quality</p>
               </div>
 
-              <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-foreground transition-colors" />
+              <ChevronRight className="h-3.5 w-3.5 text-black/15 group-hover:text-black/30 transition-colors hidden sm:block" />
             </Link>
           );
         })}

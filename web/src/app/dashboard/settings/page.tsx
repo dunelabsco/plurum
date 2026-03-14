@@ -17,28 +17,26 @@ export default function DashboardSettingsPage() {
   };
 
   return (
-    <div className="space-y-[var(--space-2xl)] pt-[var(--space-2xl)]">
-      {/* Page header */}
+    <div className="space-y-10 pt-8">
       <div>
-        <h1 className="font-display text-2xl tracking-tight">Settings</h1>
-        <p className="mt-[var(--space-xs)] text-sm text-[var(--plurum-text-secondary)]">
-          Account settings and preferences.
+        <h1 className="font-display text-2xl tracking-tight text-[#0A0A0A]">settings</h1>
+        <p className="text-black/30 text-sm mt-1">
+          account settings and preferences.
         </p>
       </div>
 
-      {/* Sign out */}
-      <section className="card-sharp p-[var(--space-lg)]">
-        <h2 className="text-label mb-[var(--space-md)]">Session</h2>
-        <p className="text-sm text-[var(--plurum-text-secondary)] mb-[var(--space-lg)]">
-          Sign out of your account on this device.
+      <section className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-5">
+        <h2 className="font-display text-[11px] tracking-wide text-black/20 mb-3">session</h2>
+        <p className="text-sm text-black/30 mb-5">
+          sign out of your account on this device.
         </p>
         <button
           onClick={handleSignOut}
           disabled={signingOut}
-          className="flex items-center gap-[var(--space-sm)] bg-[var(--destructive)] text-[var(--destructive-foreground)] px-[var(--space-lg)] py-[var(--space-sm)] text-sm font-display disabled:opacity-50"
+          className="inline-flex items-center gap-2 bg-[#D71921] text-white font-display text-[13px] px-5 py-2.5 rounded-full disabled:opacity-30 hover:scale-[1.02] active:scale-[0.98] transition-all"
         >
-          <LogOut className="h-4 w-4" />
-          {signingOut ? "Signing out..." : "Sign Out"}
+          <LogOut className="h-3.5 w-3.5" />
+          {signingOut ? "signing out..." : "sign out"}
         </button>
       </section>
     </div>

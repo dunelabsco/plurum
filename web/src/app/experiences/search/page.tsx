@@ -2,10 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Search, Brain, TrendingUp } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
+import { Search, Brain, TrendingUp, ArrowRight } from "lucide-react";
 import { searchExperiences } from "@/lib/api/experiences";
 import type { ExperienceSearchResult } from "@/types/experience";
 
@@ -32,61 +29,65 @@ export default function SearchExperiencesPage() {
   }
 
   return (
-    <div className="space-y-8 max-w-3xl">
+    <div className="space-y-10 pt-8 max-w-3xl">
       <div>
-        <h1 className="font-display text-3xl tracking-tight">Search Experiences</h1>
-        <p className="text-muted-foreground mt-1">
-          Find experiences based on what was learned, not just what was attempted
+        <h1 className="font-display text-2xl tracking-tight text-[#0A0A0A]">search experiences</h1>
+        <p className="text-black/30 text-sm mt-1">
+          find experiences based on what was learned, not just what was attempted
         </p>
       </div>
 
       <form onSubmit={handleSearch} className="flex gap-3">
-        <Input
-          placeholder="e.g., Stripe payment integration gotchas..."
+        <input
+          placeholder="e.g., stripe payment integration gotchas..."
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          className="flex-1"
+          className="flex-1 bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-full px-5 py-3 text-sm text-[#0A0A0A] placeholder:text-black/20 focus:border-black/15 focus:outline-none transition-colors"
         />
-        <Button type="submit" disabled={searching}>
-          <Search className="h-4 w-4 mr-2" />
-          {searching ? "Searching..." : "Search"}
-        </Button>
+        <button
+          type="submit"
+          disabled={searching}
+          className="inline-flex items-center gap-2 bg-[#0A0A0A] text-white font-display text-[13px] px-6 py-3 rounded-full hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-30"
+        >
+          <Search className="h-3.5 w-3.5" />
+          {searching ? "searching..." : "search"}
+        </button>
       </form>
 
       {searched && results.length === 0 && (
-        <div className="text-center py-12 text-muted-foreground">
-          No experiences found matching your query.
+        <div className="text-center py-12 text-black/25 text-sm">
+          no experiences found matching your query.
         </div>
       )}
 
       {results.length > 0 && (
-        <div className="space-y-3">
+        <div className="space-y-2.5">
           {results.map((r, i) => (
             <Link
               key={r.id || i}
               href={`/experiences/${r.short_id || r.id}`}
               className="group block"
             >
-              <div className="rounded-sm border border-border bg-card p-5 transition-all hover:border-foreground/30">
+              <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-5 transition-all hover:bg-white/60 hover:border-black/10">
                 <div className="flex items-start gap-4">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-sm border border-border">
-                    <Brain className="h-5 w-5 text-foreground" />
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-black/[0.03]">
+                    <Brain className="h-4 w-4 text-black/30" strokeWidth={1.5} />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <h3 className="font-medium group-hover:text-foreground transition-colors">
-                      {r.goal || "Experience"}
+                    <h3 className="text-sm text-[#0A0A0A] group-hover:text-[#0A0A0A] transition-colors">
+                      {r.goal || "experience"}
                     </h3>
-                    <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
+                    <div className="flex items-center gap-3 mt-2 text-[11px] text-black/25">
                       {r.domain && (
-                        <Badge variant="secondary" className="text-xs">{r.domain}</Badge>
+                        <span className="font-display tracking-wide">{r.domain}</span>
                       )}
                       <span>
-                        Relevance: {(r.similarity * 100).toFixed(0)}%
+                        relevance: {(r.similarity * 100).toFixed(0)}%
                       </span>
                       {r.quality_score !== undefined && (
                         <span className="flex items-center gap-1">
                           <TrendingUp className="h-3 w-3" />
-                          Quality: {r.quality_score.toFixed(2)}
+                          quality: {r.quality_score.toFixed(2)}
                         </span>
                       )}
                     </div>

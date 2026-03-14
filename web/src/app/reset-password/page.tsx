@@ -5,19 +5,13 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Loader2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 
 export default function ResetPasswordPage() {
   return (
     <Suspense
       fallback={
         <div className="min-h-svh flex items-center justify-center">
-          <div className="flex items-center gap-3 text-muted-foreground">
-            <Loader2 className="h-5 w-5 animate-spin" />
-            <span>Loading...</span>
-          </div>
+          <Loader2 className="h-5 w-5 animate-spin text-black/20" />
         </div>
       }
     >
@@ -44,15 +38,14 @@ function ResetPasswordContent() {
     if (tokenHash && type === "recovery") {
       supabase.auth.verifyOtp({ token_hash: tokenHash, type: "recovery" }).then(({ error }) => {
         if (error) {
-          setError("Reset link is invalid or expired. Please request a new one.");
+          setError("reset link is invalid or expired. please request a new one.");
         }
         setIsVerifying(false);
       });
     } else {
-      // Check if user already has a session
       supabase.auth.getUser().then(({ data: { user } }) => {
         if (!user) {
-          setError("No reset session found. Please request a new reset link.");
+          setError("no reset session found. please request a new reset link.");
         }
         setIsVerifying(false);
       });
@@ -65,13 +58,13 @@ function ResetPasswordContent() {
     setError(null);
 
     if (password !== confirmPassword) {
-      setError("Passwords do not match");
+      setError("passwords do not match");
       setIsLoading(false);
       return;
     }
 
     if (password.length < 8) {
-      setError("Password must be at least 8 characters");
+      setError("password must be at least 8 characters");
       setIsLoading(false);
       return;
     }
@@ -81,7 +74,7 @@ function ResetPasswordContent() {
       if (error) throw error;
       setSuccess(true);
       setTimeout(() => {
-        router.push("/overview");
+        router.push("/dashboard");
       }, 2000);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "An error occurred");
@@ -93,122 +86,109 @@ function ResetPasswordContent() {
   if (isVerifying) {
     return (
       <div className="min-h-svh flex items-center justify-center">
-        <div className="flex items-center gap-3 text-muted-foreground">
-          <Loader2 className="h-5 w-5 animate-spin" />
-          <span>Verifying reset link...</span>
+        <div className="flex items-center gap-3 text-black/25 text-sm">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          <span>verifying reset link...</span>
         </div>
       </div>
     );
   }
 
+  const inputClasses =
+    "w-full bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-xl px-4 py-3 text-sm text-[#0A0A0A] placeholder:text-black/20 focus:border-black/15 focus:outline-none transition-colors";
+
   return (
-    <div className="grid min-h-svh lg:grid-cols-2">
-      <div className="flex flex-col gap-4 p-6 md:p-10">
-        <div className="flex justify-center gap-2 md:justify-start">
-          <Link href="/" className="flex items-center gap-2 font-medium">
-            <span className="font-display text-lg tracking-tight">Plurum</span>
+    <div className="min-h-svh flex flex-col items-center justify-center px-6">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-10">
+          <Link href="/" className="font-display text-sm tracking-tight text-[#0A0A0A]">
+            plurum
           </Link>
         </div>
 
-        <div className="flex flex-1 items-center justify-center">
-          <div className="w-full max-w-xs">
-            {success ? (
-              <div className="flex flex-col gap-6 text-center">
-                <div className="flex flex-col items-center gap-2">
-                  <h1 className="font-display text-2xl font-bold">Password updated</h1>
-                  <p className="text-muted-foreground text-sm">
-                    Redirecting you to the dashboard...
+        <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-6 sm:p-8">
+          {success ? (
+            <div className="space-y-2 text-center">
+              <h1 className="font-display text-xl text-[#0A0A0A]">password updated</h1>
+              <p className="text-black/30 text-sm">
+                redirecting you to the dashboard...
+              </p>
+            </div>
+          ) : error && !password ? (
+            <div className="space-y-6 text-center">
+              <div className="space-y-2">
+                <h1 className="font-display text-xl text-[#0A0A0A]">link expired</h1>
+                <p className="text-black/30 text-sm">{error}</p>
+              </div>
+              <Link
+                href="/forgot-password"
+                className="inline-flex items-center justify-center bg-[#0A0A0A] text-white font-display text-[13px] px-5 py-2.5 rounded-full hover:scale-[1.02] active:scale-[0.98] transition-all"
+              >
+                request new link
+              </Link>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} className="space-y-6">
+              <div className="text-center space-y-2">
+                <h1 className="font-display text-xl text-[#0A0A0A]">set new password</h1>
+                <p className="text-black/30 text-sm">
+                  enter your new password below
+                </p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <label htmlFor="password" className="font-display text-[11px] tracking-wide text-black/25 block">new password</label>
+                  <input
+                    id="password"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="enter new password"
+                    required
+                    className={inputClasses}
+                  />
+                  <p className="text-[11px] text-black/20">
+                    must be at least 8 characters
                   </p>
                 </div>
-              </div>
-            ) : error && !password ? (
-              <div className="flex flex-col gap-6 text-center">
-                <div className="flex flex-col items-center gap-2">
-                  <h1 className="font-display text-2xl font-bold">Link expired</h1>
-                  <p className="text-muted-foreground text-sm text-balance">
+
+                <div className="space-y-2">
+                  <label htmlFor="confirm-password" className="font-display text-[11px] tracking-wide text-black/25 block">confirm password</label>
+                  <input
+                    id="confirm-password"
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="confirm new password"
+                    required
+                    className={inputClasses}
+                  />
+                </div>
+
+                {error && (
+                  <div className="border border-[#D71921]/20 rounded-xl bg-[#D71921]/5 px-4 py-2.5 text-sm text-[#D71921]">
                     {error}
-                  </p>
-                </div>
-                <Link
-                  href="/forgot-password"
-                  className="inline-flex items-center justify-center bg-primary hover:bg-primary/90 text-primary-foreground font-medium px-4 py-2 rounded-sm text-sm transition-colors"
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  className="w-full bg-[#0A0A0A] text-white font-display text-[13px] py-3 rounded-full hover:scale-[1.01] active:scale-[0.99] transition-all disabled:opacity-30"
+                  disabled={isLoading}
                 >
-                  Request new link
-                </Link>
-              </div>
-            ) : (
-              <form onSubmit={handleSubmit} className="flex flex-col gap-6">
-                <div className="flex flex-col items-center gap-2 text-center">
-                  <h1 className="font-display text-2xl font-bold">Set new password</h1>
-                  <p className="text-muted-foreground text-sm text-balance">
-                    Enter your new password below
-                  </p>
-                </div>
-
-                <div className="grid gap-4">
-                  <div className="grid gap-2">
-                    <Label htmlFor="password">New Password</Label>
-                    <Input
-                      id="password"
-                      type="password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="Enter new password"
-                      required
-                      className=""
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Must be at least 8 characters
-                    </p>
-                  </div>
-
-                  <div className="grid gap-2">
-                    <Label htmlFor="confirm-password">Confirm Password</Label>
-                    <Input
-                      id="confirm-password"
-                      type="password"
-                      value={confirmPassword}
-                      onChange={(e) => setConfirmPassword(e.target.value)}
-                      placeholder="Confirm new password"
-                      required
-                      className=""
-                    />
-                  </div>
-
-                  {error && (
-                    <div className="border border-destructive rounded-sm bg-card px-3 py-2 text-sm text-destructive">
-                      {error}
-                    </div>
+                  {isLoading ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      updating...
+                    </span>
+                  ) : (
+                    "update password"
                   )}
-
-                  <Button type="submit" className="w-full" disabled={isLoading}>
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Updating...
-                      </>
-                    ) : (
-                      "Update password"
-                    )}
-                  </Button>
-                </div>
-              </form>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="relative hidden lg:block bg-foreground">
-        <div className="absolute inset-0 dot-grid opacity-10" />
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-12">
-          <div className="max-w-md text-center">
-            <h2 className="font-display text-3xl text-background mb-4">
-              Almost There
-            </h2>
-            <p className="text-background/60 text-lg">
-              Set your new password to regain access to your account.
-            </p>
-          </div>
+                </button>
+              </div>
+            </form>
+          )}
         </div>
       </div>
     </div>

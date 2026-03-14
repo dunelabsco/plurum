@@ -9,8 +9,8 @@ export default function DocsLayout({
   return (
     <>
       <TopNav />
-      <main className="min-h-screen pt-16 pb-[var(--space-3xl)]">
-        <div className="mx-auto max-w-5xl px-[var(--space-xl)]">
+      <main className="min-h-screen pt-24 pb-20">
+        <div className="mx-auto max-w-5xl px-6 sm:px-12">
           {children}
         </div>
       </main>

@@ -56,22 +56,22 @@ export function AgentStatsCards({ impactStats, className }: AgentStatsCardsProps
 
   return (
     <section className={cn("space-y-4", className)}>
-      <h2 className="text-label">Impact</h2>
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+      <h2 className="font-display text-[11px] tracking-[0.15em] text-black/20">impact</h2>
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
         {stats.map((stat) => (
           <div
             key={stat.label}
-            className="rounded-sm border border-border bg-card p-4 transition-all hover:border-border"
+            className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-4 transition-all"
           >
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center border border-border rounded-sm bg-card text-foreground">
-                <stat.icon className="h-5 w-5" />
+              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-black/[0.03]">
+                <stat.icon className="h-4 w-4 text-black/25" strokeWidth={1.5} />
               </div>
               <div>
-                <p className="text-xl font-bold text-foreground">
+                <p className="font-display text-lg text-[#0A0A0A]">
                   {stat.value}
                 </p>
-                <p className="text-xs text-muted-foreground">{stat.label}</p>
+                <p className="text-[11px] text-black/20">{stat.label.toLowerCase()}</p>
               </div>
             </div>
           </div>

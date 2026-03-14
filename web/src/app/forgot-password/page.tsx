@@ -4,9 +4,6 @@ import { useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Loader2, ArrowLeft } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 
 export default function ForgotPasswordPage() {
   const [email, setEmail] = useState("");
@@ -33,100 +30,91 @@ export default function ForgotPasswordPage() {
     }
   };
 
+  const inputClasses =
+    "w-full bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-xl px-4 py-3 text-sm text-[#0A0A0A] placeholder:text-black/20 focus:border-black/15 focus:outline-none transition-colors";
+
   return (
-    <div className="grid min-h-svh lg:grid-cols-2">
-      <div className="flex flex-col gap-4 p-6 md:p-10">
-        <div className="flex justify-center gap-2 md:justify-start">
-          <Link href="/" className="flex items-center gap-2 font-medium">
-            <span className="font-display text-lg tracking-tight">Plurum</span>
+    <div className="min-h-svh flex flex-col items-center justify-center px-6">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-10">
+          <Link href="/" className="font-display text-sm tracking-tight text-[#0A0A0A]">
+            plurum
           </Link>
         </div>
 
-        <div className="flex flex-1 items-center justify-center">
-          <div className="w-full max-w-xs">
-            {sent ? (
-              <div className="flex flex-col gap-6 text-center">
-                <div className="flex flex-col items-center gap-2">
-                  <h1 className="font-display text-2xl font-bold">Check your email</h1>
-                  <p className="text-muted-foreground text-sm text-balance">
-                    We sent a password reset link to <strong>{email}</strong>
-                  </p>
+        <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-6 sm:p-8">
+          {sent ? (
+            <div className="space-y-6 text-center">
+              <div className="space-y-2">
+                <h1 className="font-display text-xl text-[#0A0A0A]">check your email</h1>
+                <p className="text-black/30 text-sm">
+                  we sent a password reset link to <strong className="text-[#0A0A0A]">{email}</strong>
+                </p>
+              </div>
+              <Link
+                href="/login"
+                className="inline-flex items-center justify-center gap-2 text-[13px] text-black/25 hover:text-[#0A0A0A] transition-colors"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                back to sign in
+              </Link>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} className="space-y-6">
+              <div className="text-center space-y-2">
+                <h1 className="font-display text-xl text-[#0A0A0A]">reset your password</h1>
+                <p className="text-black/30 text-sm">
+                  enter your email and we&apos;ll send you a reset link
+                </p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <label htmlFor="email" className="font-display text-[11px] tracking-wide text-black/25 block">email</label>
+                  <input
+                    id="email"
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="name@example.com"
+                    required
+                    className={inputClasses}
+                  />
                 </div>
+
+                {error && (
+                  <div className="border border-[#D71921]/20 rounded-xl bg-[#D71921]/5 px-4 py-2.5 text-sm text-[#D71921]">
+                    {error}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  className="w-full bg-[#0A0A0A] text-white font-display text-[13px] py-3 rounded-full hover:scale-[1.01] active:scale-[0.99] transition-all disabled:opacity-30"
+                  disabled={isLoading}
+                >
+                  {isLoading ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      sending...
+                    </span>
+                  ) : (
+                    "send reset link"
+                  )}
+                </button>
+              </div>
+
+              <div className="text-center">
                 <Link
                   href="/login"
-                  className="inline-flex items-center justify-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                  className="inline-flex items-center gap-2 text-[13px] text-black/25 hover:text-[#0A0A0A] transition-colors"
                 >
-                  <ArrowLeft className="h-4 w-4" />
-                  Back to sign in
+                  <ArrowLeft className="h-3 w-3" />
+                  back to sign in
                 </Link>
               </div>
-            ) : (
-              <form onSubmit={handleSubmit} className="flex flex-col gap-6">
-                <div className="flex flex-col items-center gap-2 text-center">
-                  <h1 className="font-display text-2xl font-bold">Reset your password</h1>
-                  <p className="text-muted-foreground text-sm text-balance">
-                    Enter your email and we&apos;ll send you a reset link
-                  </p>
-                </div>
-
-                <div className="grid gap-4">
-                  <div className="grid gap-2">
-                    <Label htmlFor="email">Email</Label>
-                    <Input
-                      id="email"
-                      type="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="name@example.com"
-                      required
-                      className=""
-                    />
-                  </div>
-
-                  {error && (
-                    <div className="border border-destructive rounded-sm bg-card px-3 py-2 text-sm text-destructive">
-                      {error}
-                    </div>
-                  )}
-
-                  <Button type="submit" className="w-full" disabled={isLoading}>
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Sending...
-                      </>
-                    ) : (
-                      "Send reset link"
-                    )}
-                  </Button>
-                </div>
-
-                <div className="text-center text-sm text-muted-foreground">
-                  <Link
-                    href="/login"
-                    className="inline-flex items-center gap-2 underline-offset-4 hover:text-foreground"
-                  >
-                    <ArrowLeft className="h-3 w-3" />
-                    Back to sign in
-                  </Link>
-                </div>
-              </form>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="relative hidden lg:block bg-foreground">
-        <div className="absolute inset-0 dot-grid opacity-10" />
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-12">
-          <div className="max-w-md text-center">
-            <h2 className="font-display text-3xl text-background mb-4">
-              Reset Your Password
-            </h2>
-            <p className="text-background/60 text-lg">
-              We&apos;ll help you get back into your account.
-            </p>
-          </div>
+            </form>
+          )}
         </div>
       </div>
     </div>

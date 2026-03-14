@@ -1,7 +1,6 @@
 "use client";
 
 import { Calendar, Globe, Activity } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { AgentAvatar } from "./agent-avatar";
 import type { AgentPublicInfo, ContributionStats } from "@/types/agent-profile";
 
@@ -10,9 +9,6 @@ interface AgentProfileHeaderProps {
   contributionStats: ContributionStats;
 }
 
-/**
- * Profile header with avatar, name, and key info.
- */
 export function AgentProfileHeader({
   agent,
   contributionStats,
@@ -23,54 +19,50 @@ export function AgentProfileHeader({
   });
 
   return (
-    <section className="rounded-sm border border-border bg-card p-6 md:p-8">
-      <div className="flex flex-col md:flex-row md:items-center gap-6">
-        {/* Avatar */}
+    <section className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-5 sm:p-8">
+      <div className="flex flex-col sm:flex-row sm:items-center gap-5">
         <AgentAvatar agent={agent} size="xl" showLink={false} />
 
-        {/* Info */}
         <div className="flex-1 space-y-3">
           <div>
-            <h1 className="text-2xl md:text-3xl font-bold tracking-tight font-display">
+            <h1 className="text-xl sm:text-2xl font-bold tracking-tight font-display text-[#0A0A0A]">
               {agent.name}
             </h1>
             {agent.username && (
-              <p className="text-muted-foreground text-sm mt-0.5">@{agent.username}</p>
+              <p className="text-black/25 text-sm mt-0.5">@{agent.username}</p>
             )}
             {agent.publisher_domain && (
-              <p className="flex items-center gap-1.5 text-muted-foreground mt-1">
-                <Globe className="h-4 w-4" />
+              <p className="flex items-center gap-1.5 text-black/25 text-sm mt-1">
+                <Globe className="h-3.5 w-3.5" />
                 {agent.publisher_domain}
               </p>
             )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
-            <Badge variant="secondary" className="gap-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 font-display text-[10px] tracking-wide text-black/25 bg-black/[0.03] px-3 py-1 rounded-full">
               <Calendar className="h-3 w-3" />
-              Member since {memberSince}
-            </Badge>
-
-            <Badge variant="outline" className="gap-1.5 border-border">
-              <Activity className="h-3 w-3 text-foreground" />
+              member since {memberSince.toLowerCase()}
+            </span>
+            <span className="inline-flex items-center gap-1.5 font-display text-[10px] tracking-wide text-black/25 border border-black/[0.06] px-3 py-1 rounded-full">
+              <Activity className="h-3 w-3" />
               {contributionStats.activity_points_30d} points this month
-            </Badge>
+            </span>
           </div>
         </div>
 
-        {/* Quick stats */}
-        <div className="flex md:flex-col gap-3 shrink-0">
-          <div className="text-center px-4 py-2 rounded-sm bg-card border border-border">
-            <p className="text-2xl font-bold text-foreground">
+        <div className="flex sm:flex-col gap-3 shrink-0">
+          <div className="text-center px-4 py-2 bg-black/[0.03] rounded-xl flex-1 sm:flex-none">
+            <p className="font-display text-xl text-[#0A0A0A]">
               {contributionStats.experiences_shared}
             </p>
-            <p className="text-xs text-muted-foreground">Experiences</p>
+            <p className="text-[10px] text-black/20">experiences</p>
           </div>
-          <div className="text-center px-4 py-2 rounded-sm bg-card border border-border">
-            <p className="text-2xl font-bold">
+          <div className="text-center px-4 py-2 bg-black/[0.03] rounded-xl flex-1 sm:flex-none">
+            <p className="font-display text-xl text-[#0A0A0A]">
               {contributionStats.sessions_completed}
             </p>
-            <p className="text-xs text-muted-foreground">Sessions</p>
+            <p className="text-[10px] text-black/20">sessions</p>
           </div>
         </div>
       </div>

@@ -2,14 +2,16 @@ import { HeroSection } from "./hero-section";
 import { PrimitivesSection } from "./primitives-section";
 import { InstallSection } from "./install-section";
 import { CtaSection } from "./cta-section";
-import { TopNav } from "@/components/layout/top-nav";
+import { AsciiField } from "./ascii-field";
 import { SiteFooter } from "@/components/layout/site-footer";
+import { TopNav } from "@/components/layout/top-nav";
 
 export function LandingPage() {
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="min-h-screen relative">
+      <AsciiField />
       <TopNav />
-      <main className="flex-1">
+      <main>
         <HeroSection />
         <PrimitivesSection />
         <InstallSection />

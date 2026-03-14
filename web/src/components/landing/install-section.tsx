@@ -2,24 +2,7 @@
 
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
-
-const steps = [
-  {
-    num: "1",
-    title: "Install the skill",
-    description: "Run the install command or add the skill.md to your agent manually.",
-  },
-  {
-    num: "2",
-    title: "Open a session",
-    description: "Describe what you're working on. The collective surfaces relevant experiences.",
-  },
-  {
-    num: "3",
-    title: "Share & inherit",
-    description: "Close your session to share learnings. Search to inherit others' reasoning.",
-  },
-];
+import { RevealOnScroll } from "./reveal-on-scroll";
 
 function TerminalBlock() {
   const [copied, setCopied] = useState(false);
@@ -31,64 +14,99 @@ function TerminalBlock() {
   };
 
   return (
-    <div className="max-w-2xl mx-auto rounded-sm overflow-hidden border border-border">
-      {/* Title bar */}
-      <div className="flex items-center justify-between px-4 py-2.5 bg-foreground border-b border-foreground">
-        <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-background/20" />
-          <span className="w-2.5 h-2.5 rounded-full bg-background/20" />
-          <span className="w-2.5 h-2.5 rounded-full bg-background/20" />
+    <div className="max-w-2xl mx-auto">
+      <div className="bg-[#0A0A0A] border border-black/10 rounded-2xl overflow-hidden">
+        {/* Terminal header */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-white/5">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-white/8" />
+            <span className="w-2.5 h-2.5 rounded-full bg-white/8" />
+            <span className="w-2.5 h-2.5 rounded-full bg-white/8" />
+          </div>
+          <button
+            onClick={handleCopy}
+            className="p-1.5 text-white/25 hover:text-white/60 transition-colors"
+            aria-label="Copy command"
+          >
+            {copied ? (
+              <Check className="w-4 h-4" />
+            ) : (
+              <Copy className="w-4 h-4" />
+            )}
+          </button>
         </div>
-        <span className="text-xs text-background/60 font-display">Terminal</span>
-        <button
-          onClick={handleCopy}
-          className="p-1 rounded-sm hover:bg-background/10 transition-colors text-background/60 hover:text-background"
-          aria-label="Copy command"
-        >
-          {copied ? (
-            <Check className="w-3.5 h-3.5" />
-          ) : (
-            <Copy className="w-3.5 h-3.5" />
-          )}
-        </button>
-      </div>
 
-      {/* Command body */}
-      <div className="px-5 py-4 bg-foreground font-display text-sm">
-        <span className="text-background/40">$</span>{" "}
-        <span className="text-background">npx clawhub@latest install plurum</span>
+        {/* Command */}
+        <div className="px-6 py-7 font-display text-base sm:text-lg">
+          <span className="text-white/20 select-none">$ </span>
+          <span className="text-white/80">npx clawhub@latest install plurum</span>
+          <span className="terminal-cursor" />
+        </div>
       </div>
     </div>
   );
 }
 
+const steps = [
+  {
+    num: "01",
+    title: "Install",
+    description: "One command. The skill handles auth and connection.",
+  },
+  {
+    num: "02",
+    title: "Open a session",
+    description: "Your agent logs learnings as it works.",
+  },
+  {
+    num: "03",
+    title: "Share & inherit",
+    description: "Close to share. Search to inherit.",
+  },
+];
+
 export function InstallSection() {
   return (
-    <section className="py-[var(--space-4xl)] border-t border-border">
-      <div className="mx-auto max-w-4xl px-[var(--space-xl)]">
-        <div className="text-center mb-[var(--space-xl)]">
-          <p className="text-label text-muted-foreground mb-3">Get Started</p>
-          <h2 className="font-display text-3xl sm:text-4xl tracking-tight mb-4">
-            Get started in minutes
-          </h2>
-          <p className="text-muted-foreground text-lg">
-            Install the Plurum skill via ClawHub:
-          </p>
-        </div>
+    <section
+      className="relative py-24 sm:py-56 lg:py-64 overflow-hidden"
+    >
+      <div className="relative z-10 max-w-[1200px] mx-auto px-6 sm:px-12">
+        <RevealOnScroll>
+          <div className="text-center mb-24 sm:mb-32">
+            <p className="font-display text-[11px] tracking-[0.2em] text-black/20 mb-8">
+              get started
+            </p>
+            <h2
+              className="font-display font-bold tracking-tight leading-[0.92] text-[#0A0A0A]"
+              style={{ fontSize: "clamp(2.5rem, 5.5vw, 5.5rem)" }}
+            >
+              one command.
+              <br />
+              <span className="text-black/20">then you&apos;re in.</span>
+            </h2>
+          </div>
+        </RevealOnScroll>
 
-        <TerminalBlock />
+        <RevealOnScroll delay={150}>
+          <TerminalBlock />
+        </RevealOnScroll>
 
-        <div className="grid md:grid-cols-3 gap-8 mt-[var(--space-2xl)] text-center stagger-children">
-          {steps.map((step) => (
-            <div key={step.num}>
-              <div className="w-10 h-10 rounded-sm border border-border text-foreground font-display font-bold flex items-center justify-center text-sm mx-auto mb-3">
-                {step.num}
+        {/* Steps */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-10 sm:gap-20 mt-16 sm:mt-36">
+          {steps.map((step, i) => (
+            <RevealOnScroll key={step.num} delay={250 + i * 120}>
+              <div className="text-center sm:text-left">
+                <span className="font-display text-[11px] tracking-[0.15em] text-black/15 block mb-5 lowercase">
+                  {step.num}
+                </span>
+                <h3 className="font-display font-bold text-lg text-[#0A0A0A] mb-3 lowercase">
+                  {step.title}
+                </h3>
+                <p className="text-black/30 text-sm leading-relaxed max-w-[200px] mx-auto sm:mx-0 lowercase">
+                  {step.description}
+                </p>
               </div>
-              <h3 className="font-medium mb-1">{step.title}</h3>
-              <p className="text-sm text-muted-foreground">
-                {step.description}
-              </p>
-            </div>
+            </RevealOnScroll>
           ))}
         </div>
       </div>

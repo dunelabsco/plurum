@@ -3,37 +3,22 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
-import { Menu, ChevronDown, LogOut, Key, Settings, ScrollText, User } from "lucide-react";
+import { Menu, ChevronDown, LogOut, Key, Settings, ScrollText, User, X } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
-import {
-  Sheet,
-  SheetContent,
-  SheetTrigger,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 
 const navLinks = [
-  { href: "/experiences", label: "Experiences" },
-  { href: "/sessions", label: "Sessions" },
-  { href: "/pulse", label: "Pulse" },
-  { href: "/docs", label: "Docs" },
+  { href: "/experiences", label: "experiences" },
+  { href: "/sessions", label: "sessions" },
+  { href: "/pulse", label: "pulse" },
+  { href: "/docs", label: "docs" },
 ];
 
 export function TopNav() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [user, setUser] = useState<{ email?: string } | null>(null);
-  const [totalAgents, setTotalAgents] = useState<number | null>(null);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const supabase = createClient();
 
@@ -42,12 +27,20 @@ export function TopNav() {
     supabase.auth.getUser().then(({ data }) => {
       setUser(data.user ? { email: data.user.email ?? undefined } : null);
     });
-    const apiUrl = process.env.NEXT_PUBLIC_PLURUM_API_URL || "http://localhost:8000";
-    fetch(`${apiUrl}/api/v1/pulse/status`)
-      .then((r) => r.json())
-      .then((d) => setTotalAgents(d.total_agents ?? null))
-      .catch(() => {});
   }, []);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!dropdownOpen) return;
+    const handler = () => setDropdownOpen(false);
+    document.addEventListener("click", handler);
+    return () => document.removeEventListener("click", handler);
+  }, [dropdownOpen]);
+
+  // Close mobile menu on route change
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
@@ -55,177 +48,186 @@ export function TopNav() {
   };
 
   return (
-    <nav className="fixed z-50 top-0 left-0 right-0 bg-background border-b border-border">
-      <div className="mx-auto max-w-6xl px-6">
-        <div className="flex h-14 items-center justify-between">
-          {/* Left: Logo + Nav + Live counter */}
-          <div className="flex items-center gap-8">
-            <Link href="/" className="font-display text-lg tracking-tight">
-              Plurum
-            </Link>
+    <>
+      <nav className="fixed z-50 top-6 left-0 right-0 flex justify-center px-4">
+        <div className="inline-flex items-center gap-4 sm:gap-8 bg-white/60 backdrop-blur-md border border-black/[0.06] px-5 sm:px-8 py-3 rounded-full">
+          <Link href="/" className="font-display text-sm tracking-tight text-[#0A0A0A]">
+            plurum
+          </Link>
 
-            {/* Desktop nav links */}
-            <div className="hidden md:flex items-center gap-1">
-              {navLinks.map((link) => (
-                <Link
-                  key={link.href}
-                  href={link.href}
-                  className={cn(
-                    "relative px-3 py-2 text-sm transition-colors",
-                    pathname.startsWith(link.href)
-                      ? "text-foreground border-b-2 border-foreground"
-                      : "text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  {link.label}
-                </Link>
-              ))}
-            </div>
-
-            {/* Agent counter */}
-            {totalAgents !== null && (
-              <div className="hidden md:flex items-center gap-2 text-xs text-muted-foreground">
-                <span className="live-dot" />
-                <span className="tabular-nums">{totalAgents.toLocaleString()}</span>
-                <span>agents</span>
-              </div>
-            )}
+          {/* Desktop nav */}
+          <div className="hidden sm:flex items-center gap-6">
+            {navLinks.map((link) => (
+              <Link
+                key={link.href}
+                href={link.href}
+                className={cn(
+                  "text-[13px] transition-colors",
+                  pathname.startsWith(link.href)
+                    ? "text-[#0A0A0A]"
+                    : "text-black/35 hover:text-[#0A0A0A]"
+                )}
+              >
+                {link.label}
+              </Link>
+            ))}
           </div>
 
-          {/* Right: Auth */}
-          <div className="flex items-center gap-2">
-            {mounted && (
-              <>
-                {user ? (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="sm" className="gap-2 rounded-sm px-2 text-sm">
-                        <div className="flex h-7 w-7 items-center justify-center rounded-sm border border-border">
-                          <User className="h-3.5 w-3.5 text-muted-foreground" />
-                        </div>
-                        <span className="hidden sm:inline text-muted-foreground max-w-[120px] truncate text-xs">
-                          {user.email}
-                        </span>
-                        <ChevronDown className="h-3 w-3 text-muted-foreground" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-48">
-                      <DropdownMenuItem asChild>
-                        <Link href="/dashboard" className="flex items-center gap-2">
-                          <ScrollText className="h-4 w-4" />
-                          My Sessions
-                        </Link>
-                      </DropdownMenuItem>
-                      <DropdownMenuItem asChild>
-                        <Link href="/dashboard/agents" className="flex items-center gap-2">
-                          <Key className="h-4 w-4" />
-                          API Keys
-                        </Link>
-                      </DropdownMenuItem>
-                      <DropdownMenuItem asChild>
-                        <Link href="/dashboard/settings" className="flex items-center gap-2">
-                          <Settings className="h-4 w-4" />
-                          Settings
-                        </Link>
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem onClick={handleSignOut} className="flex items-center gap-2">
-                        <LogOut className="h-4 w-4" />
-                        Sign out
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                ) : (
-                  <div className="flex items-center gap-2">
-                    <Link
-                      href="/login"
-                      className="text-sm text-muted-foreground hover:text-foreground transition-colors hidden sm:inline"
-                    >
-                      Sign in
-                    </Link>
-                    <Button asChild size="sm" className="rounded-sm bg-foreground text-background hover:bg-foreground/90">
-                      <Link href="/signup">Get API Key</Link>
-                    </Button>
-                  </div>
-                )}
-              </>
-            )}
+          {/* Desktop auth area */}
+          {mounted && (
+            <div className="hidden sm:block">
+              {user ? (
+                <div className="relative">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDropdownOpen(!dropdownOpen);
+                    }}
+                    className="flex items-center gap-1.5 text-[13px] text-black/35 hover:text-[#0A0A0A] transition-colors"
+                  >
+                    <span className="max-w-[100px] truncate">
+                      {user.email?.split("@")[0]}
+                    </span>
+                    <ChevronDown className="h-3 w-3" />
+                  </button>
 
-            {/* Mobile Sheet menu */}
-            <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-              <SheetTrigger asChild>
-                <Button variant="ghost" size="icon" className="md:hidden h-9 w-9">
-                  <Menu className="h-5 w-5" />
-                  <span className="sr-only">Menu</span>
-                </Button>
-              </SheetTrigger>
-              <SheetContent side="right" className="w-72 pt-12">
-                <SheetHeader>
-                  <SheetTitle className="sr-only">Navigation</SheetTitle>
-                </SheetHeader>
-                <nav className="flex flex-col gap-1">
-                  {navLinks.map((link) => (
-                    <Link
-                      key={link.href}
-                      href={link.href}
-                      onClick={() => setMobileOpen(false)}
-                      className={cn(
-                        "flex items-center gap-3 rounded-sm px-3 py-2.5 text-sm transition-colors",
-                        pathname.startsWith(link.href)
-                          ? "bg-accent text-foreground font-medium"
-                          : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
-                      )}
-                    >
-                      {link.label}
-                    </Link>
-                  ))}
-                </nav>
-
-                {/* Agents counter in mobile */}
-                {totalAgents !== null && (
-                  <div className="mt-4 rounded-sm border border-border px-3 py-2.5 text-xs text-muted-foreground flex items-center gap-2">
-                    <span className="live-dot" />
-                    <span className="tabular-nums">{totalAgents.toLocaleString()} agents</span>
-                    <span>in the collective</span>
-                  </div>
-                )}
-
-                {user && (
-                  <>
-                    <div className="my-4 border-t border-border" />
-                    <nav className="flex flex-col gap-1">
+                  {dropdownOpen && (
+                    <div className="absolute right-0 top-full mt-3 w-48 bg-white/80 backdrop-blur-md border border-black/[0.06] rounded-2xl py-2 shadow-lg">
                       <Link
                         href="/dashboard"
-                        onClick={() => setMobileOpen(false)}
-                        className="flex items-center gap-3 rounded-sm px-3 py-2.5 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                        className="flex items-center gap-2.5 px-4 py-2 text-[13px] text-black/40 hover:text-[#0A0A0A] transition-colors"
+                        onClick={() => setDropdownOpen(false)}
                       >
-                        <ScrollText className="h-4 w-4" />
-                        My Sessions
+                        <ScrollText className="h-3.5 w-3.5" />
+                        my sessions
                       </Link>
                       <Link
                         href="/dashboard/agents"
-                        onClick={() => setMobileOpen(false)}
-                        className="flex items-center gap-3 rounded-sm px-3 py-2.5 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                        className="flex items-center gap-2.5 px-4 py-2 text-[13px] text-black/40 hover:text-[#0A0A0A] transition-colors"
+                        onClick={() => setDropdownOpen(false)}
                       >
-                        <Key className="h-4 w-4" />
-                        API Keys
+                        <Key className="h-3.5 w-3.5" />
+                        api keys
                       </Link>
                       <Link
                         href="/dashboard/settings"
-                        onClick={() => setMobileOpen(false)}
-                        className="flex items-center gap-3 rounded-sm px-3 py-2.5 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                        className="flex items-center gap-2.5 px-4 py-2 text-[13px] text-black/40 hover:text-[#0A0A0A] transition-colors"
+                        onClick={() => setDropdownOpen(false)}
                       >
-                        <Settings className="h-4 w-4" />
-                        Settings
+                        <Settings className="h-3.5 w-3.5" />
+                        settings
                       </Link>
-                    </nav>
-                  </>
-                )}
-              </SheetContent>
-            </Sheet>
-          </div>
+                      <div className="my-1.5 border-t border-black/[0.06]" />
+                      <button
+                        onClick={handleSignOut}
+                        className="flex items-center gap-2.5 px-4 py-2 text-[13px] text-black/40 hover:text-[#0A0A0A] transition-colors w-full text-left"
+                      >
+                        <LogOut className="h-3.5 w-3.5" />
+                        sign out
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <Link
+                  href="/signup"
+                  className="text-[13px] text-black/50 hover:text-[#0A0A0A] transition-colors"
+                >
+                  sign in
+                </Link>
+              )}
+            </div>
+          )}
+
+          {/* Mobile menu button */}
+          <button
+            onClick={() => setMobileOpen(!mobileOpen)}
+            className="sm:hidden text-black/40 hover:text-[#0A0A0A] transition-colors p-1"
+            aria-label="Menu"
+          >
+            {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+          </button>
         </div>
-      </div>
-    </nav>
+      </nav>
+
+      {/* Mobile overlay */}
+      {mobileOpen && (
+        <>
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 z-40 bg-black/5 sm:hidden"
+            onClick={() => setMobileOpen(false)}
+          />
+          <div className="fixed z-50 top-20 left-4 right-4 sm:hidden">
+            <div className="bg-white/90 backdrop-blur-xl border border-black/[0.06] rounded-2xl p-5 shadow-lg">
+              <nav className="flex flex-col gap-1">
+                {navLinks.map((link) => (
+                  <Link
+                    key={link.href}
+                    href={link.href}
+                    className={cn(
+                      "px-4 py-3 text-sm rounded-xl transition-colors",
+                      pathname.startsWith(link.href)
+                        ? "text-[#0A0A0A] bg-black/[0.03] font-medium"
+                        : "text-black/35 active:bg-black/[0.02]"
+                    )}
+                  >
+                    {link.label}
+                  </Link>
+                ))}
+              </nav>
+
+              {mounted && user && (
+                <>
+                  <div className="my-3 border-t border-black/[0.06]" />
+                  <nav className="flex flex-col gap-1">
+                    <Link
+                      href="/dashboard"
+                      className="flex items-center gap-3 px-4 py-3 text-sm text-black/35 rounded-xl active:bg-black/[0.02]"
+                    >
+                      <ScrollText className="h-4 w-4" />
+                      my sessions
+                    </Link>
+                    <Link
+                      href="/dashboard/agents"
+                      className="flex items-center gap-3 px-4 py-3 text-sm text-black/35 rounded-xl active:bg-black/[0.02]"
+                    >
+                      <Key className="h-4 w-4" />
+                      api keys
+                    </Link>
+                    <Link
+                      href="/dashboard/settings"
+                      className="flex items-center gap-3 px-4 py-3 text-sm text-black/35 rounded-xl active:bg-black/[0.02]"
+                    >
+                      <Settings className="h-4 w-4" />
+                      settings
+                    </Link>
+                    <button
+                      onClick={handleSignOut}
+                      className="flex items-center gap-3 px-4 py-3 text-sm text-black/35 rounded-xl active:bg-black/[0.02] w-full text-left"
+                    >
+                      <LogOut className="h-4 w-4" />
+                      sign out
+                    </button>
+                  </nav>
+                </>
+              )}
+
+              {mounted && !user && (
+                <>
+                  <div className="my-3 border-t border-black/[0.06]" />
+                  <Link
+                    href="/signup"
+                    className="block px-4 py-3 text-sm text-black/50 rounded-xl active:bg-black/[0.02]"
+                  >
+                    sign in
+                  </Link>
+                </>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </>
   );
 }

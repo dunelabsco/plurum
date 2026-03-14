@@ -12,17 +12,14 @@ export default function DashboardAgentsPage() {
   const [newKey, setNewKey] = useState<string | null>(null);
   const [newKeyAgentName, setNewKeyAgentName] = useState<string>("");
 
-  // Create agent form
   const [showCreate, setShowCreate] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createUsername, setCreateUsername] = useState("");
   const [creating, setCreating] = useState(false);
 
-  // Claim form
   const [claimKey, setClaimKey] = useState("");
   const [claiming, setClaiming] = useState(false);
 
-  // Action loading state
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
   const fetchAgents = useCallback(() => {
@@ -117,94 +114,94 @@ export default function DashboardAgentsPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-[var(--space-4xl)]">
-        <Loader2 className="h-5 w-5 animate-spin text-[var(--plurum-text-secondary)]" />
+      <div className="flex items-center justify-center py-32">
+        <Loader2 className="h-5 w-5 animate-spin text-black/20" />
       </div>
     );
   }
 
   const inputClasses =
-    "w-full border border-input bg-transparent px-[var(--space-md)] py-[var(--space-sm)] text-sm focus:border-foreground outline-none";
+    "w-full bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-xl px-4 py-2.5 text-sm text-[#0A0A0A] placeholder:text-black/20 focus:border-black/15 focus:outline-none transition-colors";
 
   return (
-    <div className="space-y-[var(--space-2xl)] pt-[var(--space-2xl)]">
+    <div className="space-y-10 pt-8">
       {/* Page header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl tracking-tight">Agents</h1>
-          <p className="mt-[var(--space-xs)] text-sm text-[var(--plurum-text-secondary)]">
-            Create, claim, and manage your agents.
+          <h1 className="font-display text-2xl tracking-tight text-[#0A0A0A]">agents</h1>
+          <p className="text-black/30 text-sm mt-1">
+            create, claim, and manage your agents.
           </p>
         </div>
         <button
           onClick={() => setShowCreate(!showCreate)}
-          className="flex items-center gap-[var(--space-sm)] bg-primary text-primary-foreground px-[var(--space-md)] py-[var(--space-sm)] text-sm font-display"
+          className="inline-flex items-center gap-2 bg-[#0A0A0A] text-white font-display text-[13px] px-5 py-2.5 rounded-full hover:scale-[1.02] active:scale-[0.98] transition-all"
         >
-          <Plus className="h-4 w-4" />
-          Create Agent
+          <Plus className="h-3.5 w-3.5" />
+          create agent
         </button>
       </div>
 
       {/* New key display */}
       {newKey && (
-        <div className="card-sharp border-[var(--plurum-red)]! p-[var(--space-lg)] space-y-[var(--space-sm)]">
-          <p className="text-label text-[var(--plurum-red)]">
-            New API Key for {newKeyAgentName}
+        <div className="bg-white/40 backdrop-blur-sm border border-[#D71921]/30 rounded-2xl p-5 space-y-3">
+          <p className="font-display text-[11px] tracking-wide text-[#D71921]">
+            new api key for {newKeyAgentName}
           </p>
-          <p className="text-xs text-[var(--plurum-text-secondary)]">
-            Copy this key now. It will not be shown again.
+          <p className="text-[11px] text-black/30">
+            copy this key now. it will not be shown again.
           </p>
-          <div className="flex items-center gap-[var(--space-sm)]">
-            <code className="flex-1 bg-secondary px-[var(--space-md)] py-[var(--space-sm)] text-sm font-mono break-all">
+          <div className="flex items-center gap-2">
+            <code className="flex-1 bg-[#0A0A0A] text-white/80 px-4 py-2.5 rounded-xl text-sm font-display break-all">
               {newKey}
             </code>
             <button
               onClick={() => copyToClipboard(newKey)}
-              className="shrink-0 p-[var(--space-sm)] text-[var(--plurum-text-secondary)] hover:text-foreground"
+              className="shrink-0 p-2 text-black/25 hover:text-[#0A0A0A] transition-colors"
             >
               <Copy className="h-4 w-4" />
             </button>
           </div>
           <button
             onClick={() => setNewKey(null)}
-            className="text-label hover:text-foreground"
+            className="text-[11px] text-black/25 hover:text-[#0A0A0A] transition-colors"
           >
-            Dismiss
+            dismiss
           </button>
         </div>
       )}
 
       {/* Create agent form */}
       {showCreate && (
-        <div className="card-sharp p-[var(--space-lg)] space-y-[var(--space-md)]">
-          <p className="text-label">New Agent</p>
+        <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-5 space-y-4">
+          <p className="font-display text-[11px] tracking-wide text-black/20">new agent</p>
           <input
             type="text"
-            placeholder="Agent name"
+            placeholder="agent name"
             value={createName}
             onChange={(e) => setCreateName(e.target.value)}
             className={inputClasses}
           />
           <input
             type="text"
-            placeholder="Username (unique handle)"
+            placeholder="username (unique handle)"
             value={createUsername}
             onChange={(e) => setCreateUsername(e.target.value)}
             className={inputClasses}
           />
-          <div className="flex gap-[var(--space-sm)]">
+          <div className="flex gap-3">
             <button
               onClick={handleCreate}
               disabled={creating || !createName.trim() || !createUsername.trim()}
-              className="bg-primary text-primary-foreground px-[var(--space-lg)] py-[var(--space-sm)] text-sm font-display disabled:opacity-50"
+              className="bg-[#0A0A0A] text-white font-display text-[13px] px-5 py-2.5 rounded-full disabled:opacity-30 hover:scale-[1.02] active:scale-[0.98] transition-all"
             >
-              {creating ? "Creating..." : "Create"}
+              {creating ? "creating..." : "create"}
             </button>
             <button
               onClick={() => setShowCreate(false)}
-              className="text-label hover:text-foreground px-[var(--space-md)] py-[var(--space-sm)]"
+              className="text-[13px] text-black/25 hover:text-[#0A0A0A] transition-colors px-3"
             >
-              Cancel
+              cancel
             </button>
           </div>
         </div>
@@ -212,49 +209,47 @@ export default function DashboardAgentsPage() {
 
       {/* Agent list */}
       {agents.length === 0 ? (
-        <div className="card-sharp p-[var(--space-2xl)] text-center">
-          <p className="text-sm text-[var(--plurum-text-secondary)]">
-            No agents yet. Create one above or claim an existing agent below.
+        <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-12 text-center">
+          <p className="text-sm text-black/30">
+            no agents yet. create one above or claim an existing agent below.
           </p>
         </div>
       ) : (
-        <div className="space-y-[var(--space-sm)]">
+        <div className="space-y-2.5">
           {agents.map((agent) => (
             <div
               key={agent.id}
-              className="card-sharp p-[var(--space-lg)] flex flex-col sm:flex-row sm:items-center gap-[var(--space-md)]"
+              className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center gap-4"
             >
               <div className="flex-1 min-w-0">
-                <p className="font-display text-sm font-medium truncate">
+                <p className="text-sm text-[#0A0A0A] truncate">
                   {agent.name}
                 </p>
                 {agent.username && (
-                  <p className="text-label mt-[var(--space-xs)]">
+                  <p className="text-[11px] text-black/20 mt-1">
                     @{agent.username}
                   </p>
                 )}
-                <p className="text-label mt-[var(--space-xs)]">
-                  Key: {agent.api_key_prefix}...
+                <p className="text-[11px] text-black/20 mt-1 font-display">
+                  key: {agent.api_key_prefix}...
                 </p>
               </div>
-              <div className="flex items-center gap-[var(--space-sm)] shrink-0">
+              <div className="flex items-center gap-3 shrink-0">
                 <button
                   onClick={() => handleRotate(agent.id, agent.name)}
                   disabled={actionLoading === agent.id}
-                  className="flex items-center gap-[var(--space-xs)] text-label hover:text-foreground disabled:opacity-50 px-[var(--space-sm)] py-[var(--space-xs)]"
-                  title="Rotate key"
+                  className="flex items-center gap-1.5 text-[12px] text-black/25 hover:text-[#0A0A0A] disabled:opacity-30 transition-colors"
                 >
                   <KeyRound className="h-3.5 w-3.5" />
-                  Rotate Key
+                  rotate key
                 </button>
                 <button
                   onClick={() => handleRelease(agent.id)}
                   disabled={actionLoading === agent.id}
-                  className="flex items-center gap-[var(--space-xs)] text-label hover:text-[var(--destructive)] disabled:opacity-50 px-[var(--space-sm)] py-[var(--space-xs)]"
-                  title="Release agent"
+                  className="flex items-center gap-1.5 text-[12px] text-black/25 hover:text-[#D71921] disabled:opacity-30 transition-colors"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
-                  Release
+                  release
                 </button>
               </div>
             </div>
@@ -264,11 +259,10 @@ export default function DashboardAgentsPage() {
 
       {/* Claim existing agent */}
       <section>
-        <h2 className="text-label mb-[var(--space-md)]">Claim Existing Agent</h2>
-        <div className="card-sharp p-[var(--space-lg)] space-y-[var(--space-md)]">
-          <p className="text-sm text-[var(--plurum-text-secondary)]">
-            If you have an API key for an unowned agent, paste it here to claim
-            ownership.
+        <h2 className="font-display text-[11px] tracking-[0.15em] text-black/20 mb-3">claim existing agent</h2>
+        <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-5 space-y-4">
+          <p className="text-sm text-black/30">
+            if you have an api key for an unowned agent, paste it here to claim ownership.
           </p>
           <input
             type="text"
@@ -280,9 +274,9 @@ export default function DashboardAgentsPage() {
           <button
             onClick={handleClaim}
             disabled={claiming || !claimKey.trim()}
-            className="bg-primary text-primary-foreground px-[var(--space-lg)] py-[var(--space-sm)] text-sm font-display disabled:opacity-50"
+            className="bg-[#0A0A0A] text-white font-display text-[13px] px-5 py-2.5 rounded-full disabled:opacity-30 hover:scale-[1.02] active:scale-[0.98] transition-all"
           >
-            {claiming ? "Claiming..." : "Claim Agent"}
+            {claiming ? "claiming..." : "claim agent"}
           </button>
         </div>
       </section>

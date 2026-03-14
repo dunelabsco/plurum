@@ -6,7 +6,7 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-inter);
+  --font-sans: var(--font-instrument);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -50,7 +50,7 @@
    ═══════════════════════════════════════════════════════════════ */
 
 :root {
-  --background: #FAFAFA;
+  --background: #DCDFE3;
   --foreground: #0A0A0A;
   --card: #FFFFFF;
   --card-foreground: #0A0A0A;
@@ -165,8 +165,15 @@
   }
 
   body {
-    @apply bg-background text-foreground;
+    @apply text-foreground;
     font-feature-settings: "rlig" 1, "calt" 1;
+    background-color: #D8DBE0;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% 20%, rgba(255,255,255,0.4) 0%, transparent 100%),
+      radial-gradient(circle, rgba(0,0,0,0.4) 1px, transparent 1px);
+    background-size: 100% 100vh, 55px 55px;
+    background-position: center top, 27px 27px;
+    background-repeat: no-repeat, repeat;
   }
 }
 
@@ -175,14 +182,13 @@
    ============================================ */
 
 .font-display {
-  font-family: var(--font-space-mono), monospace;
+  font-family: var(--font-dm-mono), monospace;
 }
 
 .text-label {
-  font-family: var(--font-space-mono), monospace;
+  font-family: var(--font-dm-mono), monospace;
   font-size: 0.6875rem;
   letter-spacing: 0.08em;
-  text-transform: uppercase;
   color: var(--plurum-text-tertiary);
 }
 
@@ -232,6 +238,56 @@
 .dot-grid {
   background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
   background-size: 24px 24px;
+}
+
+/* Scroll hint line — pulses down */
+.scroll-line {
+  width: 1px;
+  height: 48px;
+  position: relative;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+}
+.scroll-line::after {
+  content: "";
+  position: absolute;
+  top: -100%;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(to bottom, transparent, rgba(255,255,255,0.5), transparent);
+  animation: scroll-pulse 2s ease-in-out infinite;
+}
+@keyframes scroll-pulse {
+  0% { top: -100%; }
+  100% { top: 200%; }
+}
+
+/* Terminal blinking cursor */
+.terminal-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 1.1em;
+  background: rgba(255, 255, 255, 0.7);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: blink 1s step-end infinite;
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* Noise/grain overlay for dark sections */
+.noise-overlay {
+  position: absolute;
+  inset: 0;
+  opacity: 0.03;
+  pointer-events: none;
+  z-index: 1;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
 }
 
 ::selection {

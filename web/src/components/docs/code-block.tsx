@@ -20,40 +20,40 @@ export function CodeBlock({ code, language, filename, description }: CodeBlockPr
   };
 
   return (
-    <div className="relative group rounded-lg border border-border bg-[#0d1117] overflow-hidden">
+    <div className="relative group rounded-2xl bg-[#0A0A0A] overflow-hidden">
       {filename && (
-        <div className="flex items-center justify-between px-4 py-2 border-b border-border/30 bg-[#161b22]">
-          <span className="text-xs text-muted-foreground font-mono">{filename}</span>
+        <div className="flex items-center justify-between px-5 py-2.5 border-b border-white/5">
+          <span className="text-[11px] font-display text-white/40">{filename}</span>
           <button
             onClick={handleCopy}
-            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+            className="text-[11px] text-white/25 hover:text-white/60 transition-colors"
           >
-            {copied ? "Copied" : "Copy"}
+            {copied ? "copied" : "copy"}
           </button>
         </div>
       )}
       {!filename && (
         <button
           onClick={handleCopy}
-          className="absolute top-2 right-2 text-xs text-muted-foreground hover:text-foreground transition-colors opacity-0 group-hover:opacity-100 z-10"
+          className="absolute top-3 right-3 text-[11px] text-white/25 hover:text-white/60 transition-colors opacity-0 group-hover:opacity-100 z-10"
         >
-          {copied ? "Copied" : "Copy"}
+          {copied ? "copied" : "copy"}
         </button>
       )}
       {description && (
-        <div className="px-4 py-2 border-b border-border/30 bg-[#161b22]/50">
-          <p className="text-sm text-muted-foreground">{description}</p>
+        <div className="px-5 py-2.5 border-b border-white/5">
+          <p className="text-sm text-white/40">{description}</p>
         </div>
       )}
       <Highlight theme={themes.nightOwl} code={code.trim()} language={language}>
         {({ className, style, tokens, getLineProps, getTokenProps }) => (
           <pre
-            className={`${className} overflow-x-auto p-4 text-sm leading-relaxed`}
+            className={`${className} overflow-x-auto p-4 sm:p-5 text-xs sm:text-sm leading-relaxed`}
             style={{ ...style, background: "transparent", margin: 0 }}
           >
             {tokens.map((line, i) => (
               <div key={i} {...getLineProps({ line })}>
-                <span className="select-none text-muted-foreground/40 inline-block w-8 text-right mr-4 text-xs">
+                <span className="select-none text-white/15 hidden sm:inline-block w-8 text-right mr-4 text-xs">
                   {i + 1}
                 </span>
                 {line.map((token, key) => (
@@ -70,7 +70,7 @@ export function CodeBlock({ code, language, filename, description }: CodeBlockPr
 
 export function InlineCode({ children }: { children: React.ReactNode }) {
   return (
-    <code className="px-1.5 py-0.5 rounded bg-muted text-sm font-mono">
+    <code className="px-1.5 py-0.5 rounded-lg bg-black/[0.03] text-[11px] font-display">
       {children}
     </code>
   );
