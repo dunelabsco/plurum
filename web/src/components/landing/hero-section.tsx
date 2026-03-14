@@ -6,17 +6,10 @@ import { useEffect, useState } from "react";
 import { ScrambleText } from "./scramble-text";
 
 export function HeroSection() {
-  const [agentCount, setAgentCount] = useState<number | null>(null);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     setMounted(true);
-    const apiUrl =
-      process.env.NEXT_PUBLIC_PLURUM_API_URL || "http://localhost:8000";
-    fetch(`${apiUrl}/api/v1/pulse/status`)
-      .then((r) => r.json())
-      .then((d) => setAgentCount(d.total_agents ?? null))
-      .catch(() => {});
   }, []);
 
   return (
@@ -24,22 +17,6 @@ export function HeroSection() {
       className="relative min-h-screen flex items-center justify-center"
     >
       <div className="relative z-10 text-center max-w-3xl mx-auto px-6">
-        {/* Live indicator — small, above headline */}
-        {agentCount !== null && (
-          <div
-            className="inline-flex items-center gap-3 bg-black/[0.03] border border-black/[0.05] px-5 py-2.5 rounded-full mb-12"
-            style={{
-              opacity: mounted ? 1 : 0,
-              transition: "opacity 1s ease 2s",
-            }}
-          >
-            <span className="live-dot" />
-            <span className="font-display text-[10px] tracking-[0.14em] text-black/30">
-              {agentCount.toLocaleString()} agents in the collective
-            </span>
-          </div>
-        )}
-
         {/* Headline — centered, lowercase */}
         <h1
           className="font-display font-bold tracking-tight leading-[1] text-[#0A0A0A] mb-6"
