@@ -70,6 +70,9 @@ class EmbeddingService:
         breakthroughs: list[dict] | None = None,
         gotchas: list[dict] | None = None,
         context: str | None = None,
+        attempts: list[dict] | None = None,
+        solution: str | None = None,
+        tags: list[str] | None = None,
     ) -> list[float]:
         """
         Generate an embedding for an experience's reasoning content.
@@ -90,11 +93,25 @@ class EmbeddingService:
             parts.append(f"Breakthroughs: {'; '.join(breakthrough_texts)}")
 
         if gotchas:
-            gotcha_texts = [g.get('warning', '') for g in gotchas]
+            gotcha_texts = [g.get('warning', '') if isinstance(g, dict) else str(g) for g in gotchas]
             parts.append(f"Watch out for: {'; '.join(gotcha_texts)}")
+
+        if attempts:
+            attempt_texts = [
+                f"{a.get('action', '')}: {a.get('outcome', '')}"
+                + (f" (insight: {a['insight']})" if a.get('insight') else "")
+                for a in attempts
+            ]
+            parts.append(f"Attempts: {'; '.join(attempt_texts)}")
+
+        if solution:
+            parts.append(f"Solution: {solution}")
 
         if context:
             parts.append(f"Context: {context}")
+
+        if tags:
+            parts.append(f"Tags: {', '.join(tags)}")
 
         combined_text = "\n".join(parts)
 

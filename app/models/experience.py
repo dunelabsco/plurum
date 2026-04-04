@@ -2,13 +2,42 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import Enum
+from typing import Union
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.models.session import Visibility
+
+
+# ---------------------------------------------------------------------------
+# Secret scrubbing patterns (change 8a)
+# ---------------------------------------------------------------------------
+
+SECRET_PATTERNS = [
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),          # OpenAI keys
+    re.compile(r"sk-ant-[A-Za-z0-9\-]{20,}"),    # Anthropic keys
+    re.compile(r"ghp_[A-Za-z0-9]{36,}"),          # GitHub PATs
+    re.compile(r"gho_[A-Za-z0-9]{36,}"),          # GitHub OAuth
+    re.compile(r"plrm_live_[A-Za-z0-9\-_]{10,}"),# Plurum API keys
+    re.compile(r"Bearer\s+[A-Za-z0-9\-_\.]{20,}"),# Bearer tokens
+    re.compile(r"password\s*=\s*\S{4,}", re.IGNORECASE),
+    re.compile(r"AKIA[0-9A-Z]{16}"),              # AWS access keys
+]
+
+
+def scrub_text(text: str) -> None:
+    """Raise ValueError if text contains secret-like patterns."""
+    for pattern in SECRET_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            raise ValueError(
+                f"Text contains what looks like a secret ({match.group()[:12]}...). "
+                "Remove credentials before submitting."
+            )
 
 
 class ExperienceStatus(str, Enum):
@@ -63,6 +92,23 @@ class Artifact(BaseModel):
     description: str | None = None
 
 
+class Attempt(BaseModel):
+    """A single problem-solving attempt (unified format for Fennec agents)."""
+
+    action: str = Field(..., description="What was tried")
+    outcome: str = Field(..., description="What happened")
+    dead_end: bool = Field(False, description="Whether this was a dead end")
+    insight: str | None = Field(None, description="Why it failed or worked")
+
+
+class ContextStructured(BaseModel):
+    """Structured context for an experience."""
+
+    tools_used: list[str] = Field(default_factory=list)
+    environment: str | None = None
+    constraints: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -75,11 +121,76 @@ class ExperienceCreate(BaseModel):
     tools_used: list[str] = Field(default_factory=list)
     dead_ends: list[DeadEnd] = Field(default_factory=list)
     breakthroughs: list[Breakthrough] = Field(default_factory=list)
-    gotchas: list[Gotcha] = Field(default_factory=list)
+    gotchas: list[Union[Gotcha, str]] = Field(default_factory=list)
     context: str | None = Field(None, description="Free-form additional reasoning")
     artifacts: list[Artifact] = Field(default_factory=list)
     visibility: Visibility = Visibility.PUBLIC
     outcome: str | None = Field(None, pattern=r"^(success|partial|failure)$")
+    # New Fennec fields
+    attempts: list[Attempt] = Field(default_factory=list)
+    solution: str | None = Field(None, description="What ultimately worked")
+    tags: list[str] = Field(default_factory=list)
+    confidence: float | None = Field(None, ge=0.0, le=1.0, description="Self-assessed confidence")
+    context_structured: ContextStructured | None = Field(None, description="Structured context")
+
+    @field_validator("gotchas", mode="before")
+    @classmethod
+    def normalize_gotchas(cls, v):
+        """Accept both [{"warning": ..., "context": ...}] and ["plain string"] formats."""
+        if not v:
+            return v
+        normalized = []
+        for item in v:
+            if isinstance(item, str):
+                normalized.append({"warning": item, "context": None})
+            else:
+                normalized.append(item)
+        return normalized
+
+    @field_validator("goal", "solution", "context", mode="after")
+    @classmethod
+    def scrub_secrets_text(cls, v):
+        """Reject text fields that contain secret-like patterns."""
+        if v is not None:
+            scrub_text(v)
+        return v
+
+    @field_validator("attempts", mode="after")
+    @classmethod
+    def scrub_secrets_attempts(cls, v):
+        """Reject attempts that contain secret-like patterns."""
+        for attempt in v:
+            scrub_text(attempt.action)
+            scrub_text(attempt.outcome)
+            if attempt.insight:
+                scrub_text(attempt.insight)
+        return v
+
+    @field_validator("dead_ends", mode="after")
+    @classmethod
+    def scrub_secrets_dead_ends(cls, v):
+        for de in v:
+            scrub_text(de.what)
+            scrub_text(de.why)
+        return v
+
+    @field_validator("breakthroughs", mode="after")
+    @classmethod
+    def scrub_secrets_breakthroughs(cls, v):
+        for b in v:
+            scrub_text(b.insight)
+            scrub_text(b.detail)
+        return v
+
+    @field_validator("gotchas", mode="after")
+    @classmethod
+    def scrub_secrets_gotchas(cls, v):
+        for g in v:
+            if isinstance(g, Gotcha):
+                scrub_text(g.warning)
+            elif isinstance(g, dict):
+                scrub_text(g.get("warning", ""))
+        return v
 
 
 class ExperienceAcquire(BaseModel):
@@ -131,15 +242,19 @@ class ExperienceSummary(BaseModel):
     visibility: Visibility
     outcome: str | None
     success_rate: float
-    quality_score: float
+    trust_score: float = Field(validation_alias="quality_score")
     upvotes: int
     downvotes: int
     total_reports: int
     agent_id: UUID
     created_at: datetime
+    # New Fennec fields
+    tags: list[str] = Field(default_factory=list)
+    confidence: float | None = None
 
     class Config:
         from_attributes = True
+        populate_by_name = True
 
 
 class ExperienceDetail(ExperienceSummary):
@@ -154,9 +269,14 @@ class ExperienceDetail(ExperienceSummary):
     success_count: int = 0
     failure_count: int = 0
     updated_at: datetime | None = None
+    # New Fennec fields
+    attempts: list[Attempt] = Field(default_factory=list, validation_alias="attempts_json")
+    solution: str | None = None
+    context_structured: ContextStructured | None = None
 
     class Config:
         from_attributes = True
+        populate_by_name = True
 
 
 class ExperienceAcquireResponse(BaseModel):

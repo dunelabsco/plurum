@@ -35,6 +35,7 @@ class ExperienceAssembler:
         gotchas = []
         artifacts = []
         context_parts = []
+        attempts = []
 
         for entry in entries:
             entry_type = entry["entry_type"]
@@ -45,11 +46,25 @@ class ExperienceAssembler:
                     "what": content.get("what", ""),
                     "why": content.get("why", ""),
                 })
+                # Also populate attempts (unified format)
+                attempts.append({
+                    "action": content.get("what", ""),
+                    "outcome": content.get("why", ""),
+                    "dead_end": True,
+                    "insight": content.get("why", ""),
+                })
             elif entry_type == "breakthrough":
                 breakthroughs.append({
                     "insight": content.get("insight", ""),
                     "detail": content.get("detail", ""),
                     "importance": content.get("importance", "medium"),
+                })
+                # Also populate attempts (unified format)
+                attempts.append({
+                    "action": content.get("insight", ""),
+                    "outcome": content.get("detail", ""),
+                    "dead_end": False,
+                    "insight": content.get("detail", ""),
                 })
             elif entry_type == "gotcha":
                 gotchas.append({
@@ -76,6 +91,7 @@ class ExperienceAssembler:
             breakthroughs=breakthroughs or None,
             gotchas=gotchas or None,
             context=context,
+            attempts=attempts or None,
         )
 
         # Create experience draft
@@ -94,6 +110,8 @@ class ExperienceAssembler:
             "visibility": session.get("visibility", "public"),
             "outcome": session.get("outcome"),
             "reasoning_embedding": reasoning_embedding,
+            # Auto-assembled attempts from session entries
+            "attempts_json": attempts,
         }
 
         return self.experience_repo.create(experience_data)

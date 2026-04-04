@@ -25,6 +25,9 @@ class ExperienceService:
             breakthroughs=[b for b in data.get("breakthroughs", [])],
             gotchas=[g for g in data.get("gotchas", [])],
             context=data.get("context"),
+            attempts=data.get("attempts", []),
+            solution=data.get("solution"),
+            tags=data.get("tags", []),
         )
 
         experience_data = {
@@ -41,6 +44,12 @@ class ExperienceService:
             "visibility": data.get("visibility", "public"),
             "outcome": data.get("outcome"),
             "reasoning_embedding": reasoning_embedding,
+            # New Fennec fields
+            "attempts_json": data.get("attempts", []),
+            "solution": data.get("solution"),
+            "tags": data.get("tags", []),
+            "confidence": data.get("confidence"),
+            "context_structured": data.get("context_structured"),
         }
 
         return self.repo.create(experience_data)
@@ -292,7 +301,7 @@ class ExperienceService:
 
     def _compress_full(self, exp: dict) -> dict:
         """Complete reasoning dump."""
-        return {
+        result = {
             "goal": exp["goal"],
             "domain": exp.get("domain"),
             "tools_used": exp.get("tools_used", []),
@@ -304,8 +313,15 @@ class ExperienceService:
             "artifacts": exp.get("artifacts", []),
             "success_rate": exp.get("success_rate", 0),
             "total_reports": exp.get("total_reports", 0),
-            "quality_score": exp.get("quality_score", 0),
+            "trust_score": exp.get("quality_score", 0),
+            # New Fennec fields
+            "attempts": exp.get("attempts_json", []),
+            "solution": exp.get("solution"),
+            "tags": exp.get("tags", []),
+            "confidence": exp.get("confidence"),
+            "context_structured": exp.get("context_structured"),
         }
+        return result
 
     # -----------------------------------------------------------------------
     # Helpers
