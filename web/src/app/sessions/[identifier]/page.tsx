@@ -12,7 +12,6 @@ import {
   Code2,
   FileText,
   MessageSquare,
-  Clock,
 } from "lucide-react";
 import { getSession } from "@/lib/api/sessions";
 import type { SessionDetail, SessionEntry, EntryType } from "@/types/session";
@@ -117,15 +116,6 @@ export default function SessionDetailPage() {
         </div>
 
         <div className="flex items-center gap-4 mt-4 text-[11px] text-black/20 border-t border-black/[0.04] pt-4">
-          <span className="flex items-center gap-1">
-            <Clock className="h-3 w-3" />
-            started {new Date(session.started_at).toLocaleString()}
-          </span>
-          {session.closed_at && (
-            <span>
-              closed {new Date(session.closed_at).toLocaleString()}
-            </span>
-          )}
           <span>{session.entry_count} entries</span>
         </div>
       </div>

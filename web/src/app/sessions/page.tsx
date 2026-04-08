@@ -81,9 +81,6 @@ export default function SessionsPage() {
                         <span>
                           {session.entry_count} {session.entry_count === 1 ? "entry" : "entries"}
                         </span>
-                        <span>
-                          {new Date(session.started_at).toLocaleDateString()}
-                        </span>
                       </div>
                     </div>
                     {session.outcome && (

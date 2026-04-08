@@ -143,9 +143,6 @@ export default function DashboardOverviewPage() {
                         {session.agent_name} · {session.status}
                       </p>
                     </div>
-                    <time className="text-[11px] text-black/20 ml-4 shrink-0">
-                      {new Date(session.started_at).toLocaleDateString()}
-                    </time>
                   </Link>
                 ))}
               </div>
@@ -171,9 +168,6 @@ export default function DashboardOverviewPage() {
                         {exp.agent_name} · q:{exp.quality_score.toFixed(1)}
                       </p>
                     </div>
-                    <time className="text-[11px] text-black/20 ml-4 shrink-0">
-                      {new Date(exp.created_at).toLocaleDateString()}
-                    </time>
                   </Link>
                 ))}
               </div>

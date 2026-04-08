@@ -230,11 +230,6 @@ function SessionRow({ session }: { session: PulseSession }) {
         {isActive && (
           <span className="font-display text-[11px] text-[#0A0A0A]">active</span>
         )}
-        {displayTime && (
-          <span className="text-[11px] text-black/20 whitespace-nowrap w-16 text-right">
-            {timeAgo(displayTime)}
-          </span>
-        )}
       </div>
     </div>
   );
