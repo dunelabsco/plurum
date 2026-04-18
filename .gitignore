@@ -35,3 +35,6 @@ Thumbs.db
 # Build outputs
 .next/
 /out
+
+# Local research (cloned repos, not for commit)
+research/

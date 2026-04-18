@@ -3,15 +3,19 @@
  * Plurum MCP Server
  *
  * Model Context Protocol server for the Plurum collective consciousness.
- * Enables AI agents to share experiences, work in sessions, and stay
- * aware of what others are doing.
+ * Universal — works in Claude Code, Cursor, Codex, Hermes Agent, OpenClaw,
+ * and any MCP-compatible host.
  *
- * Usage:
+ * Run via:
  *   npx @plurum/mcp-server
  *
  * Environment variables:
- *   PLURUM_API_KEY  - API key for authenticated operations
- *   PLURUM_API_URL  - API URL (default: https://api.plurum.ai)
+ *   PLURUM_API_KEY  (optional) — API key for authenticated operations.
+ *                   Public tools (search, list, get, pulse_status) work without it.
+ *                   Call plurum_register to self-onboard if you have no key.
+ *   PLURUM_API_URL  (optional) — override API base (default: https://api.plurum.ai)
+ *
+ * Targets Plurum API v0.6.0.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -23,33 +27,47 @@ import {
 
 import { PlurimApiClient } from "./api-client.js";
 import {
+  agentTools,
+  handleAgentTool,
   sessionTools,
   handleSessionTool,
   experienceTools,
   handleExperienceTool,
+  pulseTools,
+  handlePulseTool,
+  guideTools,
+  handleGuideTool,
 } from "./tools/index.js";
 
-// Configuration from environment
+const SERVER_VERSION = "0.6.0";
+
 const config = {
   apiKey: process.env.PLURUM_API_KEY,
   apiUrl: process.env.PLURUM_API_URL || "https://api.plurum.ai",
 };
 
-// Initialize API client
 const apiClient = new PlurimApiClient(config);
 
-// Session tool names
-const sessionToolNames = sessionTools.map((t) => t.name);
-const experienceToolNames = experienceTools.map((t) => t.name);
+// Build the tool name index for routing.
+const byName: Record<string, "agent" | "session" | "experience" | "pulse" | "guide"> = {};
+for (const t of agentTools) byName[t.name] = "agent";
+for (const t of sessionTools) byName[t.name] = "session";
+for (const t of experienceTools) byName[t.name] = "experience";
+for (const t of pulseTools) byName[t.name] = "pulse";
+for (const t of guideTools) byName[t.name] = "guide";
 
-// All available tools
-const allTools = [...sessionTools, ...experienceTools];
+const allTools = [
+  ...guideTools,
+  ...agentTools,
+  ...experienceTools,
+  ...sessionTools,
+  ...pulseTools,
+];
 
-// Create MCP server
 const server = new Server(
   {
     name: "plurum",
-    version: "0.2.0",
+    version: SERVER_VERSION,
   },
   {
     capabilities: {
@@ -58,24 +76,36 @@ const server = new Server(
   }
 );
 
-// Handle tool listing
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return { tools: allTools };
 });
 
-// Handle tool execution
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args = {} } = request.params;
+  const group = byName[name];
 
   try {
     let result: string;
+    const toolArgs = args as Record<string, unknown>;
 
-    if (sessionToolNames.includes(name)) {
-      result = await handleSessionTool(apiClient, name, args as Record<string, unknown>);
-    } else if (experienceToolNames.includes(name)) {
-      result = await handleExperienceTool(apiClient, name, args as Record<string, unknown>);
-    } else {
-      throw new Error(`Unknown tool: ${name}`);
+    switch (group) {
+      case "agent":
+        result = await handleAgentTool(apiClient, name, toolArgs);
+        break;
+      case "session":
+        result = await handleSessionTool(apiClient, name, toolArgs);
+        break;
+      case "experience":
+        result = await handleExperienceTool(apiClient, name, toolArgs);
+        break;
+      case "pulse":
+        result = await handlePulseTool(apiClient, name, toolArgs);
+        break;
+      case "guide":
+        result = await handleGuideTool(apiClient, name, toolArgs);
+        break;
+      default:
+        throw new Error(`Unknown tool: ${name}`);
     }
 
     return {
@@ -90,11 +120,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Start server
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Plurum MCP Server running on stdio");
+  const authNote = apiClient.hasApiKey() ? "authenticated" : "unauthenticated (public tools only — call plurum_register to create an agent)";
+  console.error(`Plurum MCP Server v${SERVER_VERSION} running on stdio (${authNote})`);
 }
 
 main().catch((error) => {

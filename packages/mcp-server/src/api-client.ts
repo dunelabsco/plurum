@@ -1,14 +1,29 @@
 /**
- * HTTP client for Plurum API
+ * HTTP client for Plurum API.
+ *
+ * Targets the Plurum API v0.6.0 at https://api.plurum.ai/api/v1
+ * All endpoints are versioned under /api/v1 and grouped by resource:
+ * agents, sessions, experiences, pulse.
  */
 
 import type {
   PlurimMcpConfig,
+  // Agents
+  AgentRegisterRequest,
+  AgentRegisterResponse,
+  AgentProfile,
+  RotateKeyResponse,
+  // Sessions
   SessionOpenResponse,
   SessionCreateRequest,
   SessionEntryRequest,
   SessionCloseRequest,
+  SessionCloseResponse,
   SessionDetail,
+  SessionListResponse,
+  ContributionRequest,
+  ContributionDetail,
+  // Experiences
   ExperienceDetail,
   ExperienceCreateRequest,
   ExperienceSearchRequest,
@@ -16,9 +31,13 @@ import type {
   ExperienceAcquireRequest,
   ExperienceAcquireResponse,
   ExperienceListResponse,
+  SimilarExperience,
   OutcomeReportRequest,
   VoteRequest,
+  // Pulse / inbox
   PulseStatus,
+  InboxResponse,
+  MarkInboxReadRequest,
 } from "./types.js";
 
 export class PlurimApiClient {
@@ -28,6 +47,14 @@ export class PlurimApiClient {
   constructor(config: PlurimMcpConfig) {
     this.apiUrl = config.apiUrl.replace(/\/$/, "");
     this.apiKey = config.apiKey;
+  }
+
+  hasApiKey(): boolean {
+    return !!this.apiKey;
+  }
+
+  setApiKey(key: string): void {
+    this.apiKey = key;
   }
 
   private async request<T>(
@@ -43,7 +70,7 @@ export class PlurimApiClient {
     if (requiresAuth) {
       if (!this.apiKey) {
         throw new Error(
-          "API key required for this operation. Set PLURUM_API_KEY environment variable."
+          "API key required for this operation. Set PLURUM_API_KEY environment variable, or call plurum_register to create a new agent."
         );
       }
       headers["Authorization"] = `Bearer ${this.apiKey}`;
@@ -56,11 +83,31 @@ export class PlurimApiClient {
     });
 
     if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Plurum API error (${response.status}): ${error}`);
+      const errText = await response.text();
+      // Surface the server error body verbatim — it contains useful details
+      // like "Text contains what looks like a secret..." from the scrub validator.
+      throw new Error(`Plurum API ${response.status}: ${errText}`);
     }
 
-    return response.json() as Promise<T>;
+    // Some endpoints return 204/empty; guard against parse errors.
+    const text = await response.text();
+    if (!text) return undefined as unknown as T;
+    return JSON.parse(text) as T;
+  }
+
+  // ===== AGENTS =====
+
+  async register(data: AgentRegisterRequest): Promise<AgentRegisterResponse> {
+    // Public endpoint — no auth required
+    return this.request<AgentRegisterResponse>("POST", "/api/v1/agents/register", data, false);
+  }
+
+  async whoami(): Promise<AgentProfile> {
+    return this.request<AgentProfile>("GET", "/api/v1/agents/me", undefined, true);
+  }
+
+  async rotateKey(): Promise<RotateKeyResponse> {
+    return this.request<RotateKeyResponse>("POST", "/api/v1/agents/me/rotate-key", undefined, true);
   }
 
   // ===== SESSIONS =====
@@ -74,28 +121,44 @@ export class PlurimApiClient {
   }
 
   async listSessions(options?: {
-    status?: string;
+    status?: SessionDetail["status"];
     limit?: number;
     offset?: number;
-  }): Promise<unknown> {
+  }): Promise<SessionListResponse> {
     const params = new URLSearchParams();
     if (options?.status) params.set("status", options.status);
     if (options?.limit) params.set("limit", String(options.limit));
     if (options?.offset) params.set("offset", String(options.offset));
     const query = params.toString();
-    return this.request<unknown>("GET", `/api/v1/sessions${query ? `?${query}` : ""}`, undefined, true);
+    return this.request<SessionListResponse>(
+      "GET", `/api/v1/sessions${query ? `?${query}` : ""}`, undefined, true
+    );
   }
 
   async logEntry(sessionId: string, data: SessionEntryRequest): Promise<unknown> {
     return this.request<unknown>("POST", `/api/v1/sessions/${sessionId}/entries`, data, true);
   }
 
-  async closeSession(sessionId: string, data: SessionCloseRequest): Promise<unknown> {
-    return this.request<unknown>("POST", `/api/v1/sessions/${sessionId}/close`, data, true);
+  async closeSession(sessionId: string, data: SessionCloseRequest): Promise<SessionCloseResponse> {
+    return this.request<SessionCloseResponse>(
+      "POST", `/api/v1/sessions/${sessionId}/close`, data, true
+    );
   }
 
   async abandonSession(sessionId: string): Promise<unknown> {
     return this.request<unknown>("POST", `/api/v1/sessions/${sessionId}/abandon`, undefined, true);
+  }
+
+  async contributeToSession(sessionId: string, data: ContributionRequest): Promise<ContributionDetail> {
+    return this.request<ContributionDetail>(
+      "POST", `/api/v1/sessions/${sessionId}/contribute`, data, true
+    );
+  }
+
+  async listContributions(sessionId: string): Promise<ContributionDetail[]> {
+    return this.request<ContributionDetail[]>(
+      "GET", `/api/v1/sessions/${sessionId}/contributions`, undefined, true
+    );
   }
 
   // ===== EXPERIENCES =====
@@ -105,7 +168,8 @@ export class PlurimApiClient {
   }
 
   async getExperience(identifier: string): Promise<ExperienceDetail> {
-    return this.request<ExperienceDetail>("GET", `/api/v1/experiences/${identifier}`, undefined, true);
+    // Public endpoint — no auth required
+    return this.request<ExperienceDetail>("GET", `/api/v1/experiences/${identifier}`, undefined, false);
   }
 
   async listExperiences(options?: {
@@ -122,13 +186,15 @@ export class PlurimApiClient {
     if (options?.offset) params.set("offset", String(options.offset));
     if (options?.include_archived) params.set("include_archived", "true");
     const query = params.toString();
+    // Public endpoint — no auth required
     return this.request<ExperienceListResponse>(
-      "GET", `/api/v1/experiences${query ? `?${query}` : ""}`, undefined, true
+      "GET", `/api/v1/experiences${query ? `?${query}` : ""}`, undefined, false
     );
   }
 
   async searchExperiences(data: ExperienceSearchRequest): Promise<ExperienceSearchResponse> {
-    return this.request<ExperienceSearchResponse>("POST", "/api/v1/experiences/search", data, true);
+    // Public endpoint — no auth required
+    return this.request<ExperienceSearchResponse>("POST", "/api/v1/experiences/search", data, false);
   }
 
   async acquireExperience(
@@ -152,14 +218,26 @@ export class PlurimApiClient {
     return this.request<unknown>("POST", `/api/v1/experiences/${identifier}/vote`, data, true);
   }
 
-  async findSimilar(identifier: string, limit?: number): Promise<unknown> {
+  async findSimilar(identifier: string, limit?: number): Promise<SimilarExperience[]> {
     const params = limit ? `?limit=${limit}` : "";
-    return this.request<unknown>("GET", `/api/v1/experiences/${identifier}/similar${params}`, undefined, true);
+    // Public endpoint — no auth required
+    return this.request<SimilarExperience[]>(
+      "GET", `/api/v1/experiences/${identifier}/similar${params}`, undefined, false
+    );
   }
 
-  // ===== PULSE =====
+  // ===== PULSE / INBOX =====
 
   async getPulseStatus(): Promise<PulseStatus> {
-    return this.request<PulseStatus>("GET", "/api/v1/pulse/status");
+    // Public endpoint — no auth required
+    return this.request<PulseStatus>("GET", "/api/v1/pulse/status", undefined, false);
+  }
+
+  async checkInbox(): Promise<InboxResponse> {
+    return this.request<InboxResponse>("GET", "/api/v1/pulse/inbox", undefined, true);
+  }
+
+  async markInboxRead(data: MarkInboxReadRequest): Promise<unknown> {
+    return this.request<unknown>("POST", "/api/v1/pulse/inbox/mark-read", data, true);
   }
 }

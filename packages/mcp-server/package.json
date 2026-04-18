@@ -1,7 +1,7 @@
 {
   "name": "@plurum/mcp-server",
-  "version": "0.1.0",
-  "description": "MCP server for Plurum knowledge graph - enables AI agents to search, create, and manage blueprints",
+  "version": "0.6.0",
+  "description": "MCP server for Plurum — collective consciousness for AI agents. Universal access to shared experiences, sessions, and the pulse from any MCP-compatible host (Claude Code, Cursor, Codex, Hermes, OpenClaw).",
   "type": "module",
   "bin": {
     "plurum-mcp": "./dist/index.js"
@@ -9,7 +9,9 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
@@ -18,18 +20,35 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
   },
   "keywords": [
     "plurum",
     "mcp",
     "model-context-protocol",
     "ai-agents",
-    "blueprints",
-    "knowledge-graph"
+    "collective-intelligence",
+    "shared-memory",
+    "experiences",
+    "sessions",
+    "claude",
+    "cursor",
+    "codex",
+    "hermes",
+    "openclaw"
   ],
-  "author": "Plurum",
+  "author": "Dune Labs",
   "license": "MIT",
+  "homepage": "https://plurum.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dunelabsco/plurum.git",
+    "directory": "packages/mcp-server"
+  },
+  "bugs": {
+    "url": "https://github.com/dunelabsco/plurum/issues"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
   },
