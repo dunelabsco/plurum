@@ -318,7 +318,12 @@ class MemoryService:
             parsed = json.loads(raw)
             candidates = parsed.get("memories", [])
         except Exception as e:
-            logger.warning("Memory extraction failed: %s", e)
+            # Log at ERROR so failures are visible in Vercel logs. A silent
+            # swallow here is how we wasted a 6-hour benchmark run.
+            logger.error(
+                "Memory extraction failed (model=%s): %s",
+                self._extraction_model, e,
+            )
             return []
 
         if not isinstance(candidates, list) or not candidates:

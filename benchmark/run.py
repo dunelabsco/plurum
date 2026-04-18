@@ -39,7 +39,8 @@ PLURUM_API_URL = os.environ.get("PLURUM_API_URL", "https://api.plurum.ai").rstri
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 LONGMEMEVAL_DIR = Path(os.environ.get("LONGMEMEVAL_DIR", Path.home() / "LongMemEval"))
 
-ANSWER_MODEL = "gpt-4o"
+# Default to gpt-5.4-mini; override via PLURUM_ANSWER_MODEL env var if needed.
+ANSWER_MODEL = os.environ.get("PLURUM_ANSWER_MODEL", "gpt-5.4-mini")
 TOP_K_MEMORIES = 20            # how many memories to retrieve per question
 MAX_MEMORY_CHARS = 200         # per memory when shown to the answer model
 REQUEST_TIMEOUT = 60.0
@@ -317,6 +318,7 @@ def main() -> None:
 
     t_start = time.time()
     extracted_total = 0
+    questions_processed = 0
 
     with out_path.open("a") as fh:
         for entry in tqdm(data, desc="questions", unit="q"):
@@ -329,8 +331,23 @@ def main() -> None:
                     client, openai_client, entry, args.run_tag, args.skip_ingest
                 )
                 extracted_total += ext
+                questions_processed += 1
                 fh.write(json.dumps({"question_id": qid, "hypothesis": hypothesis}) + "\n")
                 fh.flush()
+
+                # Fail-loud: if we've processed 5 questions and extracted zero memories,
+                # the backend extract endpoint is broken. Abort instead of burning hours.
+                if (not args.skip_ingest
+                    and questions_processed == 5
+                    and extracted_total == 0):
+                    print(
+                        "\n!! 5 questions processed, 0 memories extracted. "
+                        "Backend /memories/extract is likely returning errors "
+                        "(model id, auth, or 500s). Aborting. Check PLURUM_EXTRACTION_MODEL "
+                        "in Vercel env vars and the backend logs.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
             except KeyboardInterrupt:
                 print("\nInterrupted. Hypothesis file is checkpointed — resume with --skip-done.")
                 sys.exit(130)
