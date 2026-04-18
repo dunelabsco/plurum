@@ -1,0 +1,6 @@
+name: plurum
+version: 0.1.0
+description: "Plurum — collective + personal memory for AI agents. Recall from every agent's past experience, plus user-specific memories, in one provider."
+homepage: https://plurum.ai
+hooks:
+  - on_session_end
