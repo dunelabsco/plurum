@@ -85,6 +85,9 @@ class MemorySummary(BaseModel):
     agent_id: Optional[UUID] = None
     session_id: Optional[UUID] = None
     created_at: datetime
+    # Temporal fields (Phase 1 of retrieval upgrade)
+    event_date_start: Optional[datetime] = None
+    event_date_end: Optional[datetime] = None
 
     class Config:
         from_attributes = True

@@ -25,48 +25,136 @@ from app.services.embedding_service import get_embedding_service
 logger = logging.getLogger(__name__)
 
 
-EXTRACTION_SYSTEM_PROMPT = """You extract DURABLE facts about a user from a conversation turn.
+def _coerce_iso_date(value) -> Optional[str]:
+    """Best-effort coerce an LLM-returned date into an ISO string Postgres can accept.
 
-Return a JSON object: {"memories": [{"content": "...", "memory_type": "fact|preference|observation|note", "importance": "high|medium|low"}]}
+    Accepts 'YYYY-MM-DD', 'YYYY-MM-DDTHH:MM:SS', datetime, None, empty string.
+    Returns None for anything unparseable — we'd rather lose a date than 500.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    # Common LLM output: "YYYY-MM-DD" → valid Postgres TIMESTAMPTZ literal
+    # We don't need to parse; Postgres handles ISO dates directly.
+    # Do a light sanity check so we don't submit obvious garbage.
+    if len(s) >= 8 and s[:4].isdigit() and s[4] == "-":
+        return s
+    return None
 
-Rules:
-- Only extract things worth remembering long-term: preferences, stable facts, important events, situational context.
+
+EXTRACTION_SYSTEM_PROMPT = """You extract DURABLE, RETRIEVABLE memories about a user from a conversation turn.
+
+Return a JSON object with this exact schema:
+{
+  "memories": [
+    {
+      "content": "self-contained sentence",
+      "memory_type": "fact|preference|observation|note",
+      "importance": "high|medium|low",
+      "event_date_start": "YYYY-MM-DD" or null,
+      "event_date_end": "YYYY-MM-DD" or null,
+      "entities": ["entity name 1", "entity name 2"]
+    }
+  ]
+}
+
+═══════════════════════════════════════════════════════════════
+CORE PRINCIPLES
+═══════════════════════════════════════════════════════════════
+- Extract things worth remembering long-term: preferences, stable facts, important events, situational context.
 - Do NOT extract: transient task state, routine chit-chat, things already widely known.
-- Each memory should be a single standalone sentence (no pronouns referring to prior turns).
+- Each memory is a SINGLE standalone sentence — no pronouns referring to prior turns.
 - Prefer fewer high-quality memories over many low-value ones.
 - If the turn has nothing worth remembering, return {"memories": []}.
 
-**TEMPORAL ANCHORING — CRITICAL FOR RECALL**
-Every memory that describes a dated event MUST include the date/time explicitly.
-When a message mentions:
-  - An absolute date ("January 28th", "March 3rd, 2026") → include it verbatim.
-  - A relative time ("last week", "two weeks ago", "yesterday") → if a session date is
-    provided, resolve to an absolute date (e.g., "session date is 2026-03-10, user says
-    'two weeks ago' → memory should say 'on 2026-02-24' or 'two weeks before 2026-03-10').
-    If no session date is provided, preserve the relative phrase verbatim.
-  - A duration ("for 3 weeks", "since February") → include it in the memory.
-Never drop a date, never summarize away temporal specificity. These anchors are the single
-most important signal for correct recall.
+═══════════════════════════════════════════════════════════════
+5-DIMENSION CAPTURE (WHAT / WHEN / WHERE / WHO / WHY)
+═══════════════════════════════════════════════════════════════
+For every memory about a dated event, aim to capture all five:
 
-Examples (good vs bad):
-  Turn: "I picked up my Dell XPS 13 on January 28th" (session date 2026-02-01)
-  GOOD:  "User picked up their Dell XPS 13 on January 28th."
-  BAD:   "User has a new Dell XPS 13."
+  WHAT  — the action or fact itself ("picked up Dell XPS 13")
+  WHEN  — absolute date if possible, or resolved relative date
+  WHERE — location if mentioned ("at the Apple Store", "in Berlin")
+  WHO   — every person/entity involved ("with her sister Rachel", "from colleague Tom")
+  WHY   — motivation, outcome, emotion if stated ("because the old one died")
 
-  Turn: "I started the marigold seeds two weeks ago" (session date 2026-03-17)
-  GOOD:  "User started marigold seeds around March 3rd (two weeks before 2026-03-17)."
-  BAD:   "User is growing marigolds."
+Dense, information-rich memories retrieve better than sparse ones.
 
-Types:
-- fact: objective statement about the user ("User is a backend engineer")
-- preference: stated preference ("User prefers Python 3.11")
-- observation: inferred from behavior ("User often works with PostgreSQL")
-- note: freeform, use sparingly
+GOOD: "On January 28, 2026, user picked up their new Dell XPS 13 at the Apple Store with her sister Rachel because her old MacBook died."
+SPARSE (bad): "User has a new Dell XPS 13."
 
-Importance:
-- high: identity, explicit preferences, dated events with specific timestamps
-- medium: useful context
-- low: minor details
+═══════════════════════════════════════════════════════════════
+TEMPORAL FIELDS — STRUCTURED
+═══════════════════════════════════════════════════════════════
+If the memory describes a specific dated event, emit:
+  event_date_start: ISO date of when it started/happened (YYYY-MM-DD)
+  event_date_end:   ISO date of when it ended (same as start for single-day events)
+
+Single-day event: both fields equal.  Date range: start < end.  Undated/ongoing: both null.
+
+Resolution rules:
+  - ABSOLUTE date ("January 28th", "March 3, 2026") → use that date directly
+  - RELATIVE date ("last week", "two weeks ago", "yesterday") + session_date provided
+    → resolve to absolute: session_date MINUS the offset
+      ex: session_date = 2026-03-17, "two weeks ago" → event_date_start = 2026-03-03
+  - RELATIVE date, NO session_date → leave event_date_start/end null but preserve phrase in content
+  - DURATION without a date ("for 3 weeks", "since February") → preserve in content, dates optional
+
+Also preserve every date reference inside `content` verbatim, even after emitting structured fields.
+The structured fields are additional, not a replacement.
+
+═══════════════════════════════════════════════════════════════
+ENTITIES
+═══════════════════════════════════════════════════════════════
+For every memory, list the key named things it refers to in `entities`:
+  - Products ("Dell XPS 13", "Samsung Galaxy S22")
+  - Places ("Apple Store", "St. Mary's Church", "Berlin")
+  - People ("Rachel", "Tom", "Dr. Smith")
+  - Events/groups ("Holi", "Page Turners book club")
+  - Specific items ("The Nightingale", "Adidas running shoes")
+
+Exclude generic nouns ("phone", "car", "meeting") unless qualified ("my new car", "the Friday meeting").
+Include 0–5 entities per memory. Use canonical form when obvious ("Dell XPS 13" not "my laptop").
+
+═══════════════════════════════════════════════════════════════
+EXAMPLES
+═══════════════════════════════════════════════════════════════
+Turn: "I picked up my Dell XPS 13 on January 28th"  (session_date 2026-02-01)
+→ {
+    "content": "On January 28, 2026, user picked up their new Dell XPS 13 laptop.",
+    "memory_type": "fact", "importance": "high",
+    "event_date_start": "2026-01-28", "event_date_end": "2026-01-28",
+    "entities": ["Dell XPS 13"]
+  }
+
+Turn: "I started the marigold seeds two weeks ago"  (session_date 2026-03-17)
+→ {
+    "content": "On March 3, 2026 (two weeks before 2026-03-17), user started marigold seeds at home.",
+    "memory_type": "fact", "importance": "medium",
+    "event_date_start": "2026-03-03", "event_date_end": "2026-03-03",
+    "entities": ["marigolds"]
+  }
+
+Turn: "I prefer Python 3.11 over 3.10 for the type inference"
+→ {
+    "content": "User prefers Python 3.11 over Python 3.10 because of the type inference.",
+    "memory_type": "preference", "importance": "high",
+    "event_date_start": null, "event_date_end": null,
+    "entities": ["Python 3.11", "Python 3.10"]
+  }
+
+═══════════════════════════════════════════════════════════════
+IMPORTANCE
+═══════════════════════════════════════════════════════════════
+  high   — identity, explicit preferences, dated events with specific timestamps, key relationships
+  medium — useful situational context
+  low    — minor details worth storing but unlikely to be asked about
 """
 
 
@@ -166,29 +254,47 @@ class MemoryService:
         if not isinstance(candidates, list) or not candidates:
             return []
 
-        # Generate embeddings in one batch for efficiency
-        contents = [
-            c.get("content", "").strip()
-            for c in candidates
-            if isinstance(c, dict) and c.get("content")
+        # Filter out invalid candidates (missing content)
+        valid_candidates = [
+            c for c in candidates
+            if isinstance(c, dict) and c.get("content") and c["content"].strip()
         ]
-        if not contents:
+        if not valid_candidates:
             return []
 
+        contents = [c["content"].strip() for c in valid_candidates]
         embeddings = self.embedding.generate_embeddings([c[:8000] for c in contents])
 
         rows = []
-        for cand, content, emb in zip(candidates, contents, embeddings):
+        for cand, content, emb in zip(valid_candidates, contents, embeddings):
+            # Merge entities into metadata so they're retrievable even before
+            # the entity layer lands in Phase 2.
+            cand_metadata = dict(metadata or {})
+            entities = cand.get("entities") or []
+            if isinstance(entities, list) and entities:
+                cand_metadata["entities"] = [
+                    e.strip() for e in entities if isinstance(e, str) and e.strip()
+                ]
+
             row = {
                 "user_id": str(user_id),
                 "content": content,
-                "memory_type": cand.get("memory_type", "fact") if isinstance(cand, dict) else "fact",
-                "importance": cand.get("importance", "medium") if isinstance(cand, dict) else "medium",
-                "metadata": metadata or {},
+                "memory_type": cand.get("memory_type", "fact"),
+                "importance": cand.get("importance", "medium"),
+                "metadata": cand_metadata,
                 "embedding": emb,
                 "source_user": user_content[:2000],
                 "source_assistant": assistant_content[:2000],
             }
+
+            # Structured temporal fields (Phase 1 retrieval upgrade)
+            eds = _coerce_iso_date(cand.get("event_date_start"))
+            ede = _coerce_iso_date(cand.get("event_date_end"))
+            if eds:
+                row["event_date_start"] = eds
+            if ede:
+                row["event_date_end"] = ede
+
             if agent_id:
                 row["agent_id"] = str(agent_id)
             if session_id:
