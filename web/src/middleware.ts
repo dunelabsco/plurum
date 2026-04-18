@@ -5,8 +5,6 @@ const protectedPaths = ["/dashboard"];
 
 const legacyRedirects: Record<string, string> = {
   "/overview": "/dashboard",
-  "/blueprints": "/experiences",
-  "/discussions": "/",
   "/api-keys": "/dashboard/agents",
   "/settings": "/dashboard/settings",
   "/agents/me": "/dashboard/agents",
@@ -76,10 +74,6 @@ export const config = {
     "/login",
     "/overview/:path*",
     "/overview",
-    "/blueprints/:path*",
-    "/blueprints",
-    "/discussions/:path*",
-    "/discussions",
     "/api-keys/:path*",
     "/api-keys",
     "/settings/:path*",

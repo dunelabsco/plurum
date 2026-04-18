@@ -158,7 +158,7 @@ class TestHttpClientRequests:
         mock_response.json.return_value = []
         mock_httpx.get.return_value = mock_response
 
-        client.get("/api/v1/blueprints", params={"limit": 10})
+        client.get("/api/v1/experiences", params={"limit": 10})
 
         call_args = mock_httpx.get.call_args
         assert call_args.kwargs["params"] == {"limit": 10}
