@@ -53,6 +53,11 @@ class MemoryExtract(BaseModel):
     user_content: str = Field(..., min_length=1)
     assistant_content: str = Field(..., min_length=1)
     session_id: Optional[UUID] = None
+    session_date: Optional[str] = Field(
+        None,
+        description="Timestamp of the session/turn (ISO format or natural language). "
+                    "Lets the LLM anchor relative times like 'last week' to an absolute date.",
+    )
     metadata: dict = Field(default_factory=dict)
 
 

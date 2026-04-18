@@ -30,11 +30,32 @@ EXTRACTION_SYSTEM_PROMPT = """You extract DURABLE facts about a user from a conv
 Return a JSON object: {"memories": [{"content": "...", "memory_type": "fact|preference|observation|note", "importance": "high|medium|low"}]}
 
 Rules:
-- Only extract things worth remembering long-term: preferences, stable facts, important context.
+- Only extract things worth remembering long-term: preferences, stable facts, important events, situational context.
 - Do NOT extract: transient task state, routine chit-chat, things already widely known.
-- Each memory should be a single sentence, standalone (no pronouns referring to prior turns).
+- Each memory should be a single standalone sentence (no pronouns referring to prior turns).
 - Prefer fewer high-quality memories over many low-value ones.
 - If the turn has nothing worth remembering, return {"memories": []}.
+
+**TEMPORAL ANCHORING — CRITICAL FOR RECALL**
+Every memory that describes a dated event MUST include the date/time explicitly.
+When a message mentions:
+  - An absolute date ("January 28th", "March 3rd, 2026") → include it verbatim.
+  - A relative time ("last week", "two weeks ago", "yesterday") → if a session date is
+    provided, resolve to an absolute date (e.g., "session date is 2026-03-10, user says
+    'two weeks ago' → memory should say 'on 2026-02-24' or 'two weeks before 2026-03-10').
+    If no session date is provided, preserve the relative phrase verbatim.
+  - A duration ("for 3 weeks", "since February") → include it in the memory.
+Never drop a date, never summarize away temporal specificity. These anchors are the single
+most important signal for correct recall.
+
+Examples (good vs bad):
+  Turn: "I picked up my Dell XPS 13 on January 28th" (session date 2026-02-01)
+  GOOD:  "User picked up their Dell XPS 13 on January 28th."
+  BAD:   "User has a new Dell XPS 13."
+
+  Turn: "I started the marigold seeds two weeks ago" (session date 2026-03-17)
+  GOOD:  "User started marigold seeds around March 3rd (two weeks before 2026-03-17)."
+  BAD:   "User is growing marigolds."
 
 Types:
 - fact: objective statement about the user ("User is a backend engineer")
@@ -43,7 +64,7 @@ Types:
 - note: freeform, use sparingly
 
 Importance:
-- high: identity, explicit preferences, critical context
+- high: identity, explicit preferences, dated events with specific timestamps
 - medium: useful context
 - low: minor details
 """
@@ -104,12 +125,26 @@ class MemoryService:
         agent_id: Optional[UUID] = None,
         session_id: Optional[UUID] = None,
         metadata: Optional[dict] = None,
+        session_date: Optional[str] = None,
     ) -> list[dict]:
         """Run an LLM pass over a turn to extract durable memories.
 
+        If session_date is provided, the extractor anchors relative time
+        references (e.g., "last week") to absolute dates. This is critical
+        for temporal-reasoning recall.
+
         Returns the list of stored memory rows (may be empty).
         """
-        user_msg = f"USER:\n{user_content}\n\nASSISTANT:\n{assistant_content}"
+        date_block = (
+            f"SESSION DATE: {session_date.strip()}\n\n"
+            f"(Use this date to convert relative times like 'last week' or 'two weeks ago' "
+            f"into absolute dates in your extracted memories.)\n\n"
+        ) if session_date else ""
+
+        user_msg = (
+            f"{date_block}"
+            f"USER:\n{user_content}\n\nASSISTANT:\n{assistant_content}"
+        )
         try:
             resp = self._openai.chat.completions.create(
                 model=self._extraction_model,

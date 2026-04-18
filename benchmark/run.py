@@ -88,16 +88,25 @@ class PlurimClient:
             timeout=REQUEST_TIMEOUT,
         )
 
-    def extract(self, user_id: str, user_msg: str, asst_msg: str) -> int:
+    def extract(
+        self,
+        user_id: str,
+        user_msg: str,
+        asst_msg: str,
+        session_date: Optional[str] = None,
+    ) -> int:
         """POST /memories/extract. Returns count of memories stored."""
+        body = {
+            "user_content": user_msg[:6000],
+            "assistant_content": asst_msg[:6000],
+        }
+        if session_date:
+            body["session_date"] = session_date
         try:
             r = self.http.post(
                 "/api/v1/memories/extract",
                 params={"user_id": user_id},
-                json={
-                    "user_content": user_msg[:6000],
-                    "assistant_content": asst_msg[:6000],
-                },
+                json=body,
             )
             if r.status_code == 422:
                 # Secret-scrub rejection. Skip this pair.
@@ -132,23 +141,36 @@ class PlurimClient:
 # ---------------------------------------------------------------------------
 
 ANSWER_SYSTEM_PROMPT = (
-    "You are answering a question based ONLY on the user's stored memories. "
-    "Use only the memories provided — do NOT use your own knowledge or guess. "
-    "If the memories do not contain the answer, say you don't know. "
-    "Give the shortest possible factual answer — a phrase, date, or sentence. "
-    "Do not narrate. Do not apologize. Do not restate the question."
+    "You answer questions about a user using ONLY their stored memories.\n\n"
+    "Rules:\n"
+    "- Use only the memories provided. Do NOT use outside knowledge.\n"
+    "- If the memories do not contain enough information, say you don't know.\n"
+    "- For 'which happened first' questions, compare the dates/times in the memories. "
+    "If one memory has a date and another only says 'recently' or 'two weeks ago', "
+    "use the question date to anchor the relative time before comparing.\n"
+    "- For 'how many days/weeks' questions, do the date arithmetic using the anchors "
+    "in the memories.\n"
+    "- Prefer the shortest possible factual answer — a phrase, date, count, or one-sentence statement.\n"
+    "- Do not narrate, apologize, or restate the question.\n"
 )
 
 
-def generate_answer(openai_client: OpenAI, question: str, memories: list[str]) -> str:
+def generate_answer(
+    openai_client: OpenAI,
+    question: str,
+    memories: list[str],
+    question_date: Optional[str] = None,
+) -> str:
     if not memories:
         mem_block = "(no memories available)"
     else:
-        # Truncate each memory and join
         lines = [f"- {m[:MAX_MEMORY_CHARS]}" for m in memories]
         mem_block = "\n".join(lines)
 
+    date_block = f"Question date: {question_date}\n\n" if question_date else ""
+
     prompt = (
+        f"{date_block}"
         f"Memories about the user:\n{mem_block}\n\n"
         f"Question: {question}\n\n"
         f"Answer:"
@@ -193,14 +215,16 @@ def process_question(
     question = entry["question"]
     user_id = user_id_for_question(qid, run_tag)
 
-    # 1) Ingest haystack_sessions
+    # 1) Ingest haystack_sessions (with session dates for temporal anchoring)
     extracted_total = 0
     if not skip_ingest:
         sessions = entry.get("haystack_sessions") or []
-        for session in sessions:
+        haystack_dates = entry.get("haystack_dates") or []
+        for idx, session in enumerate(sessions):
             if not isinstance(session, list):
                 continue
             # Pair adjacent user→assistant turns
+            session_date = haystack_dates[idx] if idx < len(haystack_dates) else None
             i = 0
             while i < len(session) - 1:
                 t1, t2 = session[i], session[i + 1]
@@ -212,6 +236,7 @@ def process_question(
                         user_id=user_id,
                         user_msg=t1.get("content", ""),
                         asst_msg=t2.get("content", ""),
+                        session_date=session_date,
                     )
                     i += 2
                 else:
@@ -220,8 +245,13 @@ def process_question(
     # 2) Retrieve
     memories = client.search(user_id=user_id, query=question)
 
-    # 3) Answer
-    hypothesis = generate_answer(openai_client, question, memories)
+    # 3) Answer (pass question_date so the LLM can do temporal arithmetic)
+    hypothesis = generate_answer(
+        openai_client,
+        question,
+        memories,
+        question_date=entry.get("question_date"),
+    )
     return qid, hypothesis, extracted_total
 
 # ---------------------------------------------------------------------------

@@ -93,6 +93,7 @@ async def extract_memories(
         agent_id=UUID(agent["id"]),
         session_id=data.session_id,
         metadata=data.metadata,
+        session_date=data.session_date,
     )
     return {"extracted": extracted, "count": len(extracted)}
 
