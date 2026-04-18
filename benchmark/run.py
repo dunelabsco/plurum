@@ -50,8 +50,8 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 DATASET_FILES = {
     "oracle": "longmemeval_oracle.json",
-    "s":      "longmemeval_s.json",
-    "m":      "longmemeval_m.json",
+    "s":      "longmemeval_s_cleaned.json",
+    "m":      "longmemeval_m_cleaned.json",
 }
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s")

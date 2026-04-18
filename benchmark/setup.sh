@@ -29,18 +29,28 @@ else
 fi
 
 # -- Datasets ----------------------------------------------------------------
+# HuggingFace dataset: xiaowu0162/longmemeval-cleaned
+# Files: longmemeval_oracle.json, longmemeval_s_cleaned.json, longmemeval_m_cleaned.json
 mkdir -p "$LONGMEM_DIR/data"
-if [ ! -f "$LONGMEM_DIR/data/longmemeval_oracle.json" ]; then
-  echo "Downloading LongMemEval oracle dataset..."
-  # Their dataset is hosted on HuggingFace. Follow their README if this URL changes.
-  curl -L -o "$LONGMEM_DIR/data/longmemeval_oracle.json" \
-    "https://huggingface.co/datasets/xiaowu0162/LongMemEval/resolve/main/longmemeval_oracle.json" || {
-    echo ""
-    echo "!! Could not auto-download the dataset."
-    echo "   Please grab it manually from https://huggingface.co/datasets/xiaowu0162/LongMemEval"
-    echo "   and drop longmemeval_oracle.json into $LONGMEM_DIR/data/"
-  }
-fi
+HF_BASE="https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main"
+
+download_if_missing() {
+  local fname="$1"
+  local dest="$LONGMEM_DIR/data/$fname"
+  # Re-download if file is missing OR tiny (<1KB means a prior 404 saved an error stub)
+  if [ ! -f "$dest" ] || [ "$(wc -c < "$dest")" -lt 1024 ]; then
+    echo "Downloading $fname ..."
+    curl -fL -o "$dest" "$HF_BASE/$fname" && return 0
+    echo "  !! failed — tried $HF_BASE/$fname"
+    rm -f "$dest"
+    return 1
+  fi
+}
+
+download_if_missing "longmemeval_oracle.json" || true
+# Bigger files — optional for first run. Uncomment if you want them pre-downloaded.
+# download_if_missing "longmemeval_s_cleaned.json" || true
+# download_if_missing "longmemeval_m_cleaned.json" || true
 
 # -- Python venv (for the harness only) --------------------------------------
 cd "$BENCH_DIR"
