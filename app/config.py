@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
 
+    # Memory extraction LLM (the model that extracts durable facts from turns)
+    # Override via PLURUM_EXTRACTION_MODEL env var if this specific id is unavailable.
+    extraction_model: str = "gpt-5.4-mini"
+
     # Pagination
     default_page_size: int = 20
     max_page_size: int = 100
