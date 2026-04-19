@@ -316,26 +316,33 @@ class PlurimMemoryProvider(MemoryProvider):
 
     def system_prompt_block(self) -> str:
         return (
-            "# Plurum Memory — IMPORTANT\n"
-            "You have access to collective + personal memory. The collective contains "
-            "experiences from every Plurum agent ever, with concrete URL patterns, API quirks, "
-            "dead-ends, and working solutions. Other agents have likely already solved problems "
-            "adjacent to yours.\n\n"
-            "**RULE — ALWAYS CALL `plurum_search` FIRST** before attempting any non-trivial task, "
-            "especially anything involving:\n"
-            "- Web scraping, APIs, or external services\n"
-            "- Specific techniques (deployment, migrations, configuration)\n"
-            "- Dated/historical data lookups\n"
-            "- Technologies you'd normally Google for\n\n"
-            "If `plurum_search` returns a relevant experience (trust_score or confidence > 0.5, "
-            "or similarity > 0.4), use its `solution` and `gotchas` BEFORE trying your own approach. "
-            "A minute of reading memory saves 10 minutes of dead-ends.\n\n"
-            "Other tools:\n"
-            "- `plurum_recall` — search this user's personal facts/preferences\n"
-            "- `plurum_conclude` — store a durable fact the user tells you\n"
-            "- `plurum_profile` — get a combined view of personal + collective memory for the current task\n\n"
-            "When a task completes successfully, your learnings auto-save (sync_turn runs in the "
-            "background) so the next agent can benefit."
+            "# Plurum Memory — READ CAREFULLY\n"
+            "You have access to two memory layers:\n"
+            "- **Personal memory** — facts about THIS user (preferences, identity, past answers).\n"
+            "- **Collective memory** — experiences from every Plurum agent, with concrete URL "
+            "patterns, API quirks, gotchas, and working solutions.\n\n"
+            "**WORKFLOW — do this at the START of every non-trivial task:**\n"
+            "1. Call `plurum_recall` with the task description. Personal memory may already have "
+            "the exact answer from a prior session — do NOT re-do work.\n"
+            "2. Call `plurum_search` with the task description. Another agent likely solved an "
+            "adjacent problem.\n"
+            "3. If any hit has `similarity > 0.3`, READ its `solution` and `gotchas` BEFORE trying "
+            "anything yourself. Follow them precisely — especially tool/approach specifics "
+            "('use browser not curl', 'use this URL pattern', 'do NOT use that parameter').\n\n"
+            "**TRUST_SCORE CAVEAT — critical:**\n"
+            "New experiences start at `trust_score = 0` because no one has reported outcomes yet. "
+            "**This does NOT mean the experience is wrong or low quality.** It means it's fresh. "
+            "Judge relevance by `similarity` and the content of the `solution`/`gotchas` fields — "
+            "never dismiss a hit just because trust_score is 0.\n\n"
+            "**APPLY, don't cherry-pick:**\n"
+            "When an experience says 'browser tool essential' or 'curl returns empty', that is a "
+            "load-bearing gotcha. Do not ignore it and try curl anyway. Apply the full solution, "
+            "not just the parts that match your initial instinct.\n\n"
+            "**Other tools:**\n"
+            "- `plurum_conclude` — explicitly store a durable fact the user tells you\n"
+            "- `plurum_profile` — one-shot combined view (personal + collective) for the current task\n\n"
+            "After the task completes successfully, your learnings auto-save in the background "
+            "so the next agent benefits."
         )
 
     # -- Prefetch ------------------------------------------------------------
@@ -408,21 +415,67 @@ class PlurimMemoryProvider(MemoryProvider):
 
     @staticmethod
     def _format_profile(profile: dict) -> str:
+        """Format profile response into a rich, actionable context block.
+
+        Shows the actual `solution` + `gotchas` for each retrieved experience so
+        the agent can follow them directly — not just a title and a trust score.
+        Trust score and similarity are annotations, not filters: new experiences
+        have trust=0 by default and are still valid signal.
+        """
         mems = profile.get("memories") or []
         exps = profile.get("experiences") or []
         out: List[str] = []
+
         if mems:
-            out.append("**Personal memories:**")
-            for m in mems[:8]:
-                out.append(f"- {m.get('content', '').strip()}")
+            out.append("### Personal memories about this user")
+            for m in mems[:10]:
+                content = (m.get("content") or "").strip()
+                if content:
+                    out.append(f"- {content}")
+
         if exps:
-            out.append("\n**Relevant collective experiences:**")
+            out.append("")
+            out.append("### Relevant experiences from the collective")
+            out.append("_(trust_score=0 just means fresh/unrated — judge by similarity + content)_")
+            out.append("")
             for e in exps[:5]:
-                goal = e.get("goal") or ""
+                goal = (e.get("goal") or "").strip()
                 sid = e.get("short_id") or ""
-                trust = e.get("trust_score") or e.get("quality_score") or 0
-                rate = e.get("success_rate") or 0
-                out.append(f"- [{sid}] {goal}  _(trust {trust:.2f}, success {rate:.0%})_")
+                sim = float(e.get("similarity") or 0.0)
+                trust = float(e.get("trust_score") or e.get("quality_score") or 0.0)
+                conf = e.get("confidence")
+
+                out.append(f"→ [{sid}] {goal}")
+                meta_bits = [f"similarity {sim:.2f}", f"trust {trust:.2f}"]
+                if conf is not None:
+                    meta_bits.append(f"confidence {float(conf):.2f}")
+                out.append(f"   _{', '.join(meta_bits)}_")
+
+                solution = (e.get("solution") or "").strip()
+                if solution:
+                    out.append(f"   **Solution:** {solution[:500]}")
+
+                gotchas = e.get("gotchas") or []
+                if gotchas:
+                    out.append(f"   **Gotchas:**")
+                    for g in gotchas[:5]:
+                        if isinstance(g, dict):
+                            warning = (g.get("warning") or "").strip()
+                        else:
+                            warning = str(g).strip()
+                        if warning:
+                            out.append(f"     - {warning[:300]}")
+
+                # Show artifacts if the solution referenced code
+                arts = e.get("artifacts") or []
+                if arts:
+                    first = arts[0]
+                    if isinstance(first, dict) and first.get("code"):
+                        lang = first.get("language") or ""
+                        code = (first.get("code") or "")[:300]
+                        out.append(f"   **Artifact ({lang}):** `{code}`")
+                out.append("")
+
         return "\n".join(out).strip()
 
     # -- Sync turn -----------------------------------------------------------
