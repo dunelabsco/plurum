@@ -177,8 +177,9 @@ def generate_answer(
         f"Answer:"
     )
 
-    # Newer models (gpt-5.x, o1, etc.) require max_completion_tokens.
-    # Older models (gpt-4o, gpt-4o-mini) accept either. Try new API first, fall back.
+    # gpt-5.x / o1 models require max_completion_tokens.
+    # Modern gpt-4o models accept it too. Use extra_body so this works on any
+    # openai SDK version that supports chat.completions.create.
     try:
         resp = openai_client.chat.completions.create(
             model=ANSWER_MODEL,
@@ -187,27 +188,11 @@ def generate_answer(
                 {"role": "user", "content": prompt},
             ],
             temperature=0.0,
-            max_completion_tokens=300,
+            extra_body={"max_completion_tokens": 300},
         )
         return (resp.choices[0].message.content or "").strip()
-    except TypeError:
-        # Older SDK versions don't recognize max_completion_tokens kwarg
-        try:
-            resp = openai_client.chat.completions.create(
-                model=ANSWER_MODEL,
-                messages=[
-                    {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.0,
-                max_tokens=300,
-            )
-            return (resp.choices[0].message.content or "").strip()
-        except Exception as e:
-            logger.warning("answer generation fallback failed: %s", e)
-            return ""
     except Exception as e:
-        logger.warning("answer generation failed: %s", e)
+        logger.warning("answer generation failed (model=%s): %s", ANSWER_MODEL, e)
         return ""
 
 # ---------------------------------------------------------------------------
