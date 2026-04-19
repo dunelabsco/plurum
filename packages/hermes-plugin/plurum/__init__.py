@@ -316,13 +316,26 @@ class PlurimMemoryProvider(MemoryProvider):
 
     def system_prompt_block(self) -> str:
         return (
-            "# Plurum Memory\n"
-            "Active. You have access to two layers:\n"
-            "- **Personal memory** (this user): use `plurum_recall` to search their facts/preferences, "
-            "`plurum_conclude` to store new facts.\n"
-            "- **Collective memory** (every agent globally): use `plurum_search` to find experiences "
-            "of agents who solved similar problems. Prefer acquiring collective knowledge over reasoning from scratch.\n"
-            "Call `plurum_profile` at task start for a combined view."
+            "# Plurum Memory — IMPORTANT\n"
+            "You have access to collective + personal memory. The collective contains "
+            "experiences from every Plurum agent ever, with concrete URL patterns, API quirks, "
+            "dead-ends, and working solutions. Other agents have likely already solved problems "
+            "adjacent to yours.\n\n"
+            "**RULE — ALWAYS CALL `plurum_search` FIRST** before attempting any non-trivial task, "
+            "especially anything involving:\n"
+            "- Web scraping, APIs, or external services\n"
+            "- Specific techniques (deployment, migrations, configuration)\n"
+            "- Dated/historical data lookups\n"
+            "- Technologies you'd normally Google for\n\n"
+            "If `plurum_search` returns a relevant experience (trust_score or confidence > 0.5, "
+            "or similarity > 0.4), use its `solution` and `gotchas` BEFORE trying your own approach. "
+            "A minute of reading memory saves 10 minutes of dead-ends.\n\n"
+            "Other tools:\n"
+            "- `plurum_recall` — search this user's personal facts/preferences\n"
+            "- `plurum_conclude` — store a durable fact the user tells you\n"
+            "- `plurum_profile` — get a combined view of personal + collective memory for the current task\n\n"
+            "When a task completes successfully, your learnings auto-save (sync_turn runs in the "
+            "background) so the next agent can benefit."
         )
 
     # -- Prefetch ------------------------------------------------------------
@@ -340,9 +353,32 @@ class PlurimMemoryProvider(MemoryProvider):
         self._prefetch_locks[sid] = lock
         with lock:
             result = self._prefetch_results.pop(sid, "")
+
+        # Turn 1 of a session has nothing cached from a prior queue_prefetch.
+        # Fetch synchronously once so the agent sees Plurum context on its
+        # FIRST turn, not only from turn 2 onward. Bounded timeout to keep
+        # turn latency reasonable.
+        if not result and query and query.strip() and self._http:
+            try:
+                profile = self._http._request(
+                    "GET",
+                    "/api/v1/profile",
+                    params={
+                        "user_id": self._user_for(sid),
+                        "query": query,
+                        "memory_limit": 5,
+                        "experience_limit": 5,
+                    },
+                    timeout=4.0,
+                )
+                result = self._format_profile(profile or {})
+            except Exception as e:
+                logger.debug("Plurum synchronous first-turn prefetch failed: %s", e)
+                result = ""
+
         if not result:
             return ""
-        return f"## Plurum Context\n{result}"
+        return f"## Plurum Context (relevant memories + experiences for this turn)\n{result}"
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         if not self._http or not query or not query.strip():
