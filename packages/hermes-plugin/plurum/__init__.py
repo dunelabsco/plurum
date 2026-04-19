@@ -181,18 +181,31 @@ CONCLUDE_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 class PlurimMemoryProvider(MemoryProvider):
-    """Plurum — collective + personal memory provider."""
+    """Plurum — collective + personal memory provider.
+
+    Gateway-safe: per-session caches so concurrent Telegram/Discord/Slack
+    conversations don't stomp each other's prefetched context.
+    """
+
+    # UUID5 namespace seed for deriving stable user UUIDs from arbitrary strings.
+    # Changing this would invalidate all existing memories — treat as a constant.
+    _UUID5_NAMESPACE_PREFIX = "plurum:user"
 
     def __init__(self):
         self._http: Optional[_PlurimHTTP] = None
         self._api_key: str = ""
         self._api_url: str = DEFAULT_API_URL
-        self._user_id: str = ""
-        self._session_id: str = ""
-        self._prefetch_result: str = ""
-        self._prefetch_lock = threading.Lock()
-        self._prefetch_thread: Optional[threading.Thread] = None
-        self._sync_thread: Optional[threading.Thread] = None
+        # Default session identity. For CLI this is stable; for gateway the
+        # per-session kwargs override via `initialize(session_id=..., user_id=...)`.
+        self._default_user_id: str = ""
+        self._platform: str = "cli"
+        # Per-session state — keyed by session_id. Gateway mode calls initialize
+        # once per session, then prefetch/sync_turn/handle_tool_call with
+        # session_id in kwargs.
+        self._session_users: Dict[str, str] = {}           # session_id -> user_id
+        self._prefetch_results: Dict[str, str] = {}        # session_id -> cached text
+        self._prefetch_locks: Dict[str, threading.Lock] = {}
+        self._prefetch_threads: Dict[str, threading.Thread] = {}
 
     # -- Identity ------------------------------------------------------------
 
@@ -246,28 +259,58 @@ class PlurimMemoryProvider(MemoryProvider):
         cfg = self._load_config()
         self._api_key = cfg["api_key"]
         self._api_url = cfg["api_url"] or DEFAULT_API_URL
-        self._session_id = session_id or ""
+        self._platform = (kwargs.get("platform") or "cli").strip() or "cli"
 
-        # Prefer gateway-provided user_id (platform user); fall back to env for CLI.
+        # Prefer gateway-provided user_id (platform-scoped); fall back to env for CLI.
         raw_uid = (kwargs.get("user_id") or cfg["user_id"] or "").strip()
-        self._user_id = self._coerce_uuid(raw_uid) if raw_uid else self._synthetic_user_id()
+        if raw_uid:
+            resolved_uid = self._coerce_uuid(raw_uid, self._platform)
+        else:
+            resolved_uid = self._synthetic_user_id()
 
-        self._http = _PlurimHTTP(self._api_url, self._api_key)
+        # Per-session mapping (gateway may call initialize once per user+session).
+        sid = (session_id or "").strip()
+        if sid:
+            self._session_users[sid] = resolved_uid
+        self._default_user_id = resolved_uid
 
-    @staticmethod
-    def _coerce_uuid(value: str) -> str:
-        """Accept a UUID directly; otherwise derive a deterministic UUID5 from the string."""
+        # Fail loud if no key — crashes at first tool call are harder to diagnose
+        # than a visible warning at init time.
+        if not self._api_key:
+            logger.warning(
+                "Plurum initialized WITHOUT an API key. Tool calls will fail. "
+                "Set PLURUM_API_KEY in ~/.hermes/.env or via `hermes memory setup`."
+            )
+            self._http = None
+        else:
+            self._http = _PlurimHTTP(self._api_url, self._api_key)
+
+    @classmethod
+    def _coerce_uuid(cls, value: str, platform: str = "cli") -> str:
+        """Accept a UUID directly; otherwise derive a deterministic UUID5.
+
+        The UUID5 namespace is scoped by platform so that user id "123" on
+        Telegram and user id "123" on Discord never collide.
+        """
         try:
             return str(uuid.UUID(value))
         except ValueError:
-            return str(uuid.uuid5(uuid.NAMESPACE_URL, f"plurum:user:{value}"))
+            seed = f"{cls._UUID5_NAMESPACE_PREFIX}:{platform}:{value}"
+            return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
-    @staticmethod
-    def _synthetic_user_id() -> str:
+    @classmethod
+    def _synthetic_user_id(cls) -> str:
         """Fallback: derive from $USER + hostname so it's stable for a single machine."""
         host = os.uname().nodename if hasattr(os, "uname") else "unknown"
         user = os.environ.get("USER") or os.environ.get("USERNAME") or "default"
-        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"plurum:local:{user}@{host}"))
+        seed = f"{cls._UUID5_NAMESPACE_PREFIX}:local:{user}@{host}"
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
+    def _user_for(self, session_id: str) -> str:
+        """Resolve the user_id for a given session. Falls back to the default."""
+        if session_id and session_id in self._session_users:
+            return self._session_users[session_id]
+        return self._default_user_id
 
     # -- System prompt -------------------------------------------------------
 
@@ -285,11 +328,18 @@ class PlurimMemoryProvider(MemoryProvider):
     # -- Prefetch ------------------------------------------------------------
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        if self._prefetch_thread and self._prefetch_thread.is_alive():
-            self._prefetch_thread.join(timeout=3.0)
-        with self._prefetch_lock:
-            result = self._prefetch_result
-            self._prefetch_result = ""
+        sid = session_id or ""
+        # Wait for any in-flight prefetch for THIS session (not other sessions'
+        # threads). Gateway deployments can have concurrent sessions — blocking
+        # one session on another's prefetch would stall turns.
+        t = self._prefetch_threads.get(sid)
+        if t and t.is_alive():
+            t.join(timeout=3.0)
+
+        lock = self._prefetch_locks.get(sid) or threading.Lock()
+        self._prefetch_locks[sid] = lock
+        with lock:
+            result = self._prefetch_results.pop(sid, "")
         if not result:
             return ""
         return f"## Plurum Context\n{result}"
@@ -298,21 +348,27 @@ class PlurimMemoryProvider(MemoryProvider):
         if not self._http or not query or not query.strip():
             return
 
+        sid = session_id or ""
+        user_id = self._user_for(sid)
+        lock = self._prefetch_locks.setdefault(sid, threading.Lock())
+
         def _run():
             try:
                 profile = self._http.get(
                     "/api/v1/profile",
-                    params={"user_id": self._user_id, "query": query, "memory_limit": 5, "experience_limit": 3},
+                    params={"user_id": user_id, "query": query, "memory_limit": 5, "experience_limit": 3},
                 )
                 formatted = self._format_profile(profile or {})
                 if formatted:
-                    with self._prefetch_lock:
-                        self._prefetch_result = formatted
+                    with lock:
+                        self._prefetch_results[sid] = formatted
             except Exception as e:
-                logger.debug("Plurum prefetch failed: %s", e)
+                logger.debug("Plurum prefetch failed (session=%s): %s", sid, e)
 
-        self._prefetch_thread = threading.Thread(target=_run, daemon=True, name="plurum-prefetch")
-        self._prefetch_thread.start()
+        self._prefetch_threads[sid] = threading.Thread(
+            target=_run, daemon=True, name=f"plurum-prefetch-{sid or 'default'}"
+        )
+        self._prefetch_threads[sid].start()
 
     @staticmethod
     def _format_profile(profile: dict) -> str:
@@ -336,27 +392,39 @@ class PlurimMemoryProvider(MemoryProvider):
     # -- Sync turn -----------------------------------------------------------
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Run LLM fact extraction against the turn, non-blocking."""
-        if not self._http or not user_content or not assistant_content:
+        """Run LLM fact extraction against the turn, non-blocking.
+
+        Fire-and-forget per turn. Multiple concurrent sessions can each sync
+        their own turns without blocking one another.
+        """
+        if not self._http:
             return
+        if not user_content or not user_content.strip():
+            logger.debug("Plurum sync_turn skipped: empty user content")
+            return
+        if not assistant_content or not assistant_content.strip():
+            logger.debug("Plurum sync_turn skipped: empty assistant content")
+            return
+
+        user_id = self._user_for(session_id or "")
 
         def _run():
             try:
                 self._http.post(
                     "/api/v1/memories/extract",
-                    params={"user_id": self._user_id},
+                    params={"user_id": user_id},
                     body={
                         "user_content": user_content[:6000],
                         "assistant_content": assistant_content[:6000],
                     },
                 )
             except Exception as e:
-                logger.debug("Plurum sync_turn failed: %s", e)
+                logger.debug("Plurum sync_turn failed (session=%s): %s", session_id, e)
 
-        if self._sync_thread and self._sync_thread.is_alive():
-            self._sync_thread.join(timeout=5.0)
-        self._sync_thread = threading.Thread(target=_run, daemon=True, name="plurum-sync")
-        self._sync_thread.start()
+        # Daemon thread, no tracking — runs to completion on its own.
+        threading.Thread(
+            target=_run, daemon=True, name=f"plurum-sync-{session_id or 'default'}"
+        ).start()
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Final extraction pass at session end. Picks the last user/assistant pair."""
@@ -378,24 +446,31 @@ class PlurimMemoryProvider(MemoryProvider):
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         if not self._http:
-            return tool_error("Plurum not initialized — missing PLURUM_API_KEY")
+            return tool_error(
+                "Plurum not initialized — missing PLURUM_API_KEY. "
+                "Set it in ~/.hermes/.env and restart Hermes."
+            )
+
+        # Gateway may pass session_id in kwargs; fall back to "" → default user.
+        session_id = kwargs.get("session_id") or ""
+        user_id = self._user_for(session_id)
 
         if tool_name == "plurum_profile":
-            return self._tool_profile(args)
+            return self._tool_profile(args, user_id)
         if tool_name == "plurum_search":
             return self._tool_search(args)
         if tool_name == "plurum_recall":
-            return self._tool_recall(args)
+            return self._tool_recall(args, user_id)
         if tool_name == "plurum_conclude":
-            return self._tool_conclude(args)
+            return self._tool_conclude(args, user_id)
         return tool_error(f"Unknown tool: {tool_name}")
 
-    def _tool_profile(self, args: Dict[str, Any]) -> str:
+    def _tool_profile(self, args: Dict[str, Any], user_id: str) -> str:
         try:
             result = self._http.get(
                 "/api/v1/profile",
                 params={
-                    "user_id": self._user_id,
+                    "user_id": user_id,
                     "query": args.get("query"),
                     "memory_limit": 10,
                     "experience_limit": 5,
@@ -434,7 +509,7 @@ class PlurimMemoryProvider(MemoryProvider):
         except Exception as e:
             return tool_error(str(e))
 
-    def _tool_recall(self, args: Dict[str, Any]) -> str:
+    def _tool_recall(self, args: Dict[str, Any], user_id: str) -> str:
         q = (args.get("query") or "").strip()
         if not q:
             return tool_error("Missing required parameter: query")
@@ -442,7 +517,7 @@ class PlurimMemoryProvider(MemoryProvider):
             limit = int(args.get("limit") or 10)
             result = self._http.post(
                 "/api/v1/memories/search",
-                params={"user_id": self._user_id},
+                params={"user_id": user_id},
                 body={"query": q, "limit": max(1, min(limit, 50))},
             )
             if not result:
@@ -458,7 +533,7 @@ class PlurimMemoryProvider(MemoryProvider):
         except Exception as e:
             return tool_error(str(e))
 
-    def _tool_conclude(self, args: Dict[str, Any]) -> str:
+    def _tool_conclude(self, args: Dict[str, Any], user_id: str) -> str:
         content = (args.get("content") or "").strip()
         if not content:
             return tool_error("Missing required parameter: content")
@@ -470,7 +545,7 @@ class PlurimMemoryProvider(MemoryProvider):
             }
             result = self._http.post(
                 "/api/v1/memories",
-                params={"user_id": self._user_id},
+                params={"user_id": user_id},
                 body=body,
             )
             return json.dumps({"stored": True, "short_id": (result or {}).get("short_id")})
@@ -480,7 +555,9 @@ class PlurimMemoryProvider(MemoryProvider):
     # -- Shutdown ------------------------------------------------------------
 
     def shutdown(self) -> None:
-        for t in (self._prefetch_thread, self._sync_thread):
+        # Drain all per-session prefetch threads (bounded by small count).
+        # Sync threads are fire-and-forget daemons — they'll die with process.
+        for sid, t in list(self._prefetch_threads.items()):
             if t and t.is_alive():
                 t.join(timeout=5.0)
 
