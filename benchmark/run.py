@@ -177,19 +177,30 @@ def generate_answer(
         f"Answer:"
     )
 
-    # gpt-5.x / o1 models require max_completion_tokens.
-    # Modern gpt-4o models accept it too. Use extra_body so this works on any
-    # openai SDK version that supports chat.completions.create.
+    # Reasoning models (gpt-5.x, o1, o3) reject `temperature` and `max_tokens`.
+    # They accept ONLY `max_completion_tokens`, which includes internal reasoning
+    # tokens — so we budget generously (2000) to avoid empty outputs from the
+    # model burning its whole budget on reasoning.
+    #
+    # gpt-4o also accepts max_completion_tokens, so one code path works for both.
+    is_reasoning_model = any(
+        tag in ANSWER_MODEL.lower()
+        for tag in ("gpt-5", "o1-", "o3-", "o4-")
+    )
+    kwargs: dict = {
+        "model": ANSWER_MODEL,
+        "messages": [
+            {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "extra_body": {"max_completion_tokens": 2000},
+    }
+    if not is_reasoning_model:
+        # gpt-4o and older accept temperature; reasoning models reject it.
+        kwargs["temperature"] = 0.0
+
     try:
-        resp = openai_client.chat.completions.create(
-            model=ANSWER_MODEL,
-            messages=[
-                {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.0,
-            extra_body={"max_completion_tokens": 300},
-        )
+        resp = openai_client.chat.completions.create(**kwargs)
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
         logger.warning("answer generation failed (model=%s): %s", ANSWER_MODEL, e)
