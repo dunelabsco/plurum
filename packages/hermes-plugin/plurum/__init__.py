@@ -567,5 +567,18 @@ class PlurimMemoryProvider(MemoryProvider):
 # ---------------------------------------------------------------------------
 
 def register(ctx) -> None:
-    """Register Plurum as Hermes's memory provider."""
-    ctx.register_memory_provider(PlurimMemoryProvider())
+    """Register Plurum as Hermes's memory provider.
+
+    Hermes has two plugin discovery systems that both call register():
+    1. The memory-provider loader (plugins/memory/__init__.py) passes a
+       `_ProviderCollector` with `register_memory_provider`.
+    2. The general plugin loader (hermes_cli.plugins) passes a different
+       `PluginContext` that doesn't know about memory providers and would
+       raise AttributeError on the old blind call.
+
+    We no-op gracefully on contexts without `register_memory_provider`. The
+    memory-provider loader has a subclass-scan fallback that also picks up
+    PlurimMemoryProvider even when register() is a no-op, so we're covered.
+    """
+    if hasattr(ctx, "register_memory_provider"):
+        ctx.register_memory_provider(PlurimMemoryProvider())
