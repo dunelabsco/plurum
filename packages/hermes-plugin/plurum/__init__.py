@@ -150,6 +150,32 @@ RECALL_SCHEMA = {
     },
 }
 
+ACQUIRE_SCHEMA = {
+    "name": "plurum_acquire",
+    "description": (
+        "Fetch the FULL detail of a specific experience by short_id (or UUID). "
+        "Use after plurum_search when you need the complete reasoning: all attempts, "
+        "artifacts, and context. Modes: 'full' (default, everything), "
+        "'checklist' (do/don't/watch bullets), 'summary' (one paragraph), "
+        "'decision_tree' (if/then structure)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "identifier": {
+                "type": "string",
+                "description": "Experience short_id (8 chars) or UUID from plurum_search results.",
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["full", "checklist", "summary", "decision_tree"],
+                "description": "Compression mode, default 'full'.",
+            },
+        },
+        "required": ["identifier"],
+    },
+}
+
 CONCLUDE_SCHEMA = {
     "name": "plurum_conclude",
     "description": (
@@ -339,8 +365,14 @@ class PlurimMemoryProvider(MemoryProvider):
             "load-bearing gotcha. Do not ignore it and try curl anyway. Apply the full solution, "
             "not just the parts that match your initial instinct.\n\n"
             "**Other tools:**\n"
+            "- `plurum_acquire` — fetch the FULL detail of an experience by short_id (modes: full / "
+            "checklist / summary / decision_tree). Use if a `plurum_search` hit's inline fields were "
+            "truncated and you need the complete attempts list or artifact code.\n"
             "- `plurum_conclude` — explicitly store a durable fact the user tells you\n"
             "- `plurum_profile` — one-shot combined view (personal + collective) for the current task\n\n"
+            "Note: `plurum_search` now returns the top experiences with their `solution`, `gotchas`, "
+            "`dead_ends`, and `breakthroughs` inline. Read them directly — do not assume the response "
+            "is metadata-only.\n\n"
             "After the task completes successfully, your learnings auto-save in the background "
             "so the next agent benefits."
         )
@@ -531,7 +563,7 @@ class PlurimMemoryProvider(MemoryProvider):
     # -- Tools ---------------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [PROFILE_SCHEMA, SEARCH_SCHEMA, RECALL_SCHEMA, CONCLUDE_SCHEMA]
+        return [PROFILE_SCHEMA, SEARCH_SCHEMA, ACQUIRE_SCHEMA, RECALL_SCHEMA, CONCLUDE_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         if not self._http:
@@ -548,11 +580,29 @@ class PlurimMemoryProvider(MemoryProvider):
             return self._tool_profile(args, user_id)
         if tool_name == "plurum_search":
             return self._tool_search(args)
+        if tool_name == "plurum_acquire":
+            return self._tool_acquire(args)
         if tool_name == "plurum_recall":
             return self._tool_recall(args, user_id)
         if tool_name == "plurum_conclude":
             return self._tool_conclude(args, user_id)
         return tool_error(f"Unknown tool: {tool_name}")
+
+    def _tool_acquire(self, args: Dict[str, Any]) -> str:
+        identifier = (args.get("identifier") or "").strip()
+        if not identifier:
+            return tool_error("Missing required parameter: identifier")
+        mode = args.get("mode") or "full"
+        if mode not in ("full", "checklist", "summary", "decision_tree"):
+            mode = "full"
+        try:
+            result = self._http.post(
+                f"/api/v1/experiences/{identifier}/acquire",
+                body={"mode": mode},
+            )
+            return json.dumps(result or {})
+        except Exception as e:
+            return tool_error(str(e))
 
     def _tool_profile(self, args: Dict[str, Any], user_id: str) -> str:
         try:
@@ -582,18 +632,77 @@ class PlurimMemoryProvider(MemoryProvider):
             if not result:
                 return json.dumps({"results": [], "count": 0})
             hits = result.get("results") or []
-            condensed = [
-                {
+
+            def _truncate(s: Any, n: int) -> str:
+                s = str(s or "").strip()
+                return s if len(s) <= n else s[: n - 1] + "…"
+
+            def _normalize_gotchas(raw: Any) -> List[str]:
+                out: List[str] = []
+                for g in (raw or [])[:8]:
+                    if isinstance(g, dict):
+                        out.append(_truncate(g.get("warning"), 300))
+                    else:
+                        out.append(_truncate(g, 300))
+                return [x for x in out if x]
+
+            def _normalize_dead_ends(raw: Any) -> List[str]:
+                out: List[str] = []
+                for d in (raw or [])[:5]:
+                    if isinstance(d, dict):
+                        what = str(d.get("what") or "").strip()
+                        why = str(d.get("why") or "").strip()
+                        if what or why:
+                            out.append(_truncate(f"{what} → {why}" if what and why else what or why, 300))
+                return out
+
+            def _normalize_breakthroughs(raw: Any) -> List[str]:
+                out: List[str] = []
+                for b in (raw or [])[:5]:
+                    if isinstance(b, dict):
+                        insight = str(b.get("insight") or "").strip()
+                        detail = str(b.get("detail") or "").strip()
+                        if insight or detail:
+                            out.append(_truncate(f"{insight}: {detail}" if insight and detail else insight or detail, 300))
+                return out
+
+            def _first_artifact(raw: Any) -> Optional[Dict[str, str]]:
+                if not raw or not isinstance(raw, list):
+                    return None
+                a = raw[0]
+                if not isinstance(a, dict):
+                    return None
+                code = str(a.get("code") or "").strip()
+                if not code:
+                    return None
+                return {
+                    "language": str(a.get("language") or "").strip(),
+                    "code": _truncate(code, 400),
+                    "description": _truncate(a.get("description"), 200),
+                }
+
+            condensed = []
+            for h in hits:
+                item = {
                     "short_id": h.get("short_id"),
                     "goal": h.get("goal"),
-                    "trust_score": h.get("trust_score") or h.get("quality_score") or 0,
+                    "similarity": round(float(h.get("similarity") or 0.0), 3),
+                    "trust_score": round(float(h.get("trust_score") or h.get("quality_score") or 0.0), 3),
+                    "confidence": h.get("confidence"),
                     "success_rate": h.get("success_rate") or 0,
                     "total_reports": h.get("total_reports") or 0,
-                    "similarity": h.get("similarity") or 0,
                     "tags": h.get("tags") or [],
+                    # Actionable fields the agent needs to apply the experience:
+                    "solution": _truncate(h.get("solution"), 800) or None,
+                    "gotchas": _normalize_gotchas(h.get("gotchas")),
+                    "dead_ends": _normalize_dead_ends(h.get("dead_ends")),
+                    "breakthroughs": _normalize_breakthroughs(h.get("breakthroughs")),
                 }
-                for h in hits
-            ]
+                art = _first_artifact(h.get("artifacts"))
+                if art:
+                    item["artifact"] = art
+                # Drop empty lists / None values to keep payload lean
+                condensed.append({k: v for k, v in item.items() if v not in (None, [], "")})
             return json.dumps({"results": condensed, "count": len(condensed)})
         except Exception as e:
             return tool_error(str(e))
