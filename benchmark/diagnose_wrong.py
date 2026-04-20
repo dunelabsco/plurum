@@ -63,14 +63,18 @@ def load_eval_results(path: Path) -> dict[str, bool]:
     if not lines:
         sys.exit("eval file is empty")
 
+    def _extract(row: dict):
+        # LME judge writes {"autoeval_label": {"model": "...", "label": true}}
+        ae = row.get("autoeval_label")
+        if isinstance(ae, dict) and "label" in ae:
+            return ae["label"]
+        for k in ("is_correct", "correct", "label", "judgment", "score"):
+            if k in row:
+                return row[k]
+        return None
+
     first = json.loads(lines[0])
-    # Field names the LME judge commonly uses
-    correct_field = None
-    for k in ("is_correct", "correct", "label", "judgment", "score"):
-        if k in first:
-            correct_field = k
-            break
-    if correct_field is None:
+    if _extract(first) is None:
         print(f"[warn] couldn't identify correctness field; first row keys: {list(first.keys())}",
               file=sys.stderr)
         print(f"[warn] first row: {json.dumps(first)[:500]}", file=sys.stderr)
@@ -81,7 +85,7 @@ def load_eval_results(path: Path) -> dict[str, bool]:
         qid = row.get("question_id")
         if not qid:
             continue
-        val = row.get(correct_field)
+        val = _extract(row)
         # Normalize: True/1/"yes"/"correct" -> correct
         if isinstance(val, bool):
             ok = val
