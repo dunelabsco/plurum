@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
@@ -406,44 +407,22 @@ class MemoryService:
             f"{date_block}"
             f"USER:\n{user_content}\n\nASSISTANT:\n{assistant_content}"
         )
-        try:
-            # gpt-5 / o-series are reasoning models: they reject `temperature`
-            # and want `max_completion_tokens` rather than `max_tokens`.
-            is_reasoning = _is_reasoning_model(self._extraction_model)
-            kwargs = {
-                "model": self._extraction_model,
-                "messages": [
-                    {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_msg},
-                ],
-                "response_format": {"type": "json_object"},
-            }
-            if is_reasoning:
-                kwargs["max_completion_tokens"] = 1200
-            else:
-                kwargs["temperature"] = 0.2
-                kwargs["max_tokens"] = 600
-            resp = self._openai.chat.completions.create(**kwargs)
-            raw = resp.choices[0].message.content or "{}"
-            parsed = json.loads(raw)
-            candidates = parsed.get("memories", [])
-        except Exception as e:
-            # Log at ERROR so failures are visible in Vercel logs. A silent
-            # swallow here is how we wasted a 6-hour benchmark run.
-            logger.error(
-                "Memory extraction failed (model=%s): %s",
-                self._extraction_model, e,
+
+        # Run the main extractor and the preference extractor in parallel —
+        # they're independent LLM calls and together are ~2x extract latency
+        # when run serially. ThreadPoolExecutor works because the OpenAI SDK
+        # releases the GIL during network IO.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            main_future = pool.submit(self._run_main_extraction, user_msg)
+            pref_future = pool.submit(
+                self._extract_preferences, user_content, assistant_content
             )
-            return []
+            candidates = main_future.result() or []
+            pref_candidates = pref_future.result() or []
 
         if not isinstance(candidates, list):
             candidates = []
 
-        # Dedicated preference recall pass. The general extractor tends to
-        # miss preferences when dated events or assistant facts dominate the
-        # turn. Running a second focused call recovers them; the dedupe step
-        # below keeps duplicates from the two prompts out of storage.
-        pref_candidates = self._extract_preferences(user_content, assistant_content)
         if pref_candidates:
             candidates = _merge_dedupe(candidates, pref_candidates)
 
@@ -461,11 +440,12 @@ class MemoryService:
         contents = [c["content"].strip() for c in valid_candidates]
         embeddings = self.embedding.generate_embeddings([c[:8000] for c in contents])
 
+        # First pass: build rows without supersession info.
         rows = []
-        to_supersede: list[str] = []
+        per_row_entities: list[list[str]] = []
+        per_row_types: list[str] = []
+        per_row_subjects: list[Optional[str]] = []
         for cand, content, emb in zip(valid_candidates, contents, embeddings):
-            # Merge entities + memory_subject into metadata so they're
-            # retrievable without additional schema changes.
             cand_metadata = dict(metadata or {})
             entities = cand.get("entities") or []
             clean_entities: list[str] = []
@@ -492,7 +472,6 @@ class MemoryService:
                 "source_assistant": assistant_content[:2000],
             }
 
-            # Structured temporal fields (Phase 1 retrieval upgrade)
             eds = _coerce_iso_date(cand.get("event_date_start"))
             ede = _coerce_iso_date(cand.get("event_date_end"))
             if eds:
@@ -500,26 +479,45 @@ class MemoryService:
             if ede:
                 row["event_date_end"] = ede
 
-            # Supersession check (Phase 2): does this new memory update a
-            # prior one about the same subject/entities? If yes, link via
-            # parent_memory_id and soft-delete the parent after batch insert.
-            parent = self._find_supersedable(
-                user_id=user_id,
-                content=content,
-                embedding=emb,
-                entities=clean_entities,
-                memory_type=memory_type,
-                memory_subject=memory_subject,
-            )
-            if parent:
-                row["parent_memory_id"] = parent["id"]
-                to_supersede.append(parent["id"])
-
             if agent_id:
                 row["agent_id"] = str(agent_id)
             if session_id:
                 row["session_id"] = str(session_id)
             rows.append(row)
+            per_row_entities.append(clean_entities)
+            per_row_types.append(memory_type)
+            per_row_subjects.append(memory_subject)
+
+        # Second pass: parallel supersession lookups. Each check is a single
+        # Supabase RPC round-trip; running them concurrently keeps total
+        # latency flat regardless of candidate count.
+        to_supersede: list[str] = []
+        supersede_targets: list[Optional[str]] = [None] * len(rows)
+        lookup_indices = [
+            i for i, t in enumerate(per_row_types)
+            if t in ("fact", "preference") and per_row_entities[i]
+        ]
+        if lookup_indices:
+            def _lookup(i: int) -> tuple[int, Optional[dict]]:
+                parent = self._find_supersedable(
+                    user_id=user_id,
+                    content=rows[i]["content"],
+                    embedding=rows[i]["embedding"],
+                    entities=per_row_entities[i],
+                    memory_type=per_row_types[i],
+                    memory_subject=per_row_subjects[i],
+                )
+                return i, parent
+
+            with ThreadPoolExecutor(max_workers=min(4, len(lookup_indices))) as pool:
+                for i, parent in pool.map(_lookup, lookup_indices):
+                    if parent:
+                        supersede_targets[i] = parent["id"]
+
+        for i, parent_id in enumerate(supersede_targets):
+            if parent_id:
+                rows[i]["parent_memory_id"] = parent_id
+                to_supersede.append(parent_id)
 
         # Insert; retry without parent_memory_id if migration 022 isn't applied.
         try:
@@ -607,6 +605,40 @@ class MemoryService:
             "results": results,
             "total_found": len(results),
         }
+
+    # -----------------------------------------------------------------------
+    # Main extraction LLM call (separated so it runs in parallel with the
+    # preference extractor via ThreadPoolExecutor)
+    # -----------------------------------------------------------------------
+
+    def _run_main_extraction(self, user_msg: str) -> list[dict]:
+        """Invoke the general extractor; returns candidate memories or []."""
+        try:
+            is_reasoning = _is_reasoning_model(self._extraction_model)
+            kwargs: dict = {
+                "model": self._extraction_model,
+                "messages": [
+                    {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                "response_format": {"type": "json_object"},
+            }
+            if is_reasoning:
+                kwargs["max_completion_tokens"] = 1200
+            else:
+                kwargs["temperature"] = 0.2
+                kwargs["max_tokens"] = 600
+            resp = self._openai.chat.completions.create(**kwargs)
+            raw = resp.choices[0].message.content or "{}"
+            parsed = json.loads(raw)
+            mems = parsed.get("memories", [])
+            return mems if isinstance(mems, list) else []
+        except Exception as e:
+            logger.error(
+                "Memory extraction failed (model=%s): %s",
+                self._extraction_model, e,
+            )
+            return []
 
     # -----------------------------------------------------------------------
     # Supersession (write-time): find a prior memory this new one overrides
