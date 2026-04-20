@@ -339,6 +339,10 @@ def main() -> None:
                     help="Which LongMemEval dataset to run (default: oracle)")
     ap.add_argument("--sample", type=int, default=None,
                     help="Only run first N questions (for quick sanity check)")
+    ap.add_argument("--category", default=None,
+                    help="Filter to a single question_type (e.g. temporal-reasoning, "
+                         "single-session-user, single-session-assistant, "
+                         "single-session-preference, knowledge-update, multi-session)")
     ap.add_argument("--skip-done", action="store_true",
                     help="Skip questions already in the hypothesis file")
     ap.add_argument("--skip-ingest", action="store_true",
@@ -353,6 +357,15 @@ def main() -> None:
     already_done = load_existing_hypotheses(out_path) if args.skip_done else set()
 
     data = load_dataset(args.dataset)
+    if args.category:
+        before = len(data)
+        data = [d for d in data if d.get("question_type") == args.category]
+        print(f"Filtered to category={args.category}: {len(data)}/{before} questions")
+        if not data:
+            _fail(
+                f"No questions with question_type={args.category!r} in this dataset. "
+                f"Check category spelling (hyphens, not underscores)."
+            )
     if args.sample:
         data = data[: args.sample]
 
