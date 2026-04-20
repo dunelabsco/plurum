@@ -44,9 +44,10 @@ class Settings(BaseSettings):
 
     # Memory extraction LLM (the model that extracts durable facts from turns)
     # Override via PLURUM_EXTRACTION_MODEL env var.
-    # gpt-5-mini matches Mem0's reference config; upgrade from gpt-4o-mini
-    # gave material recall gains in temporal and preference categories.
-    extraction_model: str = "gpt-5-mini"
+    # Keeping gpt-4o-mini as the default: gpt-5-mini is a reasoning model
+    # and its per-call latency (10-15s) makes benchmark ingestion impractical
+    # without parallelism. Re-enable via env var once the ingest loop is async.
+    extraction_model: str = "gpt-4o-mini"
 
     # Pagination
     default_page_size: int = 20
