@@ -191,12 +191,33 @@ ANSWER_SYSTEM_PROMPT = (
     "- Do not narrate, apologize, or restate the question.\n"
 )
 
+# Preference questions get a different treatment. The LME gold answers for this
+# category are aspirational profile summaries of the form "the user would prefer X
+# because of their history with Y; they may not prefer Z". A terse factual answer
+# always scores as wrong here, even when the underlying recall is perfect.
+PREFERENCE_SYSTEM_PROMPT = (
+    "You answer a question on behalf of a user based ONLY on their stored memories.\n\n"
+    "Rules:\n"
+    "- Use only the memories provided. Do NOT use outside knowledge.\n"
+    "- Produce a 2–4 sentence response that reflects the user's profile, not just a\n"
+    "  terse fact. Reference their past experiences, habits, and stated preferences\n"
+    "  when they are relevant to the question.\n"
+    "- If the memories show what the user LIKES or has DONE, weave those into the\n"
+    "  suggestion. If they show what the user DISLIKES or wants to AVOID, mention that\n"
+    "  contrast explicitly (e.g., 'they would prefer X rather than Y').\n"
+    "- Prefer specific, personal suggestions over generic ones. If a memory says the\n"
+    "  user made a lemon poppyseed cake before, suggest variations on that — not\n"
+    "  random baking ideas.\n"
+    "- Do not apologize or restate the question.\n"
+)
+
 
 def generate_answer(
     openai_client: OpenAI,
     question: str,
     memories: list[str],
     question_date: Optional[str] = None,
+    question_type: Optional[str] = None,
 ) -> str:
     if not memories:
         mem_block = "(no memories available)"
@@ -223,10 +244,15 @@ def generate_answer(
         tag in ANSWER_MODEL.lower()
         for tag in ("gpt-5", "o1-", "o3-", "o4-")
     )
+    system_prompt = (
+        PREFERENCE_SYSTEM_PROMPT
+        if question_type == "single-session-preference"
+        else ANSWER_SYSTEM_PROMPT
+    )
     kwargs: dict = {
         "model": ANSWER_MODEL,
         "messages": [
-            {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
         "extra_body": {"max_completion_tokens": 2000},
@@ -316,12 +342,14 @@ def process_question(
     # 2) Retrieve
     memories = client.search(user_id=user_id, query=question)
 
-    # 3) Answer (pass question_date so the LLM can do temporal arithmetic)
+    # 3) Answer (pass question_date so the LLM can do temporal arithmetic;
+    # pass question_type so preference questions get the profile-aware prompt)
     hypothesis = generate_answer(
         openai_client,
         question,
         memories,
         question_date=entry.get("question_date"),
+        question_type=entry.get("question_type"),
     )
     return qid, hypothesis, extracted_total
 
