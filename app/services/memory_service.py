@@ -21,8 +21,37 @@ from app.config import get_settings
 from app.repositories.experience_repo import ExperienceRepository
 from app.repositories.memory_repo import MemoryRepository
 from app.services.embedding_service import get_embedding_service
+from app.services.reranker_service import get_reranker_service
 
 logger = logging.getLogger(__name__)
+
+
+def _norm_content(s: str) -> str:
+    """Normalize a memory content string for dedupe comparison."""
+    return " ".join((s or "").lower().split())
+
+
+def _merge_dedupe(primary: list[dict], extras: list[dict]) -> list[dict]:
+    """Append extras to primary, skipping near-duplicates by normalized content.
+
+    Dedupe rule: two memories are duplicates if one's normalized content is a
+    prefix of the other's (first 80 chars). This catches the common case where
+    the preference extractor emits a shorter restatement of something the main
+    extractor already produced.
+    """
+    seen = [_norm_content(p.get("content", ""))[:80] for p in primary if isinstance(p, dict)]
+    merged = list(primary)
+    for e in extras:
+        if not isinstance(e, dict):
+            continue
+        key = _norm_content(e.get("content", ""))[:80]
+        if not key:
+            continue
+        if any(key == s or key.startswith(s) or s.startswith(key) for s in seen if s):
+            continue
+        merged.append(e)
+        seen.append(key)
+    return merged
 
 
 def _is_reasoning_model(model: str) -> bool:
@@ -55,6 +84,43 @@ def _coerce_iso_date(value) -> Optional[str]:
     if len(s) >= 8 and s[:4].isdigit() and s[4] == "-":
         return s
     return None
+
+
+PREFERENCE_EXTRACTION_PROMPT = """You find USER PREFERENCES stated or clearly implied in a conversation turn.
+
+A preference is a like, dislike, opinion, stated habit, or stated routine —
+anything of the form "user prefers / likes / dislikes / avoids / typically
+does / has a habit of / wants". Preferences are often missed by general
+extractors because they hide inside narrative or opinion statements.
+
+Return JSON:
+{
+  "memories": [
+    {
+      "content": "self-contained sentence naming the preference",
+      "memory_type": "preference",
+      "memory_subject": "user",
+      "importance": "high|medium|low",
+      "entities": ["entity1", ...]
+    }
+  ]
+}
+
+Rules:
+  - Only emit memory_type="preference"; nothing else.
+  - Always memory_subject="user" (this prompt is for user preferences).
+  - If the turn contains no preference, return {"memories": []}.
+  - A single turn can yield several preferences — emit all of them.
+  - Be eager, not conservative. If the user says "I really love X" or
+    "I always do Y" or "X over Y" or "I can't stand Z", that's a preference.
+  - entities: products, places, people, technologies, topics, specific items.
+
+Examples:
+  "I only drink oat milk in coffee" → pref: "User prefers oat milk in coffee."
+  "Rust > Go for me" → pref: "User prefers Rust over Go."
+  "I usually run on weekends" → pref: "User typically runs on weekends."
+  "Hate vertical monitors" → pref: "User dislikes vertical monitors."
+"""
 
 
 EXTRACTION_SYSTEM_PROMPT = """You extract DURABLE, RETRIEVABLE memories from a user↔assistant conversation turn.
@@ -257,10 +323,16 @@ IMPORTANCE
 
 
 class MemoryService:
+    # Fetch this many candidates from the repo before the LLM reranker picks
+    # the final top_k. 30 is a good balance — enough for the cross-encoder to
+    # find buried gems, small enough to fit comfortably in a single rerank call.
+    _RERANK_POOL_SIZE = 30
+
     def __init__(self):
         self.repo = MemoryRepository()
         self.experience_repo = ExperienceRepository()
         self.embedding = get_embedding_service()
+        self.reranker = get_reranker_service()
         settings = get_settings()
         # max_retries handles 429/5xx/network transient failures automatically.
         # Same resilience as the embedding service (see _with_retry there).
@@ -364,7 +436,18 @@ class MemoryService:
             )
             return []
 
-        if not isinstance(candidates, list) or not candidates:
+        if not isinstance(candidates, list):
+            candidates = []
+
+        # Dedicated preference recall pass. The general extractor tends to
+        # miss preferences when dated events or assistant facts dominate the
+        # turn. Running a second focused call recovers them; the dedupe step
+        # below keeps duplicates from the two prompts out of storage.
+        pref_candidates = self._extract_preferences(user_content, assistant_content)
+        if pref_candidates:
+            candidates = _merge_dedupe(candidates, pref_candidates)
+
+        if not candidates:
             return []
 
         # Filter out invalid candidates (missing content)
@@ -379,23 +462,29 @@ class MemoryService:
         embeddings = self.embedding.generate_embeddings([c[:8000] for c in contents])
 
         rows = []
+        to_supersede: list[str] = []
         for cand, content, emb in zip(valid_candidates, contents, embeddings):
             # Merge entities + memory_subject into metadata so they're
             # retrievable without additional schema changes.
             cand_metadata = dict(metadata or {})
             entities = cand.get("entities") or []
-            if isinstance(entities, list) and entities:
-                cand_metadata["entities"] = [
+            clean_entities: list[str] = []
+            if isinstance(entities, list):
+                clean_entities = [
                     e.strip() for e in entities if isinstance(e, str) and e.strip()
                 ]
+                if clean_entities:
+                    cand_metadata["entities"] = clean_entities
             memory_subject = cand.get("memory_subject")
             if memory_subject in ("user", "assistant"):
                 cand_metadata["memory_subject"] = memory_subject
 
+            memory_type = cand.get("memory_type", "fact")
+
             row = {
                 "user_id": str(user_id),
                 "content": content,
-                "memory_type": cand.get("memory_type", "fact"),
+                "memory_type": memory_type,
                 "importance": cand.get("importance", "medium"),
                 "metadata": cand_metadata,
                 "embedding": emb,
@@ -411,13 +500,52 @@ class MemoryService:
             if ede:
                 row["event_date_end"] = ede
 
+            # Supersession check (Phase 2): does this new memory update a
+            # prior one about the same subject/entities? If yes, link via
+            # parent_memory_id and soft-delete the parent after batch insert.
+            parent = self._find_supersedable(
+                user_id=user_id,
+                content=content,
+                embedding=emb,
+                entities=clean_entities,
+                memory_type=memory_type,
+                memory_subject=memory_subject,
+            )
+            if parent:
+                row["parent_memory_id"] = parent["id"]
+                to_supersede.append(parent["id"])
+
             if agent_id:
                 row["agent_id"] = str(agent_id)
             if session_id:
                 row["session_id"] = str(session_id)
             rows.append(row)
 
-        return self.repo.create_batch(rows)
+        # Insert; retry without parent_memory_id if migration 022 isn't applied.
+        try:
+            saved = self.repo.create_batch(rows)
+        except Exception as e:
+            err = str(e).lower()
+            if "parent_memory_id" in err or "schema cache" in err or "column" in err:
+                logger.info(
+                    "create_batch failed with column error — retrying without "
+                    "parent_memory_id (migration 022 pending?): %s", e,
+                )
+                for r in rows:
+                    r.pop("parent_memory_id", None)
+                to_supersede = []
+                saved = self.repo.create_batch(rows)
+            else:
+                raise
+
+        # Soft-delete the prior versions so stale facts drop out of retrieval.
+        for parent_id in to_supersede:
+            try:
+                self.repo.soft_delete(UUID(parent_id), user_id)
+            except Exception as e:
+                logger.warning("Failed to soft-delete superseded memory %s: %s", parent_id, e)
+
+        return saved
 
     # -----------------------------------------------------------------------
     # Reads
@@ -454,24 +582,136 @@ class MemoryService:
         memory_type: Optional[str] = None,
         limit: int = 10,
     ) -> dict:
-        """Hybrid search over the user's memories (vector + keyword + entity, RRF-fused, reranked)."""
+        """Hybrid search + LLM cross-encoder rerank.
+
+        Stage 1: repo.search fetches `_RERANK_POOL_SIZE` candidates via the
+        3-way RRF RPC (vector + keyword + entity).
+        Stage 2: RerankerService scores each candidate against the query
+        with gpt-4o-mini and returns the top `limit`.
+        """
         embedding = self.embedding.generate_embedding(query[:8000])
         # Extract entities from the query so the RPC can run the entity arm.
         query_entities = self._extract_query_entities(query)
-        results = self.repo.search(
+        pool = self.repo.search(
             user_id=user_id,
             query_text=query,
             query_embedding=embedding,
-            match_count=limit,
+            match_count=max(limit, self._RERANK_POOL_SIZE),
             memory_type=memory_type,
             query_entities=query_entities,
         )
+        results = self.reranker.rerank(query=query, candidates=pool, top_k=limit)
         return {
             "query": query,
             "query_entities": query_entities,
             "results": results,
             "total_found": len(results),
         }
+
+    # -----------------------------------------------------------------------
+    # Supersession (write-time): find a prior memory this new one overrides
+    # -----------------------------------------------------------------------
+
+    # Cosine-similarity threshold above which two memories are considered
+    # statements of the same underlying fact/preference. Entity overlap is
+    # ALSO required — similarity alone overfires on lexically similar but
+    # semantically distinct facts ("likes Python" vs "dislikes Python").
+    _SUPERSEDE_SIM_THRESHOLD = 0.88
+
+    def _find_supersedable(
+        self,
+        user_id: UUID,
+        content: str,
+        embedding: list[float],
+        entities: list[str],
+        memory_type: str,
+        memory_subject: Optional[str],
+    ) -> Optional[dict]:
+        """Return a prior memory that this new one should supersede, or None.
+
+        Only applies to facts and preferences. Requires both high semantic
+        similarity AND at least one shared entity to guard against accidental
+        merges of similarly-worded but distinct facts.
+        """
+        if memory_type not in ("fact", "preference"):
+            return None
+        if not entities:
+            return None
+        try:
+            candidates = self.repo.search(
+                user_id=user_id,
+                query_text=content,
+                query_embedding=embedding,
+                match_count=5,
+                memory_type=memory_type,
+                query_entities=entities,
+            )
+        except Exception as e:
+            logger.debug("supersede lookup failed: %s", e)
+            return None
+
+        entity_set = {e.lower() for e in entities}
+        for c in candidates or []:
+            sim = c.get("similarity") or 0.0
+            if sim < self._SUPERSEDE_SIM_THRESHOLD:
+                continue
+            cand_meta = c.get("metadata") or {}
+            cand_entities = cand_meta.get("entities") or []
+            cand_set = {str(e).lower() for e in cand_entities}
+            if not (entity_set & cand_set):
+                continue
+            cand_subj = cand_meta.get("memory_subject")
+            if memory_subject and cand_subj and cand_subj != memory_subject:
+                continue
+            return c
+        return None
+
+    # -----------------------------------------------------------------------
+    # Preference-dedicated extraction pass
+    # -----------------------------------------------------------------------
+
+    def _extract_preferences(
+        self,
+        user_content: str,
+        assistant_content: str,
+    ) -> list[dict]:
+        """Second pass focused purely on preference recall.
+
+        Uses gpt-4o-mini (not the reasoning model) because the preference
+        prompt is simple and latency matters — this runs on every turn.
+        Returns [] on any failure so a transient hiccup doesn't break
+        extraction overall.
+        """
+        if not user_content or not user_content.strip():
+            return []
+        try:
+            resp = self._openai.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": PREFERENCE_EXTRACTION_PROMPT},
+                    {"role": "user", "content": f"USER:\n{user_content}\n\nASSISTANT:\n{assistant_content}"},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+                max_tokens=400,
+            )
+            raw = resp.choices[0].message.content or "{}"
+            data = json.loads(raw)
+            mems = data.get("memories") or []
+            if not isinstance(mems, list):
+                return []
+            # Force memory_type / memory_subject in case the model drifts.
+            cleaned = []
+            for m in mems:
+                if not isinstance(m, dict) or not (m.get("content") or "").strip():
+                    continue
+                m["memory_type"] = "preference"
+                m["memory_subject"] = "user"
+                cleaned.append(m)
+            return cleaned
+        except Exception as e:
+            logger.debug("preference extraction failed: %s", e)
+            return []
 
     # -----------------------------------------------------------------------
     # Query entity extraction (for entity retrieval arm)
