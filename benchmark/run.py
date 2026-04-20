@@ -20,6 +20,7 @@ import os
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -44,6 +45,7 @@ ANSWER_MODEL = os.environ.get("PLURUM_ANSWER_MODEL", "gpt-5.4-mini")
 TOP_K_MEMORIES = 20            # how many memories to retrieve per question
 MAX_MEMORY_CHARS = 200         # per memory when shown to the answer model
 REQUEST_TIMEOUT = 60.0
+INGEST_PARALLELISM = int(os.environ.get("PLURUM_INGEST_PARALLELISM", "8"))
 
 BENCH_DIR = Path(__file__).resolve().parent
 OUT_DIR = BENCH_DIR / "out"
@@ -265,14 +267,20 @@ def process_question(
     user_id = user_id_for_question(qid, run_tag)
 
     # 1) Ingest haystack_sessions (with session dates for temporal anchoring)
+    # Each question has 50-200+ turn pairs; running them serially meant the
+    # full benchmark took 25+ hours. We fan out extract calls across a thread
+    # pool — the backend is fine with concurrent writes to the same user_id
+    # and the per-call latency (~3-6s) means even modest parallelism saves
+    # multiple hours per 50-question run.
     extracted_total = 0
     if not skip_ingest:
         sessions = entry.get("haystack_sessions") or []
         haystack_dates = entry.get("haystack_dates") or []
+
+        pair_tasks: list[tuple[str, str, Optional[str]]] = []
         for idx, session in enumerate(sessions):
             if not isinstance(session, list):
                 continue
-            # Pair adjacent user→assistant turns
             session_date = haystack_dates[idx] if idx < len(haystack_dates) else None
             i = 0
             while i < len(session) - 1:
@@ -281,15 +289,29 @@ def process_question(
                     i += 1
                     continue
                 if t1.get("role") == "user" and t2.get("role") == "assistant":
-                    extracted_total += client.extract(
-                        user_id=user_id,
-                        user_msg=t1.get("content", ""),
-                        asst_msg=t2.get("content", ""),
-                        session_date=session_date,
-                    )
+                    pair_tasks.append((
+                        t1.get("content", ""),
+                        t2.get("content", ""),
+                        session_date,
+                    ))
                     i += 2
                 else:
                     i += 1
+
+        if pair_tasks:
+            with ThreadPoolExecutor(max_workers=INGEST_PARALLELISM) as pool:
+                futures = [
+                    pool.submit(
+                        client.extract,
+                        user_id=user_id,
+                        user_msg=u,
+                        asst_msg=a,
+                        session_date=d,
+                    )
+                    for (u, a, d) in pair_tasks
+                ]
+                for fut in as_completed(futures):
+                    extracted_total += fut.result() or 0
 
     # 2) Retrieve
     memories = client.search(user_id=user_id, query=question)
