@@ -361,6 +361,11 @@ def main() -> None:
                     help="Which LongMemEval dataset to run (default: oracle)")
     ap.add_argument("--sample", type=int, default=None,
                     help="Only run first N questions (for quick sanity check)")
+    ap.add_argument("--shuffle", action="store_true",
+                    help="Shuffle dataset with a fixed seed before --sample so "
+                         "you get a mix across categories (the raw file is "
+                         "sorted by category, so --sample 100 otherwise picks "
+                         "100 of whatever comes first)")
     ap.add_argument("--category", default=None,
                     help="Filter to a single question_type (e.g. temporal-reasoning, "
                          "single-session-user, single-session-assistant, "
@@ -388,6 +393,10 @@ def main() -> None:
                 f"No questions with question_type={args.category!r} in this dataset. "
                 f"Check category spelling (hyphens, not underscores)."
             )
+    if args.shuffle:
+        import random
+        random.Random(42).shuffle(data)
+        print(f"Shuffled dataset (seed=42) before sampling")
     if args.sample:
         data = data[: args.sample]
 
