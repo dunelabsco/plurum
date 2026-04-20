@@ -2,11 +2,62 @@
 
 from __future__ import annotations
 
+import logging
+import random
+import time
 from functools import lru_cache
+from typing import Callable, TypeVar
 
-from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    OpenAI,
+    RateLimitError,
+    InternalServerError,
+)
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+# Embedding calls are chatty under benchmark load; without retry, a single
+# OpenAI hiccup propagates as an HTTP 500 on /memories/search or /memories/extract.
+# Root cause of the v12 benchmark failure — consecutive 500s starting at ~Q400.
+_RETRYABLE_EXCEPTIONS = (
+    RateLimitError,
+    APITimeoutError,
+    APIConnectionError,
+    InternalServerError,
+)
+_MAX_RETRIES = 5
+_BASE_BACKOFF_SECONDS = 1.0
+_MAX_BACKOFF_SECONDS = 30.0
+
+
+def _with_retry(fn: Callable[[], T]) -> T:
+    """Retry a zero-arg callable with exponential backoff + jitter on transient OpenAI errors."""
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return fn()
+        except _RETRYABLE_EXCEPTIONS as e:
+            if attempt == _MAX_RETRIES - 1:
+                logger.warning(
+                    "OpenAI embedding call failed after %d attempts: %s",
+                    _MAX_RETRIES, e,
+                )
+                raise
+            backoff = min(_BASE_BACKOFF_SECONDS * (2 ** attempt), _MAX_BACKOFF_SECONDS)
+            jitter = random.uniform(0, backoff * 0.25)
+            sleep_for = backoff + jitter
+            logger.info(
+                "OpenAI embedding transient error (attempt %d/%d): %s — retrying in %.2fs",
+                attempt + 1, _MAX_RETRIES, type(e).__name__, sleep_for,
+            )
+            time.sleep(sleep_for)
+    # unreachable
+    raise RuntimeError("retry loop exited without return")
 
 
 class EmbeddingService:
@@ -14,33 +65,38 @@ class EmbeddingService:
 
     def __init__(self):
         settings = get_settings()
-        self.client = OpenAI(api_key=settings.openai_api_key)
+        # max_retries on the client covers HTTP-level retries (429, 5xx, network).
+        # Our own _with_retry wraps logical failures and adds jitter + extended attempts.
+        self.client = OpenAI(api_key=settings.openai_api_key, max_retries=3)
         self.model = settings.embedding_model
         self.dimensions = settings.embedding_dimensions
 
     def generate_embedding(self, text: str) -> list[float]:
-        """Generate an embedding for a single text."""
-        response = self.client.embeddings.create(
-            model=self.model,
-            input=text,
-            dimensions=self.dimensions,
-        )
-        return response.data[0].embedding
+        """Generate an embedding for a single text (retries on transient errors)."""
+        def _call():
+            response = self.client.embeddings.create(
+                model=self.model,
+                input=text,
+                dimensions=self.dimensions,
+            )
+            return response.data[0].embedding
+        return _with_retry(_call)
 
     def generate_embeddings(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for multiple texts."""
+        """Generate embeddings for multiple texts (retries on transient errors)."""
         if not texts:
             return []
 
-        response = self.client.embeddings.create(
-            model=self.model,
-            input=texts,
-            dimensions=self.dimensions,
-        )
-
-        # Sort by index to maintain order
-        sorted_data = sorted(response.data, key=lambda x: x.index)
-        return [item.embedding for item in sorted_data]
+        def _call():
+            response = self.client.embeddings.create(
+                model=self.model,
+                input=texts,
+                dimensions=self.dimensions,
+            )
+            # Sort by index to maintain order
+            sorted_data = sorted(response.data, key=lambda x: x.index)
+            return [item.embedding for item in sorted_data]
+        return _with_retry(_call)
 
     def generate_topic_embedding(
         self,

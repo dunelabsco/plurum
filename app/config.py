@@ -44,7 +44,9 @@ class Settings(BaseSettings):
 
     # Memory extraction LLM (the model that extracts durable facts from turns)
     # Override via PLURUM_EXTRACTION_MODEL env var.
-    extraction_model: str = "gpt-4o-mini"
+    # gpt-5-mini matches Mem0's reference config; upgrade from gpt-4o-mini
+    # gave material recall gains in temporal and preference categories.
+    extraction_model: str = "gpt-5-mini"
 
     # Pagination
     default_page_size: int = 20

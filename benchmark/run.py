@@ -89,6 +89,38 @@ class PlurimClient:
             timeout=REQUEST_TIMEOUT,
         )
 
+    # -- HTTP retry helper ---------------------------------------------------
+    # Backend transient failures (5xx, timeouts) during long benchmark runs
+    # caused the v12 catastrophe — 100 consecutive search 500s after Q~400.
+    # Defensive retry with backoff means transient hiccups don't lose questions.
+    _RETRY_MAX_ATTEMPTS = 4
+    _RETRY_BASE_DELAY = 1.5
+
+    def _request_with_retry(self, method: str, path: str, **kwargs) -> httpx.Response:
+        last_exc: Optional[Exception] = None
+        for attempt in range(self._RETRY_MAX_ATTEMPTS):
+            try:
+                r = self.http.request(method, path, **kwargs)
+                # Don't retry 4xx — those are our bugs or intentional (422 secret scrub)
+                if 500 <= r.status_code < 600:
+                    raise httpx.HTTPStatusError(
+                        f"server {r.status_code}", request=r.request, response=r,
+                    )
+                return r
+            except (httpx.HTTPStatusError, httpx.TransportError, httpx.TimeoutException) as e:
+                last_exc = e
+                if attempt == self._RETRY_MAX_ATTEMPTS - 1:
+                    break
+                delay = self._RETRY_BASE_DELAY * (2 ** attempt)
+                logger.info(
+                    "HTTP %s %s attempt %d/%d failed (%s) — retrying in %.1fs",
+                    method, path, attempt + 1, self._RETRY_MAX_ATTEMPTS,
+                    type(e).__name__, delay,
+                )
+                time.sleep(delay)
+        assert last_exc is not None
+        raise last_exc
+
     def extract(
         self,
         user_id: str,
@@ -104,7 +136,8 @@ class PlurimClient:
         if session_date:
             body["session_date"] = session_date
         try:
-            r = self.http.post(
+            r = self._request_with_retry(
+                "POST",
                 "/api/v1/memories/extract",
                 params={"user_id": user_id},
                 json=body,
@@ -115,13 +148,14 @@ class PlurimClient:
             r.raise_for_status()
             return (r.json() or {}).get("count", 0)
         except httpx.HTTPError as e:
-            logger.warning("extract failed: %s", e)
+            logger.warning("extract failed after retries: %s", e)
             return 0
 
     def search(self, user_id: str, query: str, limit: int = TOP_K_MEMORIES) -> list[str]:
         """POST /memories/search. Returns memory content strings."""
         try:
-            r = self.http.post(
+            r = self._request_with_retry(
+                "POST",
                 "/api/v1/memories/search",
                 params={"user_id": user_id},
                 json={"query": query[:1000], "limit": limit},
@@ -134,7 +168,7 @@ class PlurimClient:
                 if isinstance(m, dict) and m.get("content")
             ]
         except httpx.HTTPError as e:
-            logger.warning("search failed: %s", e)
+            logger.warning("search failed after retries: %s", e)
             return []
 
 # ---------------------------------------------------------------------------

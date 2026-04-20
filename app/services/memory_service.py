@@ -25,6 +25,15 @@ from app.services.embedding_service import get_embedding_service
 logger = logging.getLogger(__name__)
 
 
+def _is_reasoning_model(model: str) -> bool:
+    """Reasoning models (gpt-5*, o1*, o3*, o4*) reject `temperature` and
+    require `max_completion_tokens` instead of `max_tokens`."""
+    if not model:
+        return False
+    m = model.lower()
+    return any(tag in m for tag in ("gpt-5", "o1-", "o3-", "o4-"))
+
+
 def _coerce_iso_date(value) -> Optional[str]:
     """Best-effort coerce an LLM-returned date into an ISO string Postgres can accept.
 
@@ -105,22 +114,42 @@ memory_type GUIDE
   note         — freeform, use sparingly
 
 ═══════════════════════════════════════════════════════════════
-WHEN A MEMORY IS A DATED EVENT
+WHEN A MEMORY IS A DATED EVENT — 5-DIMENSION MANDATE
 ═══════════════════════════════════════════════════════════════
-For dated events, aim to capture as many of these as the source mentions:
-  WHAT   — the action or fact itself
-  WHEN   — absolute date if possible, or relative resolved via session_date
-  WHERE  — location if mentioned
-  WHO    — every person/entity involved
-  WHY    — motivation, outcome, emotion if stated
+If a memory describes a specific dated event, the `content` sentence MUST
+incorporate every dimension below that the source mentions. This is not
+optional — temporal-reasoning retrieval depends on these signals being
+present in the embedded text, not inferred from metadata.
 
-Denser memories retrieve better than sparse ones — but never invent detail that isn't in the source.
+  WHAT   — the action or fact itself (REQUIRED, always present)
+  WHEN   — absolute date (REQUIRED if the source gives any time reference;
+           resolve relative times like "last week" via session_date)
+  WHERE  — location (REQUIRED if mentioned — do not drop it)
+  WHO    — every person/entity involved (REQUIRED if mentioned)
+  WHY    — motivation, outcome, emotion (REQUIRED if stated)
 
-For NON-EVENT memories (preferences, identity facts, assistant-stated info), skip the 5-dim template.
-Write the clearest single-sentence version of the fact. Example:
+Rules:
+  - If the source mentions a dimension, it MUST appear in the content sentence.
+  - Never invent a dimension that isn't in the source.
+  - A date reference anywhere in the source makes this a dated event — capture
+    WHEN in both the sentence and event_date_start/end.
+  - Denser single-sentence memories retrieve dramatically better than sparse ones.
+
+For NON-EVENT memories (preferences, identity facts, assistant-stated generic
+info), skip the 5-dim template. Write the clearest single-sentence version
+of the fact. Example:
 
   Turn: "I prefer Python 3.11"
   → "User prefers Python 3.11 over other versions." (fact-sentence, no event structure)
+
+### DATED EVENT — GOOD vs BAD
+Turn: USER: "I met Rachel at the Apple Store on Jan 28 to pick up my Dell XPS 13 — she was thrilled."  (session_date 2026-02-01)
+
+BAD (drops WHO, WHERE, WHY):
+  "On January 28, 2026, user picked up their Dell XPS 13."
+
+GOOD (all 5 dims):
+  "On January 28, 2026, user met Rachel at the Apple Store to pick up their new Dell XPS 13; Rachel was thrilled."
 
 ═══════════════════════════════════════════════════════════════
 TEMPORAL FIELDS (event_date_start / event_date_end)
@@ -233,7 +262,9 @@ class MemoryService:
         self.experience_repo = ExperienceRepository()
         self.embedding = get_embedding_service()
         settings = get_settings()
-        self._openai = OpenAI(api_key=settings.openai_api_key)
+        # max_retries handles 429/5xx/network transient failures automatically.
+        # Same resilience as the embedding service (see _with_retry there).
+        self._openai = OpenAI(api_key=settings.openai_api_key, max_retries=5)
         # Configurable via settings.extraction_model (env: PLURUM_EXTRACTION_MODEL)
         self._extraction_model = settings.extraction_model
 
@@ -304,16 +335,23 @@ class MemoryService:
             f"USER:\n{user_content}\n\nASSISTANT:\n{assistant_content}"
         )
         try:
-            resp = self._openai.chat.completions.create(
-                model=self._extraction_model,
-                messages=[
+            # gpt-5 / o-series are reasoning models: they reject `temperature`
+            # and want `max_completion_tokens` rather than `max_tokens`.
+            is_reasoning = _is_reasoning_model(self._extraction_model)
+            kwargs = {
+                "model": self._extraction_model,
+                "messages": [
                     {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
                     {"role": "user", "content": user_msg},
                 ],
-                response_format={"type": "json_object"},
-                temperature=0.2,
-                max_tokens=600,
-            )
+                "response_format": {"type": "json_object"},
+            }
+            if is_reasoning:
+                kwargs["max_completion_tokens"] = 1200
+            else:
+                kwargs["temperature"] = 0.2
+                kwargs["max_tokens"] = 600
+            resp = self._openai.chat.completions.create(**kwargs)
             raw = resp.choices[0].message.content or "{}"
             parsed = json.loads(raw)
             candidates = parsed.get("memories", [])
