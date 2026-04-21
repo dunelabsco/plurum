@@ -108,7 +108,18 @@ All four categories matter equally. Do NOT let one dominant topic make you skip 
 
 1. **USER FACTS** — identity, events, experiences, relationships, situations the user states about themselves or their world.
 2. **USER PREFERENCES** — likes, dislikes, opinions, stated habits, routines. Treat as eagerly as dated events. Preferences hide inside requests and narrative ("I only drink oat milk", "Rust > Go", "I always run on weekends", "can't stand vertical monitors").
-3. **ASSISTANT-STATED FACTS** — factual claims, recommendations, definitions, or information the assistant provided that the user may reference later. Always `memory_subject: "assistant"`. Do NOT skip these — benchmarks test recall of assistant-stated info.
+3. **ASSISTANT-STATED FACTS** — factual claims, recommendations, definitions, or information the assistant provided that the user may reference later. Always `memory_subject: "assistant"`. Do NOT skip these.
+
+   This is the single most-missed category. The user will come back weeks later asking "what did you recommend for X" or "what was the name of that Y you mentioned" — if we didn't extract the specific content of the assistant's answer, we fail. Specifically extract:
+
+   - **Recommendations**: "assistant recommended Osteria Francescana for Italian in Modena" — keep the name and the reason if given.
+   - **Specific answers to user questions**: if the user asked "what's the capital of Portugal" and the assistant answered "Lisbon, on the Tagus River", extract the answer as a fact even though it's "widely known" — the user asked for it and will expect to find it later.
+   - **Lists and enumerations**: when the assistant provides a list (top 10 X, 5 tips, 7 jobs), extract EACH ITEM as its own memory. A list of 10 items → 10 memories. Preserve list position when it matters ("the 3rd item was X").
+   - **Tables and schedules**: when the assistant provides structured data (a schedule with rows per person, a table with columns), extract EACH ROW as its own memory. "Admon: Day Shift Sunday, 8am-4pm" is one memory; "Magdy: Night Shift Sunday" is another.
+   - **Generated content details**: if the assistant writes a story, poem, or description, extract the specific concrete details mentioned (names, colors, traits, numbers). "The Plesiosaur had a blue scaly body and a long neck" — keep the blue and the long neck, not a paraphrase.
+   - **Instructions, steps, procedures**: if the assistant gives a step-by-step answer, extract each step as a memory OR a single memory listing them in order.
+
+   All of these are `memory_subject: "assistant"`. Do not skip them because "they're what the assistant said" — that's exactly why they must be captured.
 4. **OBSERVATIONS** — inferred patterns from behavior ("User often works late on Fridays", "User tends to prefer shorter replies").
 
 ## Extract Incidental Facts, Not Just Requests
@@ -122,17 +133,18 @@ Pets, hobbies, childhood memories, personal anecdotes are NOT chitchat. They are
 
 # WHAT NOT TO EXTRACT (HARD RULES)
 
-1. **No echo extraction.** If the user stated a fact and the assistant merely restated, confirmed, or summarized it in the same turn, extract ONCE from the user's message. Do not also extract from the assistant's echo. Exception: if the assistant's message adds genuinely NEW information alongside an echo, extract only the new part.
+1. **No VERBATIM echo extraction.** If the user stated a specific fact and the assistant merely repeats it back verbatim ("Got it — daily standups at 9am, starting tomorrow" repeating "I want daily standups at 9am"), extract ONCE from the user's message and skip the assistant's echo. This rule applies ONLY to near-verbatim repetition, not to the assistant elaborating, recommending, listing, or answering. Extract from the assistant whenever they add ANY new content.
 2. **No fabrication.** Every detail in the output must trace to a specific span of text in New Messages. If you can't point to it, don't include it.
 3. **No implicit attribute inference.** Do not infer gender, age, ethnicity, religion, political views, or health status from names, context, or tone. Only record explicitly stated attributes.
 4. **No within-response duplication.** Before finalizing, scan your output. If two memories express the same fact with different wording, keep the richer one and drop the other.
 5. **No detail contamination from Existing Memories.** If New Messages says "I had a great meal" and an Existing Memory says "User's favorite restaurant is Olive Garden", do NOT produce "User had a great meal at Olive Garden." The new message did not mention the restaurant. Each extraction is faithful to its source span only.
 6. **No meta-extraction.** Extract the CONTENT of what was shared, not a description of the user's action.
-   - WRONG: "User shared a case summary about a construction dispute."
-   - RIGHT: "The Bajimaya v Reward Homes case involved construction starting in 2014, completion due October 2015, with the tribunal finding Reward Homes breached through waterproofing defects and non-compliance with the Building Code of Australia."
+   - WRONG: "User asked about the shift rotation for Admon."
+   - RIGHT: "Admon is assigned the Day Shift (8am-4pm) on Sundays in the GM social media agent rotation."
+   - WRONG: "Assistant listed 10 work-from-home jobs for seniors."
+   - RIGHT: "Assistant listed these work-from-home jobs for seniors: (1) Virtual Assistant, (2) Online Tutor, (3) Customer Service Rep, … (7) Transcriptionist, …" — or one memory per item.
 7. **No transient task state.** Skip "I'm about to click save", "let me check", "one moment".
 8. **No generic acknowledgments.** "got it", "cool", "thanks".
-9. **No widely-known public facts** that the assistant stated casually as context (e.g., "Water boils at 100°C") unless the user explicitly asked for it as an answer.
 
 # MEMORY QUALITY STANDARDS
 
@@ -273,6 +285,77 @@ Source: USER: "capital of Portugal?" ASSISTANT: "Lisbon, along the Tagus River."
     "event_date_start": null, "event_date_end": null,
     "entities": ["Portugal", "Lisbon", "Tagus River"], "linked_memory_ids": []
   }
+
+### ASSISTANT RECOMMENDATION — preserve the specific name, even when it sounds like filler
+Source:
+  USER: "Any unique dessert spots in Orlando?"
+  ASSISTANT: "You should try Sugar Factory at Icon Park — they do giant milkshakes that are perfect for sharing."
+→ {
+    "content": "Assistant recommended Sugar Factory at Icon Park in Orlando for their giant milkshakes that are good for sharing.",
+    "memory_type": "fact", "memory_subject": "assistant", "importance": "high",
+    "event_date_start": null, "event_date_end": null,
+    "entities": ["Sugar Factory", "Icon Park", "Orlando"], "linked_memory_ids": []
+  }
+(Do NOT collapse this to "User asked about dessert spots in Orlando" — that's meta-extraction. The assistant's specific recommendation is the valuable content.)
+
+### ASSISTANT LIST — each item becomes its own memory
+Source:
+  USER: "What are good work-from-home jobs for seniors?"
+  ASSISTANT: "Here are 10 to consider:
+    1. Virtual Assistant
+    2. Online Tutor
+    3. Customer Service Rep
+    4. Medical Coder
+    5. Writer / Blogger
+    6. Bookkeeper
+    7. Transcriptionist
+    8. Proofreader
+    9. Social Media Manager
+    10. Online Survey Taker"
+→ emit TEN memories, one per item — OR a single comprehensive memory listing them in order:
+  {
+    "content": "Assistant listed 10 work-from-home jobs for seniors, in order: (1) Virtual Assistant, (2) Online Tutor, (3) Customer Service Rep, (4) Medical Coder, (5) Writer/Blogger, (6) Bookkeeper, (7) Transcriptionist, (8) Proofreader, (9) Social Media Manager, (10) Online Survey Taker.",
+    "memory_type": "fact", "memory_subject": "assistant", "importance": "high",
+    "entities": [], "linked_memory_ids": []
+  }
+Either shape is acceptable. The key is that positional info (7th item) must be preserved so a later question like "what was the 7th job" can be answered.
+
+### ASSISTANT TABLE / SCHEDULE — one memory per row
+Source:
+  USER: "Here's our rotation. Can you format it?"
+  ASSISTANT: "Here's the week's shift rotation:
+    - Admon: Day Shift (8am-4pm) Sunday
+    - Magdy: Night Shift Sunday
+    - Ehab: Day Shift Monday
+    - Sara: Evening Shift Monday"
+→ {
+    "memories": [
+      {"content": "Admon is assigned Day Shift (8am-4pm) on Sunday in the rotation.",
+       "memory_type": "fact", "memory_subject": "assistant", "importance": "high",
+       "entities": ["Admon"], "linked_memory_ids": []},
+      {"content": "Magdy is assigned Night Shift on Sunday in the rotation.",
+       "memory_type": "fact", "memory_subject": "assistant", "importance": "high",
+       "entities": ["Magdy"], "linked_memory_ids": []},
+      {"content": "Ehab is assigned Day Shift on Monday in the rotation.",
+       "memory_type": "fact", "memory_subject": "assistant", "importance": "high",
+       "entities": ["Ehab"], "linked_memory_ids": []},
+      {"content": "Sara is assigned Evening Shift on Monday in the rotation.",
+       "memory_type": "fact", "memory_subject": "assistant", "importance": "high",
+       "entities": ["Sara"], "linked_memory_ids": []}
+    ]
+  }
+
+### ASSISTANT-GENERATED CONTENT — keep the specific details
+Source:
+  USER: "Write me a chapter about a Plesiosaur in a children's book."
+  ASSISTANT: "Chapter 3: The Plesiosaur! This swimming dinosaur has a blue scaly body, a long neck, and powerful flippers. It glides through ancient seas looking for fish."
+→ {
+    "content": "In the 'Amazing Adventures of Dinosaurs' book, Chapter 3 features the Plesiosaur — a swimming dinosaur with a blue scaly body, long neck, powerful flippers; it glides through ancient seas looking for fish.",
+    "memory_type": "fact", "memory_subject": "assistant", "importance": "high",
+    "event_date_start": null, "event_date_end": null,
+    "entities": ["Plesiosaur", "Amazing Adventures of Dinosaurs"], "linked_memory_ids": []
+  }
+(Keep "blue scaly body" verbatim — do NOT generalize to "colorful" or drop it.)
 
 ### NO-ECHO RULE — user said it, assistant confirmed
 Source:
