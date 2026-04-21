@@ -870,7 +870,10 @@ class MemoryService:
             if is_reasoning:
                 kwargs["max_completion_tokens"] = 3000
             else:
-                kwargs["temperature"] = 0.2
+                # Temperature 0.0: with response_format=json_object and a
+                # prescriptive prompt, variance is pure downside — it
+                # caused a 1/3 miss rate on a basic multi-topic test.
+                kwargs["temperature"] = 0.0
                 kwargs["max_tokens"] = 2000
             resp = self._openai.chat.completions.create(**kwargs)
             raw = resp.choices[0].message.content or "{}"
