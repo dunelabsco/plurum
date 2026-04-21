@@ -43,7 +43,11 @@ LONGMEMEVAL_DIR = Path(os.environ.get("LONGMEMEVAL_DIR", Path.home() / "LongMemE
 # Default to gpt-5.4-mini; override via PLURUM_ANSWER_MODEL env var if needed.
 ANSWER_MODEL = os.environ.get("PLURUM_ANSWER_MODEL", "gpt-5.4-mini")
 TOP_K_MEMORIES = 20            # how many memories to retrieve per question
-MAX_MEMORY_CHARS = 200         # per memory when shown to the answer model
+# 200 chars was truncating lists/tables mid-content — the 7th item in a
+# 15-item list never reached the answer model. 2000 comfortably fits a
+# 10-row shift schedule, a 15-item job list, or a dense multi-paragraph
+# assistant answer without inflating the prompt to absurd sizes.
+MAX_MEMORY_CHARS = 2000
 REQUEST_TIMEOUT = 60.0
 INGEST_PARALLELISM = int(os.environ.get("PLURUM_INGEST_PARALLELISM", "8"))
 

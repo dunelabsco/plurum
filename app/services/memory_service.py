@@ -298,7 +298,7 @@ Source:
   }
 (Do NOT collapse this to "User asked about dessert spots in Orlando" — that's meta-extraction. The assistant's specific recommendation is the valuable content.)
 
-### ASSISTANT LIST — each item becomes its own memory
+### ASSISTANT LIST — PREFER one memory per item (especially for long lists)
 Source:
   USER: "What are good work-from-home jobs for seniors?"
   ASSISTANT: "Here are 10 to consider:
@@ -312,13 +312,27 @@ Source:
     8. Proofreader
     9. Social Media Manager
     10. Online Survey Taker"
-→ emit TEN memories, one per item — OR a single comprehensive memory listing them in order:
+→ STRONGLY PREFERRED: emit 10 memories, one per item, each naming its
+  position so a later "what was the 7th" question can be answered from
+  that single memory alone:
   {
-    "content": "Assistant listed 10 work-from-home jobs for seniors, in order: (1) Virtual Assistant, (2) Online Tutor, (3) Customer Service Rep, (4) Medical Coder, (5) Writer/Blogger, (6) Bookkeeper, (7) Transcriptionist, (8) Proofreader, (9) Social Media Manager, (10) Online Survey Taker.",
-    "memory_type": "fact", "memory_subject": "assistant", "importance": "high",
-    "entities": [], "linked_memory_ids": []
+    "memories": [
+      {"content": "In assistant's 10-item list of work-from-home jobs for seniors, item 1 was Virtual Assistant.",
+       "memory_type": "fact", "memory_subject": "assistant", "importance": "medium",
+       "entities": ["Virtual Assistant"], "linked_memory_ids": []},
+      {"content": "In assistant's 10-item list of work-from-home jobs for seniors, item 2 was Online Tutor.",
+       "memory_type": "fact", "memory_subject": "assistant", "importance": "medium",
+       "entities": ["Online Tutor"], "linked_memory_ids": []},
+      …continue through item 10…
+      {"content": "In assistant's 10-item list of work-from-home jobs for seniors, item 7 was Transcriptionist.",
+       "memory_type": "fact", "memory_subject": "assistant", "importance": "medium",
+       "entities": ["Transcriptionist"], "linked_memory_ids": []}
+    ]
   }
-Either shape is acceptable. The key is that positional info (7th item) must be preserved so a later question like "what was the 7th job" can be answered.
+
+Rule: if the assistant's list has MORE THAN 5 items, always emit one memory per item. A single comprehensive memory with all 15+ items risks being truncated downstream and will make a "7th item" question unanswerable. Per-item memories are never truncated because each is short enough.
+
+For short lists (≤5 items) a single consolidated memory is acceptable.
 
 ### ASSISTANT TABLE / SCHEDULE — one memory per row
 Source:
