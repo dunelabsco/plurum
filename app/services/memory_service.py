@@ -9,9 +9,9 @@ Handles:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
@@ -27,32 +27,14 @@ from app.services.reranker_service import get_reranker_service
 logger = logging.getLogger(__name__)
 
 
-def _norm_content(s: str) -> str:
-    """Normalize a memory content string for dedupe comparison."""
-    return " ".join((s or "").lower().split())
+def _content_hash(s: str) -> str:
+    """MD5 hex of normalized (lowercased, whitespace-collapsed) content.
 
-
-def _merge_dedupe(primary: list[dict], extras: list[dict]) -> list[dict]:
-    """Append extras to primary, skipping near-duplicates by normalized content.
-
-    Dedupe rule: two memories are duplicates if one's normalized content is a
-    prefix of the other's (first 80 chars). This catches the common case where
-    the preference extractor emits a shorter restatement of something the main
-    extractor already produced.
+    Matches the back-fill expression in migration 023 so application-side
+    hashes and Postgres-side hashes produce the same value.
     """
-    seen = [_norm_content(p.get("content", ""))[:80] for p in primary if isinstance(p, dict)]
-    merged = list(primary)
-    for e in extras:
-        if not isinstance(e, dict):
-            continue
-        key = _norm_content(e.get("content", ""))[:80]
-        if not key:
-            continue
-        if any(key == s or key.startswith(s) or s.startswith(key) for s in seen if s):
-            continue
-        merged.append(e)
-        seen.append(key)
-    return merged
+    normalized = (s or "").strip().lower()
+    return hashlib.md5(normalized.encode("utf-8")).hexdigest()
 
 
 def _is_reasoning_model(model: str) -> bool:
@@ -87,46 +69,22 @@ def _coerce_iso_date(value) -> Optional[str]:
     return None
 
 
-PREFERENCE_EXTRACTION_PROMPT = """You find USER PREFERENCES stated or clearly implied in a conversation turn.
+EXTRACTION_SYSTEM_PROMPT = """# ROLE
 
-A preference is a like, dislike, opinion, stated habit, or stated routine —
-anything of the form "user prefers / likes / dislikes / avoids / typically
-does / has a habit of / wants". Preferences are often missed by general
-extractors because they hide inside narrative or opinion statements.
+You are a Memory Extractor. You produce precise, evidence-bound, self-contained factual memories from a user↔assistant conversation turn. Your job is ADD only — every extraction is a new memory. Accuracy and completeness are critical: a missed extraction loses context permanently; a fabricated one poisons retrieval forever.
 
-Return JSON:
-{
-  "memories": [
-    {
-      "content": "self-contained sentence naming the preference",
-      "memory_type": "preference",
-      "memory_subject": "user",
-      "importance": "high|medium|low",
-      "entities": ["entity1", ...]
-    }
-  ]
-}
+# INPUTS YOU RECEIVE
 
-Rules:
-  - Only emit memory_type="preference"; nothing else.
-  - Always memory_subject="user" (this prompt is for user preferences).
-  - If the turn contains no preference, return {"memories": []}.
-  - A single turn can yield several preferences — emit all of them.
-  - Be eager, not conservative. If the user says "I really love X" or
-    "I always do Y" or "X over Y" or "I can't stand Z", that's a preference.
-  - entities: products, places, people, technologies, topics, specific items.
+Under "## Context" the user message may include several blocks. They are all optional; any can be empty.
 
-Examples:
-  "I only drink oat milk in coffee" → pref: "User prefers oat milk in coffee."
-  "Rust > Go for me" → pref: "User prefers Rust over Go."
-  "I usually run on weekends" → pref: "User typically runs on weekends."
-  "Hate vertical monitors" → pref: "User dislikes vertical monitors."
-"""
+- **## New Messages** — the current turn(s). This is the ONLY source you extract FROM. Every output memory must trace to specific text here.
+- **## Last K Messages** — recent turns preceding New Messages. Use ONLY to resolve pronouns and references ("she", "it", "the restaurant"). Do NOT extract from these.
+- **## Existing Memories** — memories already stored for this user, in the form `[{"id": "<uuid>", "text": "..."}]`. Use for (a) deduplication — skip facts already captured — and (b) `linked_memory_ids` — if your new memory relates to one of these, include its id.
+- **## Observation Date** — when the conversation actually took place (e.g., "2026-04-03"). This is your ONLY anchor for resolving relative time references ("yesterday", "last week", "two weeks ago", "recently"). Always ground relative references to absolute dates using Observation Date.
+- **## Current Date** — today's system date. MAY be much later than Observation Date. Do NOT use this to resolve time references. Only Observation Date resolves relative time.
 
+# OUTPUT SCHEMA (JSON)
 
-EXTRACTION_SYSTEM_PROMPT = """You extract DURABLE, RETRIEVABLE memories from a user↔assistant conversation turn.
-
-Return a JSON object with this exact schema:
 {
   "memories": [
     {
@@ -134,192 +92,269 @@ Return a JSON object with this exact schema:
       "memory_type": "fact|preference|observation|note",
       "memory_subject": "user|assistant",
       "importance": "high|medium|low",
-      "event_date_start": "YYYY-MM-DD" or null,
-      "event_date_end": "YYYY-MM-DD" or null,
-      "entities": ["entity name 1", "entity name 2"]
+      "event_date_start": "YYYY-MM-DD" | null,
+      "event_date_end":   "YYYY-MM-DD" | null,
+      "entities": ["canonical name 1", "canonical name 2"],
+      "linked_memory_ids": ["<uuid-of-related-existing-memory>"]
     }
   ]
 }
 
-═══════════════════════════════════════════════════════════════
-WHAT TO EXTRACT — FOUR EQUAL-PRIORITY CATEGORIES
-═══════════════════════════════════════════════════════════════
-All four matter equally. Do not skip any kind just because others are present.
+If nothing worth extracting: `{"memories": []}`.
 
-1. **USER FACTS** — things the user states about themselves, their world, events.
-   "I picked up my Dell XPS 13 on Jan 28" → User picked up Dell XPS 13 on 2026-01-28.
+# WHAT TO EXTRACT
 
-2. **USER PREFERENCES** — likes, dislikes, opinions, stated habits.
-   "I prefer Python 3.11 over 3.10" → User prefers Python 3.11 over Python 3.10.
-   PREFERENCES ARE AS IMPORTANT AS DATED EVENTS — extract them eagerly.
+All four categories matter equally. Do NOT let one dominant topic make you skip the others.
 
-3. **ASSISTANT-STATED FACTS** — information the assistant shared that the user may be asked about later.
-   "The assistant said: Python 3.12 introduced the `type` statement"
-   → Python 3.12 introduced the `type` statement (assistant-stated).
-   Use memory_subject="assistant" for these. DO NOT skip assistant statements.
+1. **USER FACTS** — identity, events, experiences, relationships, situations the user states about themselves or their world.
+2. **USER PREFERENCES** — likes, dislikes, opinions, stated habits, routines. Treat as eagerly as dated events. Preferences hide inside requests and narrative ("I only drink oat milk", "Rust > Go", "I always run on weekends", "can't stand vertical monitors").
+3. **ASSISTANT-STATED FACTS** — factual claims, recommendations, definitions, or information the assistant provided that the user may reference later. Always `memory_subject: "assistant"`. Do NOT skip these — benchmarks test recall of assistant-stated info.
+4. **OBSERVATIONS** — inferred patterns from behavior ("User often works late on Fridays", "User tends to prefer shorter replies").
 
-4. **OBSERVATIONS** — inferences from behavior or mentions ("User often works late on Fridays").
+## Extract Incidental Facts, Not Just Requests
+A request often contains incidental personal facts as context. Extract BOTH.
+- "I've harvested cherry tomatoes from my garden — companion plant tips?" → extract "User grows cherry tomatoes in their garden."
+- "My daughter Sara loves painting — art class recs?" → extract "User has a daughter named Sara who loves painting."
+The request is transient. The incidental fact is durable.
 
-DO NOT extract: transient task state, small-talk, generic acknowledgments ("got it", "thanks"), things widely known.
-Each memory is a SINGLE standalone sentence — no pronouns referring to prior turns.
-If the turn has nothing worth remembering, return {"memories": []}.
+## Casual Topics Are Extractable
+Pets, hobbies, childhood memories, personal anecdotes are NOT chitchat. They are often the most valuable persistent details. Only skip pure filler ("hi", "thanks", "sounds good") with zero informational content.
 
-═══════════════════════════════════════════════════════════════
-memory_subject — USER OR ASSISTANT
-═══════════════════════════════════════════════════════════════
-- "user"      — the fact is ABOUT the user or STATED by the user about themselves/the world
-- "assistant" — the fact was PROVIDED by the assistant (e.g., a factual claim, recommendation, definition)
+# WHAT NOT TO EXTRACT (HARD RULES)
 
-Always set memory_subject. When in doubt, ask: "if someone asks 'what did the user say about X' or 'what did the assistant tell me about X', which memory would answer it?"
+1. **No echo extraction.** If the user stated a fact and the assistant merely restated, confirmed, or summarized it in the same turn, extract ONCE from the user's message. Do not also extract from the assistant's echo. Exception: if the assistant's message adds genuinely NEW information alongside an echo, extract only the new part.
+2. **No fabrication.** Every detail in the output must trace to a specific span of text in New Messages. If you can't point to it, don't include it.
+3. **No implicit attribute inference.** Do not infer gender, age, ethnicity, religion, political views, or health status from names, context, or tone. Only record explicitly stated attributes.
+4. **No within-response duplication.** Before finalizing, scan your output. If two memories express the same fact with different wording, keep the richer one and drop the other.
+5. **No detail contamination from Existing Memories.** If New Messages says "I had a great meal" and an Existing Memory says "User's favorite restaurant is Olive Garden", do NOT produce "User had a great meal at Olive Garden." The new message did not mention the restaurant. Each extraction is faithful to its source span only.
+6. **No meta-extraction.** Extract the CONTENT of what was shared, not a description of the user's action.
+   - WRONG: "User shared a case summary about a construction dispute."
+   - RIGHT: "The Bajimaya v Reward Homes case involved construction starting in 2014, completion due October 2015, with the tribunal finding Reward Homes breached through waterproofing defects and non-compliance with the Building Code of Australia."
+7. **No transient task state.** Skip "I'm about to click save", "let me check", "one moment".
+8. **No generic acknowledgments.** "got it", "cool", "thanks".
+9. **No widely-known public facts** that the assistant stated casually as context (e.g., "Water boils at 100°C") unless the user explicitly asked for it as an answer.
 
-═══════════════════════════════════════════════════════════════
-memory_type GUIDE
-═══════════════════════════════════════════════════════════════
-  fact         — objective statement ("User lives in SF", "Python 3.12 released in Oct 2023")
-  preference   — like/dislike/opinion/habit ("User prefers Python 3.11")
-  observation  — inferred pattern ("User often works late on Fridays")
-  note         — freeform, use sparingly
+# MEMORY QUALITY STANDARDS
 
-═══════════════════════════════════════════════════════════════
-WHEN A MEMORY IS A DATED EVENT — 5-DIMENSION MANDATE
-═══════════════════════════════════════════════════════════════
-If a memory describes a specific dated event, the `content` sentence MUST
-incorporate every dimension below that the source mentions. This is not
-optional — temporal-reasoning retrieval depends on these signals being
-present in the embedded text, not inferred from metadata.
+## Self-Contained
+Replace every pronoun with "User" or a specific name. A memory must stand alone without its source turn.
 
-  WHAT   — the action or fact itself (REQUIRED, always present)
-  WHEN   — absolute date (REQUIRED if the source gives any time reference;
-           resolve relative times like "last week" via session_date)
-  WHERE  — location (REQUIRED if mentioned — do not drop it)
-  WHO    — every person/entity involved (REQUIRED if mentioned)
+## Contextually Rich, Not Atomic
+Capture fact + transition + motivation + emotion in ONE unified sentence. Fragments lose meaning over time.
+- BAD: "User has a dog." / GOOD: "User has a dog named Poppy and their morning walks together are the highlight of their day."
+- BAD: "User prefers oat milk." / GOOD: "User switched from almond milk to oat milk after developing an almond sensitivity."
+
+Especially capture TRANSITIONS. When the user describes switching, replacing, stopping, or trying something new in place of something else, the memory MUST capture BOTH the new state AND what it replaces. "User started using Neovim" is a fragment; "User switched from VS Code to Neovim after getting tired of extension bloat" is the memory.
+
+## Concise but Complete (15–80 words)
+One to two sentences per memory (up to three for dense proper-noun-heavy content). Split into multiple focused memories rather than compressing details away. NEVER sacrifice a proper noun, title, date, or number to meet a word count.
+
+## Preserve Proper Nouns, Titles, and Numbers Verbatim
+These are the highest-value details and users search by them. Never generalize a specific to a category.
+
+- "watched 'Eternal Sunshine of the Spotless Mind'" → KEEP the full title, NOT "a movie".
+- "tried Osteria Francescana" → KEEP the name, NOT "a new restaurant".
+- "drove a Ferrari 488 GTB" → KEEP it, NOT "a sports car".
+- "416 pages" → KEEP, NOT "about 400 pages".
+- "promoted to assistant manager" → KEEP "assistant manager", NOT "manager".
+- "scored 3 goals in the semifinal" → KEEP "3 goals in the semifinal", NOT "scored several".
+
+## Meaning-Preserving — Read Carefully
+Common traps to watch out for:
+- "Didn't get to bed until 2 AM" = went TO BED at 2 AM (late bedtime), NOT "slept until 2 AM" (late wakeup).
+- "Can't stop eating chocolate" = eats a LOT of chocolate, NOT has stopped eating chocolate.
+- "I used to love hiking" = no longer loves hiking.
+- "Almost finished the book" = not finished.
+
+Misinterpreting what the user said is worse than not extracting at all.
+
+## Temporally Grounded
+Resolve every relative time reference to an absolute date using Observation Date. "User went to Paris last week" is nearly useless six months later. "User went to Paris the week of May 15, 2023" is meaningful forever.
+
+# 5-DIMENSION MANDATE FOR DATED EVENTS
+
+If a memory describes a specific dated event, the `content` sentence MUST incorporate every dimension the source mentions. This is non-negotiable — temporal-reasoning retrieval depends on these signals being present in the embedded text, not buried in metadata.
+
+  WHAT   — the action or fact itself (always present)
+  WHEN   — absolute date (REQUIRED if the source gives any time reference; resolve relatives via Observation Date)
+  WHERE  — location (REQUIRED if mentioned)
+  WHO    — every person involved (REQUIRED if mentioned)
   WHY    — motivation, outcome, emotion (REQUIRED if stated)
 
-Rules:
-  - If the source mentions a dimension, it MUST appear in the content sentence.
-  - Never invent a dimension that isn't in the source.
-  - A date reference anywhere in the source makes this a dated event — capture
-    WHEN in both the sentence and event_date_start/end.
-  - Denser single-sentence memories retrieve dramatically better than sparse ones.
+Never invent a dimension the source doesn't mention.
 
-For NON-EVENT memories (preferences, identity facts, assistant-stated generic
-info), skip the 5-dim template. Write the clearest single-sentence version
-of the fact. Example:
-
-  Turn: "I prefer Python 3.11"
-  → "User prefers Python 3.11 over other versions." (fact-sentence, no event structure)
+For NON-event memories (preferences, identity facts, assistant-stated generic info), skip the template. Write the clearest single-sentence version.
 
 ### DATED EVENT — GOOD vs BAD
-Turn: USER: "I met Rachel at the Apple Store on Jan 28 to pick up my Dell XPS 13 — she was thrilled."  (session_date 2026-02-01)
+Source: USER: "I met Rachel at the Apple Store on Jan 28 to pick up my Dell XPS 13 — she was thrilled." (Observation Date 2026-02-01)
+BAD: "On January 28, 2026, user picked up their Dell XPS 13."
+GOOD: "On January 28, 2026, user met Rachel at the Apple Store to pick up their new Dell XPS 13; Rachel was thrilled."
 
-BAD (drops WHO, WHERE, WHY):
-  "On January 28, 2026, user picked up their Dell XPS 13."
+# TEMPORAL FIELDS
 
-GOOD (all 5 dims):
-  "On January 28, 2026, user met Rachel at the Apple Store to pick up their new Dell XPS 13; Rachel was thrilled."
+Set `event_date_start` / `event_date_end` only when the memory describes a specific dated event. Leave null for preferences, identity facts, generic assistant facts.
 
-═══════════════════════════════════════════════════════════════
-TEMPORAL FIELDS (event_date_start / event_date_end)
-═══════════════════════════════════════════════════════════════
-Only set these when the memory describes a specific dated event.
-Leave null for preferences, identity facts, assistant-stated generic facts.
+Single-day event: both fields equal. Range: start < end. Duration ("for 3 weeks", "since February"): preserve phrase inside content; dates optional.
 
-Single-day event: both fields equal.  Date range: start < end.
+Resolution rules using Observation Date:
+- ABSOLUTE ("January 28", "March 3, 2026") → use directly.
+- RELATIVE ("last week", "two weeks ago", "yesterday") → resolve: Observation Date MINUS offset.
+- NO Observation Date → leave null; keep the phrase inside content.
 
-Resolution rules (when session_date is provided):
-  - ABSOLUTE date ("January 28th", "March 3, 2026") → use directly
-  - RELATIVE date ("last week", "two weeks ago") → resolve to absolute: session_date MINUS the offset
-      ex: session_date = 2026-03-17, "two weeks ago" → 2026-03-03
-  - NO session_date available → leave null; preserve phrase inside content
-  - DURATION ("for 3 weeks", "since February") → preserve in content, dates optional
+Preserve every date reference inside `content` verbatim even after setting structured fields.
 
-Also preserve every date reference inside `content` verbatim even after emitting the structured fields.
+# memory_subject
 
-═══════════════════════════════════════════════════════════════
-ENTITIES
-═══════════════════════════════════════════════════════════════
-For every memory, list the key named things it refers to in `entities`:
-  - Products ("Dell XPS 13", "Samsung Galaxy S22")
-  - Places ("Apple Store", "St. Mary's Church", "Berlin")
-  - People ("Rachel", "Tom", "Dr. Smith")
-  - Events/groups ("Holi", "Page Turners book club")
-  - Specific items ("The Nightingale", "Adidas running shoes")
-  - Topics/technologies ("Python 3.11", "PostgreSQL")
+- "user" — fact is ABOUT the user or STATED by the user about themselves / the world.
+- "assistant" — the fact was PROVIDED by the assistant (factual claim, recommendation, definition).
 
-Exclude bare generic nouns ("phone", "car", "meeting") unless qualified.
-Use canonical form when obvious ("Dell XPS 13" not "my laptop").
-Include 0–5 entities per memory.
+Always set it. Decision test: "If someone later asks 'what did the user say about X' vs 'what did the assistant tell me about X', which side would this memory answer?"
 
-═══════════════════════════════════════════════════════════════
-EXAMPLES (covers all 4 categories)
-═══════════════════════════════════════════════════════════════
+# memory_type
 
-### USER FACT (dated event)
-Turn: USER: "I picked up my Dell XPS 13 on January 28th"  (session_date 2026-02-01)
+- fact        — objective statement ("User lives in SF", "Python 3.12 released in Oct 2023").
+- preference  — like / dislike / opinion / habit ("User prefers Python 3.11").
+- observation — inferred pattern ("User often works late on Fridays").
+- note        — freeform, use sparingly.
+
+# importance
+
+- high   — identity, explicit preferences, dated events, key relationships, major assistant answers.
+- medium — useful situational context, general assistant-provided info.
+- low    — minor details, filler-adjacent assistant statements.
+
+# entities
+
+For every memory, list the key named things in `entities`:
+- Products ("Dell XPS 13"), Places ("Apple Store", "Berlin"), People ("Rachel"), Events ("Holi"), Titles ("The Nightingale"), Technologies ("Python 3.11").
+
+Exclude bare generic nouns ("phone", "car", "meeting") unless qualified. Use canonical form ("Dell XPS 13", not "my laptop"). 0–5 entities per memory.
+
+# MEMORY LINKING (linked_memory_ids)
+
+When extracting, check if any Existing Memory is related. If yes, include that memory's UUID in `linked_memory_ids`. Link when:
+
+- **Same entity/topic** — new fact about a person, place, product already captured.
+- **Updated preference / changed state** — evolved opinion or life change.
+- **Continuation** — follow-up event in a previously captured narrative.
+- **Contradiction** — new info conflicts with an existing memory (e.g., "I moved to Berlin" → now "I moved to Amsterdam").
+
+Do NOT link memories that merely share a vague theme. Links must be specific — same entity, event, or topic.
+
+IMPORTANT: an existing memory about an entity (e.g. "User has a dog named Max") does NOT mean all information about that entity is already captured. New events with Max MUST still be extracted as separate memories and linked back. Skip a new extraction only when the specific fact itself is already captured, not merely because the entity appears in a prior memory.
+
+If there's no Existing Memories block or nothing links, omit the field or pass `[]`.
+
+# EXAMPLES
+
+### USER FACT — dated event, Observation Date resolves the relative time
+Source: USER: "I picked up my new Dell XPS 13 last Tuesday." (Observation Date 2026-02-01)
 → {
-    "content": "On January 28, 2026, user picked up their new Dell XPS 13 laptop.",
+    "content": "On January 27, 2026, user picked up their new Dell XPS 13 laptop.",
     "memory_type": "fact", "memory_subject": "user", "importance": "high",
-    "event_date_start": "2026-01-28", "event_date_end": "2026-01-28",
-    "entities": ["Dell XPS 13"]
+    "event_date_start": "2026-01-27", "event_date_end": "2026-01-27",
+    "entities": ["Dell XPS 13"], "linked_memory_ids": []
   }
 
-### USER PREFERENCE (no date)
-Turn: USER: "I prefer Python 3.11 over 3.10 for the type inference"
+### USER PREFERENCE — no date
+Source: USER: "I prefer Python 3.11 over 3.10 for the type inference improvements."
 → {
-    "content": "User prefers Python 3.11 over Python 3.10 because of the type inference.",
+    "content": "User prefers Python 3.11 over Python 3.10 because of the type inference improvements.",
     "memory_type": "preference", "memory_subject": "user", "importance": "high",
     "event_date_start": null, "event_date_end": null,
-    "entities": ["Python 3.11", "Python 3.10"]
+    "entities": ["Python 3.11", "Python 3.10"], "linked_memory_ids": []
   }
 
-### ASSISTANT-STATED FACT (important!)
-Turn: USER: "what's the capital of Portugal?"
-      ASSISTANT: "The capital of Portugal is Lisbon, which sits along the Tagus River."
+### ASSISTANT-STATED FACT
+Source: USER: "capital of Portugal?" ASSISTANT: "Lisbon, along the Tagus River."
 → {
-    "content": "The capital of Portugal is Lisbon, located along the Tagus River. (Assistant-stated fact.)",
+    "content": "The capital of Portugal is Lisbon, located along the Tagus River (assistant-stated).",
     "memory_type": "fact", "memory_subject": "assistant", "importance": "medium",
     "event_date_start": null, "event_date_end": null,
-    "entities": ["Portugal", "Lisbon", "Tagus River"]
+    "entities": ["Portugal", "Lisbon", "Tagus River"], "linked_memory_ids": []
   }
 
-### ASSISTANT RECOMMENDATION (also extract!)
-Turn: ASSISTANT: "For that Rust cross-compile problem I'd try cargo-zigbuild — it handles arm64 cleanly."
+### NO-ECHO RULE — user said it, assistant confirmed
+Source:
+  USER: "I want daily standups at 9am."
+  ASSISTANT: "Got it — daily standups at 9am, starting tomorrow."
+→ extract ONCE from the user side:
+  {
+    "content": "User wants daily standups at 9am.",
+    "memory_type": "preference", "memory_subject": "user", "importance": "medium",
+    "entities": [], "linked_memory_ids": []
+  }
+(Do NOT also extract "Assistant scheduled daily standups at 9am" — that's the echo.)
+
+### CONTRADICTION / SUPERSESSION VIA linked_memory_ids
+Existing Memory: `{"id": "abc-123", "text": "User lives in Berlin."}`
+Source: USER: "Just moved to Amsterdam last month." (Observation Date 2026-04-20)
 → {
-    "content": "Assistant recommended cargo-zigbuild for Rust arm64 cross-compilation.",
-    "memory_type": "fact", "memory_subject": "assistant", "importance": "high",
-    "event_date_start": null, "event_date_end": null,
-    "entities": ["cargo-zigbuild", "Rust", "arm64"]
+    "content": "In March 2026, user moved from Berlin to Amsterdam.",
+    "memory_type": "fact", "memory_subject": "user", "importance": "high",
+    "event_date_start": "2026-03-01", "event_date_end": "2026-03-31",
+    "entities": ["Berlin", "Amsterdam"], "linked_memory_ids": ["abc-123"]
   }
 
-### MULTIPLE MEMORIES FROM ONE TURN
-Turn: USER: "I'm a backend engineer, mostly Go, and I just moved to Berlin last week."  (session_date 2026-04-10)
+### MULTIPLE MEMORIES FROM ONE TURN — no first-topic dominance
+Source: USER: "I'm a backend engineer, mostly Go, and I just moved to Berlin last week. My daughter Sara started kindergarten too — she loves painting." (Observation Date 2026-04-10)
 → {
     "memories": [
-      {
-        "content": "User is a backend engineer.",
-        "memory_type": "fact", "memory_subject": "user", "importance": "high",
-        "entities": []
-      },
-      {
-        "content": "User primarily works with Go.",
-        "memory_type": "preference", "memory_subject": "user", "importance": "high",
-        "entities": ["Go"]
-      },
-      {
-        "content": "On 2026-04-03 (a week before 2026-04-10), user moved to Berlin.",
-        "memory_type": "fact", "memory_subject": "user", "importance": "high",
-        "event_date_start": "2026-04-03", "event_date_end": "2026-04-03",
-        "entities": ["Berlin"]
-      }
+      {"content": "User is a backend engineer.",
+       "memory_type": "fact", "memory_subject": "user", "importance": "high",
+       "entities": [], "linked_memory_ids": []},
+      {"content": "User primarily works with Go.",
+       "memory_type": "preference", "memory_subject": "user", "importance": "high",
+       "entities": ["Go"], "linked_memory_ids": []},
+      {"content": "On 2026-04-03 (a week before 2026-04-10), user moved to Berlin.",
+       "memory_type": "fact", "memory_subject": "user", "importance": "high",
+       "event_date_start": "2026-04-03", "event_date_end": "2026-04-03",
+       "entities": ["Berlin"], "linked_memory_ids": []},
+      {"content": "User has a daughter named Sara who started kindergarten around early April 2026.",
+       "memory_type": "fact", "memory_subject": "user", "importance": "high",
+       "entities": ["Sara"], "linked_memory_ids": []},
+      {"content": "User's daughter Sara loves painting.",
+       "memory_type": "fact", "memory_subject": "user", "importance": "medium",
+       "entities": ["Sara"], "linked_memory_ids": []}
     ]
   }
 
-═══════════════════════════════════════════════════════════════
-IMPORTANCE
-═══════════════════════════════════════════════════════════════
-  high   — identity, explicit preferences, dated events, key relationships, major assistant answers
-  medium — useful situational context, general assistant-provided info
-  low    — minor details, filler assistant statements
+### INCIDENTAL FACT WITH A REQUEST
+Source: USER: "My golden retriever Max is turning 8 next month — what's a good brain-game toy?"  (Observation Date 2026-04-20)
+→ {
+    "memories": [
+      {"content": "User has a golden retriever named Max.",
+       "memory_type": "fact", "memory_subject": "user", "importance": "high",
+       "entities": ["Max"], "linked_memory_ids": []},
+      {"content": "Max is turning 8 in May 2026.",
+       "memory_type": "fact", "memory_subject": "user", "importance": "medium",
+       "event_date_start": "2026-05-01", "event_date_end": "2026-05-31",
+       "entities": ["Max"], "linked_memory_ids": []}
+    ]
+  }
+(The question about toys is transient — we extract the incidental facts, not the request.)
+
+# EXHAUSTIVE EXTRACTION CHECKLIST
+
+Before producing output, mentally scan the ENTIRE conversation and verify:
+
+1. Did you extract from every distinct topic or subject change in New Messages?
+2. Did you extract from the MIDDLE and END of the turn, not just the beginning?
+3. For New Messages spanning 10+ messages, you should typically extract 5–15 memories. If you have fewer than 3, re-read — you are almost certainly missing information.
+4. Did every specific fact, preference, experience, or event in each message produce an output memory? If a single message mentions two distinct facts (e.g. an allergy AND a hobby), both must appear.
+
+A common failure mode is "first-topic dominance" — extractor captures the first topic thoroughly and treats later topics as filler. This is WRONG. Every topic with memorable content deserves an extraction.
+
+# FINAL CHECKS BEFORE OUTPUT
+
+- Every memory is self-contained (no pronouns referring outside the memory).
+- Every detail traces to a specific span of New Messages (no fabrication).
+- No echo duplicates between user and assistant within the same turn.
+- No within-response duplicates.
+- Proper nouns, titles, numbers preserved verbatim.
+- Dated events have all 5 dims the source mentions + event_date_start/end.
+- linked_memory_ids references REAL UUIDs from Existing Memories only.
+- Return ONLY valid JSON. No reasoning, no prose wrapper.
 """
 
 
@@ -379,6 +414,10 @@ class MemoryService:
     # LLM extraction from a turn pair
     # -----------------------------------------------------------------------
 
+    # Context-budget knobs used by extract_from_turn.
+    _EXTRACTION_HISTORY_TURNS = 10   # last K turns passed as anaphora context
+    _EXTRACTION_EXISTING_K = 10      # top-K existing memories for linking/dedup
+
     def extract_from_turn(
         self,
         user_id: UUID,
@@ -388,48 +427,61 @@ class MemoryService:
         session_id: Optional[UUID] = None,
         metadata: Optional[dict] = None,
         session_date: Optional[str] = None,
+        session_history: Optional[list[dict]] = None,
+        observation_date: Optional[str] = None,
     ) -> list[dict]:
         """Run an LLM pass over a turn to extract durable memories.
 
-        If session_date is provided, the extractor anchors relative time
-        references (e.g., "last week") to absolute dates. This is critical
-        for temporal-reasoning recall.
+        Context the extractor receives:
+          - **New Messages**: the current USER/ASSISTANT turn. Only source
+            for extraction.
+          - **Last K Messages** (`session_history`): prior turns, for
+            pronoun and reference resolution only.
+          - **Existing Memories**: top-K memories already stored for this
+            user, for deduplication and for populating `linked_memory_ids`.
+          - **Observation Date**: when the conversation actually happened.
+            Anchors every relative time reference. Aliased as `session_date`
+            for backward compatibility.
+          - **Current Date**: today's system date. For awareness only — do
+            NOT use to resolve relative references.
 
         Returns the list of stored memory rows (may be empty).
         """
-        date_block = (
-            f"SESSION DATE: {session_date.strip()}\n\n"
-            f"(Use this date to convert relative times like 'last week' or 'two weeks ago' "
-            f"into absolute dates in your extracted memories.)\n\n"
-        ) if session_date else ""
+        obs_date = (observation_date or session_date or "").strip() or None
+        current_date = datetime.now(timezone.utc).date().isoformat()
 
-        user_msg = (
-            f"{date_block}"
-            f"USER:\n{user_content}\n\nASSISTANT:\n{assistant_content}"
+        # Pull top-K existing memories to give the extractor dedup + linking
+        # context. We use the current user_content as the query — it's the
+        # best available signal for "what memories might relate to this turn".
+        # Failure here is non-fatal: extraction still works with empty context.
+        existing: list[dict] = []
+        try:
+            existing = self._fetch_existing_for_context(user_id, user_content)
+        except Exception as e:
+            logger.debug("pre-extraction existing-memory fetch failed: %s", e)
+
+        existing_by_id: dict[str, dict] = {
+            str(m.get("id")): m for m in existing if m.get("id")
+        }
+
+        user_msg = self._build_extraction_user_message(
+            user_content=user_content,
+            assistant_content=assistant_content,
+            session_history=session_history or [],
+            existing_memories=existing,
+            observation_date=obs_date,
+            current_date=current_date,
         )
 
-        # Run the main extractor and the preference extractor in parallel —
-        # they're independent LLM calls and together are ~2x extract latency
-        # when run serially. ThreadPoolExecutor works because the OpenAI SDK
-        # releases the GIL during network IO.
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            main_future = pool.submit(self._run_main_extraction, user_msg)
-            pref_future = pool.submit(
-                self._extract_preferences, user_content, assistant_content
-            )
-            candidates = main_future.result() or []
-            pref_candidates = pref_future.result() or []
+        # Single LLM call. The V2 prompt covers preferences, assistant facts,
+        # and dated events in one pass — no separate preference extractor.
+        candidates = self._run_main_extraction(user_msg) or []
 
         if not isinstance(candidates, list):
             candidates = []
-
-        if pref_candidates:
-            candidates = _merge_dedupe(candidates, pref_candidates)
-
         if not candidates:
             return []
 
-        # Filter out invalid candidates (missing content)
         valid_candidates = [
             c for c in candidates
             if isinstance(c, dict) and c.get("content") and c["content"].strip()
@@ -438,32 +490,51 @@ class MemoryService:
             return []
 
         contents = [c["content"].strip() for c in valid_candidates]
-        embeddings = self.embedding.generate_embeddings([c[:8000] for c in contents])
+        hashes = [_content_hash(c) for c in contents]
+        embeddings = self.embedding.generate_embeddings(
+            [c[:8000] for c in contents]
+        )
 
-        # First pass: build rows without supersession info.
-        rows = []
-        per_row_entities: list[list[str]] = []
-        per_row_types: list[str] = []
-        per_row_subjects: list[Optional[str]] = []
-        for cand, content, emb in zip(valid_candidates, contents, embeddings):
+        rows: list[dict] = []
+        to_supersede: list[str] = []
+        for cand, content, chash, emb in zip(
+            valid_candidates, contents, hashes, embeddings
+        ):
             cand_metadata = dict(metadata or {})
             entities = cand.get("entities") or []
             clean_entities: list[str] = []
             if isinstance(entities, list):
                 clean_entities = [
-                    e.strip() for e in entities if isinstance(e, str) and e.strip()
+                    e.strip() for e in entities
+                    if isinstance(e, str) and e.strip()
                 ]
                 if clean_entities:
                     cand_metadata["entities"] = clean_entities
+
             memory_subject = cand.get("memory_subject")
             if memory_subject in ("user", "assistant"):
                 cand_metadata["memory_subject"] = memory_subject
 
             memory_type = cand.get("memory_type", "fact")
 
+            # linked_memory_ids come from the LLM. Preserve all links in
+            # metadata for read-time use; only the ones that pass
+            # `_should_supersede` become parent_memory_id + soft-delete.
+            link_ids_raw = cand.get("linked_memory_ids") or []
+            link_ids: list[str] = [
+                str(x) for x in link_ids_raw
+                if isinstance(x, (str, UUID)) and str(x).strip()
+            ]
+            # Keep only links the LLM is not hallucinating — they must exist
+            # in the Existing Memories block we handed it.
+            link_ids = [lid for lid in link_ids if lid in existing_by_id]
+            if link_ids:
+                cand_metadata["linked_memory_ids"] = link_ids
+
             row = {
                 "user_id": str(user_id),
                 "content": content,
+                "content_hash": chash,
                 "memory_type": memory_type,
                 "importance": cand.get("importance", "medium"),
                 "metadata": cand_metadata,
@@ -479,71 +550,239 @@ class MemoryService:
             if ede:
                 row["event_date_end"] = ede
 
+            # Supersession decision from LLM-provided links. We pick the
+            # first link that's a clear update/contradiction (same subject,
+            # same type, overlapping entities).
+            parent_id = self._pick_supersession_parent(
+                link_ids=link_ids,
+                existing_by_id=existing_by_id,
+                new_subject=memory_subject,
+                new_type=memory_type,
+                new_entities=clean_entities,
+            )
+            if parent_id:
+                row["parent_memory_id"] = parent_id
+                to_supersede.append(parent_id)
+
             if agent_id:
                 row["agent_id"] = str(agent_id)
             if session_id:
                 row["session_id"] = str(session_id)
             rows.append(row)
-            per_row_entities.append(clean_entities)
-            per_row_types.append(memory_type)
-            per_row_subjects.append(memory_subject)
 
-        # Second pass: parallel supersession lookups. Each check is a single
-        # Supabase RPC round-trip; running them concurrently keeps total
-        # latency flat regardless of candidate count.
-        to_supersede: list[str] = []
-        supersede_targets: list[Optional[str]] = [None] * len(rows)
-        lookup_indices = [
-            i for i, t in enumerate(per_row_types)
-            if t in ("fact", "preference") and per_row_entities[i]
-        ]
-        if lookup_indices:
-            def _lookup(i: int) -> tuple[int, Optional[dict]]:
-                parent = self._find_supersedable(
-                    user_id=user_id,
-                    content=rows[i]["content"],
-                    embedding=rows[i]["embedding"],
-                    entities=per_row_entities[i],
-                    memory_type=per_row_types[i],
-                    memory_subject=per_row_subjects[i],
-                )
-                return i, parent
+        # Insert. Two possible failure modes worth handling explicitly:
+        #  (a) content_hash unique collision (migration 023): someone else
+        #      already stored this exact content. We drop the offending row
+        #      and retry — a re-extracted duplicate is a no-op success.
+        #  (b) column-not-found: migration 022 or 023 hasn't been applied.
+        #      We strip the problematic columns and retry.
+        saved = self._insert_rows_with_recovery(rows, to_supersede)
 
-            with ThreadPoolExecutor(max_workers=min(4, len(lookup_indices))) as pool:
-                for i, parent in pool.map(_lookup, lookup_indices):
-                    if parent:
-                        supersede_targets[i] = parent["id"]
-
-        for i, parent_id in enumerate(supersede_targets):
-            if parent_id:
-                rows[i]["parent_memory_id"] = parent_id
-                to_supersede.append(parent_id)
-
-        # Insert; retry without parent_memory_id if migration 022 isn't applied.
-        try:
-            saved = self.repo.create_batch(rows)
-        except Exception as e:
-            err = str(e).lower()
-            if "parent_memory_id" in err or "schema cache" in err or "column" in err:
-                logger.info(
-                    "create_batch failed with column error — retrying without "
-                    "parent_memory_id (migration 022 pending?): %s", e,
-                )
-                for r in rows:
-                    r.pop("parent_memory_id", None)
-                to_supersede = []
-                saved = self.repo.create_batch(rows)
-            else:
-                raise
-
-        # Soft-delete the prior versions so stale facts drop out of retrieval.
+        # Soft-delete superseded parents so stale facts drop out of retrieval.
         for parent_id in to_supersede:
             try:
                 self.repo.soft_delete(UUID(parent_id), user_id)
             except Exception as e:
-                logger.warning("Failed to soft-delete superseded memory %s: %s", parent_id, e)
+                logger.warning(
+                    "Failed to soft-delete superseded memory %s: %s",
+                    parent_id, e,
+                )
 
         return saved
+
+    # -----------------------------------------------------------------------
+    # Extraction helpers
+    # -----------------------------------------------------------------------
+
+    def _fetch_existing_for_context(
+        self, user_id: UUID, query_text: str
+    ) -> list[dict]:
+        """Top-K existing memories for a user, used as dedup + linking context.
+
+        Uses the current turn's user message as a proxy query — the best
+        available signal for "what memories might relate to this turn" before
+        the extractor has decided what the memories are. Returns [] on any
+        failure (never blocks extraction).
+        """
+        if not (query_text or "").strip():
+            return []
+        try:
+            emb = self.embedding.generate_embedding(query_text[:8000])
+        except Exception as e:
+            logger.debug("pre-extraction embedding failed: %s", e)
+            return []
+        try:
+            return self.repo.search(
+                user_id=user_id,
+                query_text=query_text,
+                query_embedding=emb,
+                match_count=self._EXTRACTION_EXISTING_K,
+            ) or []
+        except Exception as e:
+            logger.debug("pre-extraction search failed: %s", e)
+            return []
+
+    def _build_extraction_user_message(
+        self,
+        user_content: str,
+        assistant_content: str,
+        session_history: list[dict],
+        existing_memories: list[dict],
+        observation_date: Optional[str],
+        current_date: str,
+    ) -> str:
+        """Render the extractor's user message with structured ## sections."""
+        parts: list[str] = ["## Context", ""]
+
+        # New Messages — the only source the extractor may extract FROM.
+        parts.append("## New Messages")
+        parts.append(f"USER:\n{user_content}")
+        parts.append(f"ASSISTANT:\n{assistant_content}")
+        parts.append("")
+
+        # Last K Messages — anaphora resolution only.
+        if session_history:
+            recent = session_history[-self._EXTRACTION_HISTORY_TURNS:]
+            lines: list[str] = []
+            for turn in recent:
+                if not isinstance(turn, dict):
+                    continue
+                role = (turn.get("role") or "").strip() or "user"
+                content = (turn.get("content") or "").strip()
+                if not content:
+                    continue
+                lines.append(f"{role.upper()}: {content[:2000]}")
+            if lines:
+                parts.append("## Last K Messages")
+                parts.extend(lines)
+                parts.append("")
+
+        # Existing Memories — for linking + dedup. Keep content short.
+        if existing_memories:
+            trimmed = [
+                {
+                    "id": str(m.get("id")),
+                    "text": ((m.get("content") or "")[:400]),
+                }
+                for m in existing_memories
+                if m.get("id") and (m.get("content") or "").strip()
+            ]
+            if trimmed:
+                parts.append("## Existing Memories")
+                parts.append(json.dumps(trimmed, ensure_ascii=False))
+                parts.append("")
+
+        if observation_date:
+            parts.append("## Observation Date")
+            parts.append(observation_date)
+            parts.append("")
+
+        parts.append("## Current Date")
+        parts.append(current_date)
+
+        return "\n".join(parts)
+
+    def _pick_supersession_parent(
+        self,
+        link_ids: list[str],
+        existing_by_id: dict[str, dict],
+        new_subject: Optional[str],
+        new_type: str,
+        new_entities: list[str],
+    ) -> Optional[str]:
+        """Given LLM-provided links, decide which (if any) this memory
+        supersedes.
+
+        Conservative rules — all must hold:
+          - Parent has same `memory_subject` as the new memory (if either set).
+          - Parent has same or compatible `memory_type`.
+          - At least one shared canonicalized entity.
+
+        We only supersede for fact and preference types — observations are
+        patterns (never "wrong", just evolved) and notes are too freeform.
+        """
+        if not link_ids or new_type not in ("fact", "preference"):
+            return None
+        new_ents_norm = {e.strip().lower() for e in new_entities if e}
+        for lid in link_ids:
+            parent = existing_by_id.get(lid)
+            if not parent:
+                continue
+            p_meta = parent.get("metadata") or {}
+            p_subject = p_meta.get("memory_subject")
+            if new_subject and p_subject and p_subject != new_subject:
+                continue
+            p_type = parent.get("memory_type")
+            if p_type and p_type != new_type:
+                continue
+            p_ents = {
+                str(e).strip().lower()
+                for e in (p_meta.get("entities") or [])
+                if str(e).strip()
+            }
+            if not new_ents_norm or not (new_ents_norm & p_ents):
+                continue
+            return lid
+        return None
+
+    def _insert_rows_with_recovery(
+        self, rows: list[dict], to_supersede: list[str]
+    ) -> list[dict]:
+        """Insert rows, recovering from the two known failure modes:
+           (a) content_hash unique-constraint collision — drop those rows
+               and retry.
+           (b) missing column errors (migrations 022/023 pending) — strip
+               the offending columns and retry.
+        """
+        try:
+            return self.repo.create_batch(rows)
+        except Exception as e:
+            err = str(e).lower()
+            if "uq_memories_user_content_hash" in err or (
+                "duplicate key value" in err and "content_hash" in err
+            ):
+                logger.info(
+                    "Content-hash collision — dropping exact duplicates and retrying"
+                )
+                hashes_dropped: set[str] = set()
+                survivors: list[dict] = []
+                for r in rows:
+                    h = r.get("content_hash")
+                    if h in hashes_dropped:
+                        continue
+                    survivors.append(r)
+                    hashes_dropped.add(h)
+                if not survivors:
+                    return []
+                try:
+                    return self.repo.create_batch(survivors)
+                except Exception as e2:
+                    err2 = str(e2).lower()
+                    if "content_hash" in err2 or "parent_memory_id" in err2 or "schema cache" in err2 or "column" in err2:
+                        return self._insert_without_optional_columns(
+                            survivors, to_supersede
+                        )
+                    raise
+            if (
+                "content_hash" in err or "parent_memory_id" in err
+                or "schema cache" in err or "column" in err
+            ):
+                return self._insert_without_optional_columns(rows, to_supersede)
+            raise
+
+    def _insert_without_optional_columns(
+        self, rows: list[dict], to_supersede: list[str]
+    ) -> list[dict]:
+        """Fallback insert path when migrations 022/023 haven't landed."""
+        logger.info(
+            "create_batch column error — retrying without content_hash + "
+            "parent_memory_id (migrations 022/023 pending?)"
+        )
+        for r in rows:
+            r.pop("content_hash", None)
+            r.pop("parent_memory_id", None)
+        to_supersede.clear()
+        return self.repo.create_batch(rows)
 
     # -----------------------------------------------------------------------
     # Reads
@@ -607,12 +846,17 @@ class MemoryService:
         }
 
     # -----------------------------------------------------------------------
-    # Main extraction LLM call (separated so it runs in parallel with the
-    # preference extractor via ThreadPoolExecutor)
+    # Main extraction LLM call
     # -----------------------------------------------------------------------
 
     def _run_main_extraction(self, user_msg: str) -> list[dict]:
-        """Invoke the general extractor; returns candidate memories or []."""
+        """Invoke the V2 extractor; returns candidate memories or [].
+
+        The new prompt asks for 5–15 memories on busy turns and emits a
+        `linked_memory_ids` array, so we budget output tokens generously
+        (2000 for non-reasoning, 3000 for reasoning models — the latter
+        burn the budget on internal reasoning before emitting JSON).
+        """
         try:
             is_reasoning = _is_reasoning_model(self._extraction_model)
             kwargs: dict = {
@@ -624,10 +868,10 @@ class MemoryService:
                 "response_format": {"type": "json_object"},
             }
             if is_reasoning:
-                kwargs["max_completion_tokens"] = 1200
+                kwargs["max_completion_tokens"] = 3000
             else:
                 kwargs["temperature"] = 0.2
-                kwargs["max_tokens"] = 600
+                kwargs["max_tokens"] = 2000
             resp = self._openai.chat.completions.create(**kwargs)
             raw = resp.choices[0].message.content or "{}"
             parsed = json.loads(raw)
@@ -638,111 +882,6 @@ class MemoryService:
                 "Memory extraction failed (model=%s): %s",
                 self._extraction_model, e,
             )
-            return []
-
-    # -----------------------------------------------------------------------
-    # Supersession (write-time): find a prior memory this new one overrides
-    # -----------------------------------------------------------------------
-
-    # Cosine-similarity threshold above which two memories are considered
-    # statements of the same underlying fact/preference. Entity overlap is
-    # ALSO required — similarity alone overfires on lexically similar but
-    # semantically distinct facts ("likes Python" vs "dislikes Python").
-    _SUPERSEDE_SIM_THRESHOLD = 0.88
-
-    def _find_supersedable(
-        self,
-        user_id: UUID,
-        content: str,
-        embedding: list[float],
-        entities: list[str],
-        memory_type: str,
-        memory_subject: Optional[str],
-    ) -> Optional[dict]:
-        """Return a prior memory that this new one should supersede, or None.
-
-        Only applies to facts and preferences. Requires both high semantic
-        similarity AND at least one shared entity to guard against accidental
-        merges of similarly-worded but distinct facts.
-        """
-        if memory_type not in ("fact", "preference"):
-            return None
-        if not entities:
-            return None
-        try:
-            candidates = self.repo.search(
-                user_id=user_id,
-                query_text=content,
-                query_embedding=embedding,
-                match_count=5,
-                memory_type=memory_type,
-                query_entities=entities,
-            )
-        except Exception as e:
-            logger.debug("supersede lookup failed: %s", e)
-            return None
-
-        entity_set = {e.lower() for e in entities}
-        for c in candidates or []:
-            sim = c.get("similarity") or 0.0
-            if sim < self._SUPERSEDE_SIM_THRESHOLD:
-                continue
-            cand_meta = c.get("metadata") or {}
-            cand_entities = cand_meta.get("entities") or []
-            cand_set = {str(e).lower() for e in cand_entities}
-            if not (entity_set & cand_set):
-                continue
-            cand_subj = cand_meta.get("memory_subject")
-            if memory_subject and cand_subj and cand_subj != memory_subject:
-                continue
-            return c
-        return None
-
-    # -----------------------------------------------------------------------
-    # Preference-dedicated extraction pass
-    # -----------------------------------------------------------------------
-
-    def _extract_preferences(
-        self,
-        user_content: str,
-        assistant_content: str,
-    ) -> list[dict]:
-        """Second pass focused purely on preference recall.
-
-        Uses gpt-4o-mini (not the reasoning model) because the preference
-        prompt is simple and latency matters — this runs on every turn.
-        Returns [] on any failure so a transient hiccup doesn't break
-        extraction overall.
-        """
-        if not user_content or not user_content.strip():
-            return []
-        try:
-            resp = self._openai.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": PREFERENCE_EXTRACTION_PROMPT},
-                    {"role": "user", "content": f"USER:\n{user_content}\n\nASSISTANT:\n{assistant_content}"},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.1,
-                max_tokens=400,
-            )
-            raw = resp.choices[0].message.content or "{}"
-            data = json.loads(raw)
-            mems = data.get("memories") or []
-            if not isinstance(mems, list):
-                return []
-            # Force memory_type / memory_subject in case the model drifts.
-            cleaned = []
-            for m in mems:
-                if not isinstance(m, dict) or not (m.get("content") or "").strip():
-                    continue
-                m["memory_type"] = "preference"
-                m["memory_subject"] = "user"
-                cleaned.append(m)
-            return cleaned
-        except Exception as e:
-            logger.debug("preference extraction failed: %s", e)
             return []
 
     # -----------------------------------------------------------------------
