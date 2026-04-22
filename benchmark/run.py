@@ -183,7 +183,7 @@ class PlurimClient:
 
 ANSWER_SYSTEM_PROMPT = (
     "You answer questions about a user using ONLY their stored memories.\n\n"
-    "Rules:\n"
+    "General rules:\n"
     "- Use only the memories provided. Do NOT use outside knowledge.\n"
     "- If the memories do not contain enough information, say you don't know.\n"
     "- For 'which happened first' questions, compare the dates/times in the memories. "
@@ -192,7 +192,25 @@ ANSWER_SYSTEM_PROMPT = (
     "- For 'how many days/weeks' questions, do the date arithmetic using the anchors "
     "in the memories.\n"
     "- Prefer the shortest possible factual answer — a phrase, date, count, or one-sentence statement.\n"
-    "- Do not narrate, apologize, or restate the question.\n"
+    "- Do not narrate, apologize, or restate the question.\n\n"
+    "Aggregate questions (how many / how much / total / average / which X did I Y most):\n"
+    "Before writing the final answer, do this silently and internally:\n"
+    "  1. Re-read every memory and list ONLY the items that qualify under the question's\n"
+    "     constraints (time window, category, activity, etc.). Drop memories that merely\n"
+    "     mention the topic but don't represent a qualifying instance.\n"
+    "  2. Deduplicate. Two memories that describe the SAME underlying event, item, or\n"
+    "     person count as ONE — not two. Same doctor visit on same date = 1. Same wedding\n"
+    "     mentioned from two angles = 1. Same model kit named in two memories = 1.\n"
+    "  3. Include the USER THEMSELVES when the question is about a group that\n"
+    "     naturally contains them ('me and my parents', 'my household', 'my family').\n"
+    "  4. For sums/averages, list each numeric value from the memories, then add or\n"
+    "     average. Do not skip values that are in the memories but not in your first\n"
+    "     pass.\n"
+    "  5. For superlative questions ('which platform gained the MOST'), compare the\n"
+    "     actual magnitudes across all candidates. A specifically-stated number is not\n"
+    "     automatically larger than an approximately-stated one; compare the numbers.\n"
+    "Only after doing all of the above, emit the short final answer (count, sum, name,\n"
+    "or phrase). Do not show your working.\n"
 )
 
 # Preference questions get a different treatment. The LME gold answers for this

@@ -934,7 +934,22 @@ class MemoryService:
             memory_type=memory_type,
             query_entities=query_entities,
         )
-        results = self.reranker.rerank(query=query, candidates=pool, top_k=limit)
+        # Dedup by normalized content hash. Legacy rows without a unique
+        # content_hash column occasionally land the same memory (same wording,
+        # different id) in the pool multiple times — on counting questions
+        # like "how many doctor appointments" this burns top-K slots on
+        # duplicates instead of covering more distinct sessions.
+        # Pool is already ordered by combined_score, so the first occurrence
+        # wins and is the one we keep.
+        seen: set[str] = set()
+        deduped: list[dict] = []
+        for cand in pool:
+            key = _content_hash(cand.get("content") or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(cand)
+        results = self.reranker.rerank(query=query, candidates=deduped, top_k=limit)
         return {
             "query": query,
             "query_entities": query_entities,
