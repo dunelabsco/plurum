@@ -934,6 +934,18 @@ class MemoryService:
         if not pairs:
             return
 
+        # Hard time budget so entity sync can never block memory insert
+        # past the HTTP client timeout. If Supabase is slow or we hit a
+        # lock-contention spike under concurrent ingest, we log and bail
+        # rather than time out the whole /memories/extract call. Entity
+        # sync is best-effort — the memory already landed.
+        import time
+        budget_seconds = float(get_settings().entity_sync_budget_seconds or 5.0)
+        if budget_seconds <= 0:
+            # Opt-out switch for benchmark/debug: set to 0 to disable entity sync.
+            return
+        deadline = time.monotonic() + budget_seconds
+
         # Batch-embed entity texts in one OpenAI call.
         texts = [p[1] for p in pairs]
         try:
@@ -942,7 +954,11 @@ class MemoryService:
             logger.warning("Entity embedding batch failed, skipping entity sync: %s", e)
             return
 
+        skipped = 0
         for (memory_id_str, text), emb in zip(pairs, embeddings):
+            if time.monotonic() > deadline:
+                skipped = len(pairs) - (pairs.index((memory_id_str, text)))
+                break
             try:
                 self.entity_repo.upsert(
                     user_id=user_id,
@@ -967,6 +983,11 @@ class MemoryService:
                     "Entity upsert failed for '%s' (mem=%s): %s",
                     text[:60], memory_id_str, e,
                 )
+        if skipped:
+            logger.warning(
+                "Entity sync budget (%.1fs) exceeded; skipped %d of %d entities",
+                budget_seconds, skipped, len(pairs),
+            )
 
     def _insert_without_optional_columns(
         self, rows: list[dict], to_supersede: list[str]

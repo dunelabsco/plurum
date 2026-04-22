@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     # without parallelism. Re-enable via env var once the ingest loop is async.
     extraction_model: str = "gpt-4o-mini"
 
+    # Entity-sync budget (Phase 2). After a memory is inserted the service
+    # upserts each extracted entity into the entity store so cross-session
+    # identity boosts work at read time. We wrap this work in a hard time
+    # budget so it can never block the /memories/extract response past the
+    # HTTP client timeout. Set to 0 to disable entity sync entirely (useful
+    # when debugging or when the entity-store migrations haven't landed).
+    entity_sync_budget_seconds: float = 5.0
+
     # Pagination
     default_page_size: int = 20
     max_page_size: int = 100
