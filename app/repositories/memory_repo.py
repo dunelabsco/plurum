@@ -150,13 +150,14 @@ class MemoryRepository:
         query_embedding: list[float],
         match_count: int = 10,
         memory_type: Optional[str] = None,
-        query_entities: Optional[list[str]] = None,
+        entity_mem_ids: Optional[list[str]] = None,
+        entity_mem_scores: Optional[list[float]] = None,
     ) -> list[dict]:
         """Hybrid search scoped to a single user.
 
-        With query_entities set, the RPC runs a 3-way RRF (vector + keyword + entity)
-        followed by a multiplicative rerank. Without entities, the entity arm is a
-        no-op and the result matches the 2-way behavior.
+        The entity arm is fed pre-aggregated (memory_id, score) pairs computed
+        upstream against the entity store (migration 024). If both arrays are
+        empty the arm is a no-op and fusion reduces to vector + keyword RRF.
         """
         params: dict = {
             "p_user_id": str(user_id),
@@ -166,9 +167,9 @@ class MemoryRepository:
         }
         if memory_type:
             params["memory_type_filter"] = memory_type
-        if query_entities:
-            # Postgres RPC accepts TEXT[] as a list in the JSON-RPC payload
-            params["query_entities"] = query_entities
+        if entity_mem_ids and entity_mem_scores:
+            params["entity_mem_ids"] = entity_mem_ids
+            params["entity_mem_scores"] = entity_mem_scores
 
         result = self.client.rpc("search_memories", params).execute()
         return result.data or []

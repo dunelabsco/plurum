@@ -19,6 +19,7 @@ from uuid import UUID
 from openai import OpenAI
 
 from app.config import get_settings
+from app.repositories.entity_repo import EntityRepository
 from app.repositories.experience_repo import ExperienceRepository
 from app.repositories.memory_repo import MemoryRepository
 from app.services.embedding_service import get_embedding_service
@@ -464,6 +465,7 @@ class MemoryService:
     def __init__(self):
         self.repo = MemoryRepository()
         self.experience_repo = ExperienceRepository()
+        self.entity_repo = EntityRepository()
         self.embedding = get_embedding_service()
         self.reranker = get_reranker_service()
         settings = get_settings()
@@ -685,6 +687,13 @@ class MemoryService:
                     parent_id, e,
                 )
 
+        # Sync the entity store (Phase 2). The entities table lets the
+        # search RPC's entity arm match semantically (e.g. "Dr. Smith" ↔
+        # "primary care physician") instead of relying on exact-text match
+        # against metadata.entities. Non-fatal on failure — legacy
+        # metadata.entities still carries the entity arm if this fails.
+        self._sync_entities_for_memories(user_id, saved, rows)
+
         return saved
 
     # -----------------------------------------------------------------------
@@ -867,6 +876,98 @@ class MemoryService:
                 return self._insert_without_optional_columns(rows, to_supersede)
             raise
 
+    def _sync_entities_for_memories(
+        self, user_id: UUID, saved: list[dict], rows: list[dict]
+    ) -> None:
+        """Upsert each saved memory's entities into the entity store.
+
+        For every extracted entity string, we embed it and either merge
+        it into an existing entity row for this user (vector + text
+        match) or insert a new one, appending the memory id to its
+        `linked_memory_ids`. Same-entity-different-wording across
+        sessions converges to one row, which is what lets the search
+        RPC's entity arm boost across sessions.
+
+        Non-fatal on failure — if migration 024 hasn't landed or an
+        individual entity errors out, log and move on. The legacy
+        `metadata.entities` JSONB field is still populated on each memory
+        so the old entity arm keeps working as a fallback.
+        """
+        if not saved:
+            return
+
+        # Map saved memories back to their source rows by content_hash so
+        # we can recover the entity list even when create_batch dropped
+        # some rows on dedup collision.
+        saved_by_hash: dict[str, dict] = {}
+        for s in saved:
+            h = s.get("content_hash")
+            if h:
+                saved_by_hash[h] = s
+
+        # Flatten to (memory_id, entity_text) pairs, deduped by (mid, text_norm).
+        pairs: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for r in rows:
+            chash = r.get("content_hash")
+            saved_row = saved_by_hash.get(chash) if chash else None
+            if not saved_row:
+                continue
+            mid = saved_row.get("id")
+            if not mid:
+                continue
+            ents = (r.get("metadata") or {}).get("entities") or []
+            if not isinstance(ents, list):
+                continue
+            for e in ents:
+                if not isinstance(e, str):
+                    continue
+                text = e.strip()
+                if not text:
+                    continue
+                key = (str(mid), text.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                pairs.append((str(mid), text))
+
+        if not pairs:
+            return
+
+        # Batch-embed entity texts in one OpenAI call.
+        texts = [p[1] for p in pairs]
+        try:
+            embeddings = self.embedding.generate_embeddings(texts)
+        except Exception as e:
+            logger.warning("Entity embedding batch failed, skipping entity sync: %s", e)
+            return
+
+        for (memory_id_str, text), emb in zip(pairs, embeddings):
+            try:
+                self.entity_repo.upsert(
+                    user_id=user_id,
+                    text=text,
+                    embedding=emb,
+                    memory_id=UUID(memory_id_str),
+                )
+            except Exception as e:
+                # Most likely cause: migration 024 pending. Log once per
+                # batch and don't crash memory insert.
+                err = str(e).lower()
+                if "entities" in err and (
+                    "schema cache" in err or "does not exist" in err
+                    or "relation" in err
+                ):
+                    logger.info(
+                        "Entity store not yet available (migration 024 pending); "
+                        "skipping entity sync for this memory batch"
+                    )
+                    return
+                logger.warning(
+                    "Entity upsert failed for '%s' (mem=%s): %s",
+                    text[:60], memory_id_str, e,
+                )
+
     def _insert_without_optional_columns(
         self, rows: list[dict], to_supersede: list[str]
     ) -> list[dict]:
@@ -924,15 +1025,21 @@ class MemoryService:
         with gpt-4o-mini and returns the top `limit`.
         """
         embedding = self.embedding.generate_embedding(query[:8000])
-        # Extract entities from the query so the RPC can run the entity arm.
+        # Extract entities from the query and resolve them against the entity
+        # store (migration 024). Returns parallel arrays of memory ids and
+        # spread-attenuated boost scores for the entity arm of the RPC.
         query_entities = self._extract_query_entities(query)
+        entity_mem_ids, entity_mem_scores = self._resolve_entity_boosts(
+            user_id, query_entities
+        )
         pool = self.repo.search(
             user_id=user_id,
             query_text=query,
             query_embedding=embedding,
             match_count=max(limit, self._RERANK_POOL_SIZE),
             memory_type=memory_type,
-            query_entities=query_entities,
+            entity_mem_ids=entity_mem_ids,
+            entity_mem_scores=entity_mem_scores,
         )
         # Dedup by normalized content hash. Legacy rows without a unique
         # content_hash column occasionally land the same memory (same wording,
@@ -1010,6 +1117,81 @@ class MemoryService:
         "Exclude generic nouns (car, phone, meeting) unless qualified. Use canonical "
         "form. Max 5 entities. If none, return {\"entities\": []}."
     )
+
+    def _resolve_entity_boosts(
+        self, user_id: UUID, query_entities: list[str]
+    ) -> tuple[list[str], list[float]]:
+        """Turn query entity strings into (memory_id, boost) arrays.
+
+        For each query entity:
+          1. Embed it.
+          2. Vector-search the entity store (loose threshold 0.5) — this is
+             how "Dr. Smith" finds the entity row for "primary care physician"
+             and pulls its linked memory ids.
+          3. For every matched entity row: contribute a spread-attenuated
+             boost to each of its linked memory ids. Popular entities
+             (many linked memories) contribute less per link, keeping the
+             arm from flooding with generic hits.
+
+        Boosts are summed per memory id across all matched entities so a
+        memory that matches on multiple query entities ranks higher than
+        one that matches on only one.
+
+        Returns ([], []) on any failure — the RPC's entity arm then becomes
+        a no-op and fusion degrades to vector + keyword.
+        """
+        if not query_entities:
+            return [], []
+        try:
+            ent_embeddings = self.embedding.generate_embeddings(
+                [e[:500] for e in query_entities]
+            )
+        except Exception as e:
+            logger.debug("query entity embedding failed: %s", e)
+            return [], []
+
+        scores: dict[str, float] = {}
+        for emb in ent_embeddings:
+            try:
+                matched = self.entity_repo.search(
+                    user_id=user_id,
+                    query_embedding=emb,
+                    similarity_threshold=0.5,
+                    match_count=20,
+                )
+            except Exception as e:
+                # Most likely: migration 024 not applied yet. Log and skip
+                # this query entity — partial coverage is still useful.
+                err = str(e).lower()
+                if "search_entities" in err or "function" in err or "relation" in err:
+                    logger.info(
+                        "Entity store RPC unavailable — skipping entity arm"
+                    )
+                    return [], []
+                logger.warning("entity store search failed: %s", e)
+                continue
+
+            for row in matched:
+                linked = row.get("linked_memory_ids") or []
+                sim = float(row.get("similarity") or 0.0)
+                linked_count = len(linked)
+                if linked_count == 0:
+                    continue
+                spread = 0.5 / (1.0 + 0.001 * max(0, linked_count - 1) ** 2)
+                per_link_boost = sim * spread
+                for mid in linked:
+                    if not mid:
+                        continue
+                    scores[str(mid)] = scores.get(str(mid), 0.0) + per_link_boost
+
+        if not scores:
+            return [], []
+        # Order by score desc — RPC re-ranks but the order keeps top
+        # contributors near the front of the array.
+        ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        ids = [mid for mid, _ in ordered]
+        vals = [float(s) for _, s in ordered]
+        return ids, vals
 
     def _extract_query_entities(self, query: str) -> list[str]:
         """Light LLM call to pull entities from the search query.
