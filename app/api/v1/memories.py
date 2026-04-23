@@ -94,6 +94,7 @@ async def extract_memories(
         session_id=data.session_id,
         metadata=data.metadata,
         session_date=data.session_date,
+        session_history=data.messages,
     )
     return {"extracted": extracted, "count": len(extracted)}
 

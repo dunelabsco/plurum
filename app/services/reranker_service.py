@@ -53,7 +53,11 @@ class RerankerService:
     # gpt-4o-mini gives good relevance judgment without the reasoning-model
     # latency tax. Swap via settings.rerank_model if needed.
     _DEFAULT_MODEL = "gpt-4o-mini"
-    _MAX_CANDIDATES = 30
+    # Reranker scores at most this many candidates in one LLM call. Must be
+    # at least as large as MemoryService._RERANK_POOL_SIZE — otherwise the
+    # caller hands us a pool we silently truncate before scoring, defeating
+    # the point of over-fetching.
+    _MAX_CANDIDATES = 60
     _MAX_CONTENT_CHARS = 400
 
     def __init__(self):
@@ -115,7 +119,11 @@ class RerankerService:
             ],
             response_format={"type": "json_object"},
             temperature=0.0,
-            max_tokens=600,
+            # 60 candidates * ~25 chars per {"id":N,"score":X.X} ≈ 1500 chars
+            # ≈ 400 tokens. 1200 leaves headroom so the JSON isn't truncated
+            # mid-list, which silently drops scores for items at the tail
+            # and leaves them at 0 (treated as irrelevant).
+            max_tokens=1200,
         )
         raw = resp.choices[0].message.content or "{}"
         data = json.loads(raw)

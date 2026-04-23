@@ -58,6 +58,15 @@ class MemoryExtract(BaseModel):
         description="Timestamp of the session/turn (ISO format or natural language). "
                     "Lets the LLM anchor relative times like 'last week' to an absolute date.",
     )
+    messages: Optional[list[dict]] = Field(
+        None,
+        description="Prior turns in the same session, oldest first, each shaped "
+                    "{\"role\": \"user|assistant\", \"content\": \"...\"}. Used "
+                    "only for anaphora resolution — the extractor never emits "
+                    "memories FROM these turns, only uses them to resolve "
+                    "pronouns in user_content / assistant_content. Caller should "
+                    "trim to the last ~10 turns before sending.",
+    )
     metadata: dict = Field(default_factory=dict)
 
 
@@ -66,7 +75,7 @@ class MemorySearchRequest(BaseModel):
 
     query: str = Field(..., min_length=1, max_length=1000)
     memory_type: Optional[MemoryType] = None
-    limit: int = Field(10, ge=1, le=50)
+    limit: int = Field(10, ge=1, le=100)
 
 
 # ---------------------------------------------------------------------------

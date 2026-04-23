@@ -138,14 +138,33 @@ class PlurimClient:
         user_msg: str,
         asst_msg: str,
         session_date: Optional[str] = None,
+        messages: Optional[list[dict]] = None,
     ) -> int:
-        """POST /memories/extract. Returns count of memories stored."""
+        """POST /memories/extract. Returns count of memories stored.
+
+        `messages` is the prior turns of the current session (oldest first),
+        used by the extractor for anaphora resolution. Caller trims the
+        list; we forward up to the last 10 turns.
+        """
         body = {
             "user_content": user_msg[:6000],
             "assistant_content": asst_msg[:6000],
         }
         if session_date:
             body["session_date"] = session_date
+        if messages:
+            # Keep the payload bounded — last 10 turns is what the extractor
+            # prompt consumes anyway. Each turn content capped at 2000 chars.
+            trimmed = []
+            for m in messages[-10:]:
+                if not isinstance(m, dict):
+                    continue
+                role = m.get("role")
+                content = (m.get("content") or "")[:2000]
+                if role in ("user", "assistant") and content:
+                    trimmed.append({"role": role, "content": content})
+            if trimmed:
+                body["messages"] = trimmed
         try:
             r = self._request_with_retry(
                 "POST",
@@ -399,11 +418,17 @@ def process_question(
         sessions = entry.get("haystack_sessions") or []
         haystack_dates = entry.get("haystack_dates") or []
 
-        pair_tasks: list[tuple[str, str, Optional[str]]] = []
+        # Group pairs BY session so we can process them sequentially within
+        # one session (preserving conversation order for anaphora) while still
+        # parallelizing across sessions. Previously every pair from every
+        # session was shuffled into one big parallel pool — turn 5 could
+        # race turn 3, and the extractor never saw prior turns.
+        per_session_pairs: list[tuple[Optional[str], list[tuple[str, str]]]] = []
         for idx, session in enumerate(sessions):
             if not isinstance(session, list):
                 continue
             session_date = haystack_dates[idx] if idx < len(haystack_dates) else None
+            pairs: list[tuple[str, str]] = []
             i = 0
             while i < len(session) - 1:
                 t1, t2 = session[i], session[i + 1]
@@ -411,26 +436,41 @@ def process_question(
                     i += 1
                     continue
                 if t1.get("role") == "user" and t2.get("role") == "assistant":
-                    pair_tasks.append((
-                        t1.get("content", ""),
-                        t2.get("content", ""),
-                        session_date,
-                    ))
+                    pairs.append((t1.get("content", ""), t2.get("content", "")))
                     i += 2
                 else:
                     i += 1
+            if pairs:
+                per_session_pairs.append((session_date, pairs))
 
-        if pair_tasks:
+        def _process_session(session_date: Optional[str], pairs: list[tuple[str, str]]) -> int:
+            """Extract every pair in a session serially, feeding a rolling
+            conversation history into each extract call so the extractor can
+            resolve pronouns against earlier turns in the same session."""
+            history: list[dict] = []
+            count = 0
+            for user_msg, asst_msg in pairs:
+                count += client.extract(
+                    user_id=user_id,
+                    user_msg=user_msg,
+                    asst_msg=asst_msg,
+                    session_date=session_date,
+                    messages=history[-20:] if history else None,
+                ) or 0
+                # Append AFTER the extract completes so the next turn sees
+                # the full prior state. Cap to last 40 entries (≈20 turns)
+                # so memory doesn't grow unbounded on long sessions.
+                history.append({"role": "user", "content": user_msg})
+                history.append({"role": "assistant", "content": asst_msg})
+                if len(history) > 40:
+                    history = history[-40:]
+            return count
+
+        if per_session_pairs:
             with ThreadPoolExecutor(max_workers=INGEST_PARALLELISM) as pool:
                 futures = [
-                    pool.submit(
-                        client.extract,
-                        user_id=user_id,
-                        user_msg=u,
-                        asst_msg=a,
-                        session_date=d,
-                    )
-                    for (u, a, d) in pair_tasks
+                    pool.submit(_process_session, d, pairs)
+                    for (d, pairs) in per_session_pairs
                 ]
                 for fut in as_completed(futures):
                     extracted_total += fut.result() or 0

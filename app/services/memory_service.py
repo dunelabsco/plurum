@@ -457,10 +457,13 @@ A common failure mode is "first-topic dominance" — extractor captures the firs
 
 
 class MemoryService:
-    # Fetch this many candidates from the repo before the LLM reranker picks
-    # the final top_k. 30 is a good balance — enough for the cross-encoder to
-    # find buried gems, small enough to fit comfortably in a single rerank call.
-    _RERANK_POOL_SIZE = 30
+    # Pool the repo returns before reranking. Needs to be meaningfully LARGER
+    # than any expected top_k so the reranker has room to filter — otherwise
+    # reranking is just a sort of the already-final result. With top_k=30
+    # (benchmark default) and a pool of 30 the reranker can only reorder, not
+    # promote buried gems. 60 leaves real headroom and still fits comfortably
+    # in one rerank LLM call.
+    _RERANK_POOL_SIZE = 60
 
     def __init__(self):
         self.repo = MemoryRepository()
@@ -1071,11 +1074,14 @@ class MemoryService:
             user_id, query_entities
         )
         temporal_start, temporal_end = (temporal if temporal else (None, None))
+        # Over-fetch: 2× the caller's limit or the pool minimum, whichever
+        # is bigger. Gives the reranker real filtering work instead of just
+        # sorting the final output.
         pool = self.repo.search(
             user_id=user_id,
             query_text=query,
             query_embedding=embedding,
-            match_count=max(limit, self._RERANK_POOL_SIZE),
+            match_count=max(limit * 2, self._RERANK_POOL_SIZE),
             memory_type=memory_type,
             entity_mem_ids=entity_mem_ids,
             entity_mem_scores=entity_mem_scores,
