@@ -152,12 +152,16 @@ class MemoryRepository:
         memory_type: Optional[str] = None,
         entity_mem_ids: Optional[list[str]] = None,
         entity_mem_scores: Optional[list[float]] = None,
+        temporal_start: Optional[str] = None,
+        temporal_end: Optional[str] = None,
     ) -> list[dict]:
         """Hybrid search scoped to a single user.
 
         The entity arm is fed pre-aggregated (memory_id, score) pairs computed
-        upstream against the entity store (migration 024). If both arrays are
-        empty the arm is a no-op and fusion reduces to vector + keyword RRF.
+        upstream against the entity store (migration 024). The temporal arm
+        (migration 028) takes an ISO start/end window parsed from the query
+        and boosts memories whose event_date or mentioned_at falls inside it.
+        Any arm whose inputs are empty is a no-op at fusion time.
         """
         params: dict = {
             "p_user_id": str(user_id),
@@ -170,6 +174,9 @@ class MemoryRepository:
         if entity_mem_ids and entity_mem_scores:
             params["entity_mem_ids"] = entity_mem_ids
             params["entity_mem_scores"] = entity_mem_scores
+        if temporal_start and temporal_end:
+            params["temporal_start"] = temporal_start
+            params["temporal_end"] = temporal_end
 
         result = self.client.rpc("search_memories", params).execute()
         return result.data or []

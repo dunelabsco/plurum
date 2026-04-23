@@ -40,9 +40,14 @@ PLURUM_API_URL = os.environ.get("PLURUM_API_URL", "https://api.plurum.ai").rstri
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 LONGMEMEVAL_DIR = Path(os.environ.get("LONGMEMEVAL_DIR", Path.home() / "LongMemEval"))
 
-# Default to gpt-5.4-mini; override via PLURUM_ANSWER_MODEL env var if needed.
-ANSWER_MODEL = os.environ.get("PLURUM_ANSWER_MODEL", "gpt-5.4-mini")
-TOP_K_MEMORIES = 20            # how many memories to retrieve per question
+# Default answer model: gpt-4o-mini. Hindsight's LongMemEval benchmark uses
+# gpt-4o-mini with reasoning_effort="high" — we can't crank reasoning on a
+# non-reasoning model, but gpt-4o-mini is still what they hit SOTA with.
+# Override via PLURUM_ANSWER_MODEL env var.
+ANSWER_MODEL = os.environ.get("PLURUM_ANSWER_MODEL", "gpt-4o-mini")
+# Mem0 and Hindsight default to 30 retrieved memories. Our old 20 was
+# starving aggregation/counting questions that need to see every instance.
+TOP_K_MEMORIES = int(os.environ.get("PLURUM_TOP_K", "30"))
 # 200 chars was truncating lists/tables mid-content — the 7th item in a
 # 15-item list never reached the answer model. 2000 comfortably fits a
 # 10-row shift schedule, a 15-item job list, or a dense multi-paragraph
@@ -157,8 +162,14 @@ class PlurimClient:
             logger.warning("extract failed after retries: %s", e)
             return 0
 
-    def search(self, user_id: str, query: str, limit: int = TOP_K_MEMORIES) -> list[str]:
-        """POST /memories/search. Returns memory content strings."""
+    def search(self, user_id: str, query: str, limit: int = TOP_K_MEMORIES) -> list[dict]:
+        """POST /memories/search. Returns full memory rows.
+
+        Each row includes content plus event_date_start/end, mentioned_at,
+        source_user, source_assistant — the answer prompt formats these into
+        a Fact/When/Source block (Hindsight-style) so the model sees both
+        the extracted summary and the original conversation text.
+        """
         try:
             r = self._request_with_retry(
                 "POST",
@@ -168,11 +179,7 @@ class PlurimClient:
             )
             r.raise_for_status()
             results = (r.json() or {}).get("results", []) or []
-            return [
-                (m.get("content") or "").strip()
-                for m in results
-                if isinstance(m, dict) and m.get("content")
-            ]
+            return [m for m in results if isinstance(m, dict) and m.get("content")]
         except httpx.HTTPError as e:
             logger.warning("search failed after retries: %s", e)
             return []
@@ -182,35 +189,61 @@ class PlurimClient:
 # ---------------------------------------------------------------------------
 
 ANSWER_SYSTEM_PROMPT = (
+    # Rules adapted from Hindsight's LongMemEval answer prompt
+    # (research/hindsight/hindsight-dev/benchmarks/longmemeval/).
     "You answer questions about a user using ONLY their stored memories.\n\n"
-    "General rules:\n"
-    "- Use only the memories provided. Do NOT use outside knowledge.\n"
-    "- If the memories do not contain enough information, say you don't know.\n"
-    "- For 'which happened first' questions, compare the dates/times in the memories. "
-    "If one memory has a date and another only says 'recently' or 'two weeks ago', "
-    "use the question date to anchor the relative time before comparing.\n"
-    "- For 'how many days/weeks' questions, do the date arithmetic using the anchors "
-    "in the memories.\n"
-    "- Prefer the shortest possible factual answer — a phrase, date, count, or one-sentence statement.\n"
-    "- Do not narrate, apologize, or restate the question.\n\n"
-    "Aggregate questions (how many / how much / total / average / which X did I Y most):\n"
-    "Before writing the final answer, do this silently and internally:\n"
-    "  1. Re-read every memory and list ONLY the items that qualify under the question's\n"
-    "     constraints (time window, category, activity, etc.). Drop memories that merely\n"
-    "     mention the topic but don't represent a qualifying instance.\n"
-    "  2. Deduplicate. Two memories that describe the SAME underlying event, item, or\n"
-    "     person count as ONE — not two. Same doctor visit on same date = 1. Same wedding\n"
-    "     mentioned from two angles = 1. Same model kit named in two memories = 1.\n"
-    "  3. Include the USER THEMSELVES when the question is about a group that\n"
-    "     naturally contains them ('me and my parents', 'my household', 'my family').\n"
-    "  4. For sums/averages, list each numeric value from the memories, then add or\n"
-    "     average. Do not skip values that are in the memories but not in your first\n"
-    "     pass.\n"
-    "  5. For superlative questions ('which platform gained the MOST'), compare the\n"
-    "     actual magnitudes across all candidates. A specifically-stated number is not\n"
-    "     automatically larger than an approximately-stated one; compare the numbers.\n"
-    "Only after doing all of the above, emit the short final answer (count, sum, name,\n"
-    "or phrase). Do not show your working.\n"
+    "## Understanding the retrieved context\n"
+    "Each memory is shown as:\n"
+    "  Fact N: <extracted summary>\n"
+    "  When: occurred=<date> | mentioned=<date>\n"
+    "  Source:\n"
+    "    USER: <original user turn>\n"
+    "    ASSISTANT: <original assistant turn>\n\n"
+    "The Fact is a summary. The Source is the raw conversation. Prefer the Source\n"
+    "for specifics, quantities, names, and counts — the summary may elide detail.\n"
+    "Use the occurred date to answer 'when did X happen'; use the mentioned date\n"
+    "to anchor relative references like 'last Friday' inside a memory.\n\n"
+    "## Date arithmetic\n"
+    "- Days between two dates = (B - A). Jan 1 to Jan 8 = 7 days, not 8.\n"
+    "- Convert every relative reference to an absolute date before comparing.\n"
+    "  Anchor in-memory references ('two weeks ago', 'last Friday') to that\n"
+    "  memory's mentioned date. Anchor in-question references to the question date.\n"
+    "- Double-check arithmetic; off-by-one errors are common.\n\n"
+    "## Counting questions ('how many X')\n"
+    "- Scan ALL facts before answering. Don't stop after finding a few.\n"
+    "- List each unique item explicitly in your reasoning: '1. X, 2. Y, 3. Z = 3'.\n"
+    "- Deduplicate aggressively. The same underlying event, person, or item often\n"
+    "  appears in multiple memories from different angles. Assume overlap by\n"
+    "  default unless there is clear evidence the mentions refer to different\n"
+    "  things. 'My college roommate's wedding' and 'Emily's wedding' may be the\n"
+    "  same wedding; 'Dr. Smith (PCP)' and 'the primary care physician' may be\n"
+    "  the same doctor; two fixings of 'the kitchen shelves' in the same month\n"
+    "  are likely one event. When in doubt, undercount — one false duplicate\n"
+    "  hurts more than one missed distinct item.\n"
+    "- Read qualifiers carefully: 'how many X before Y' counts X, not Y.\n"
+    "  'How many properties before the offer' counts OTHER properties.\n"
+    "- Include the user themselves when the group naturally contains them\n"
+    "  ('me and my parents' = 3 people, not 2).\n"
+    "- For sums/averages: list every numeric value you find from the memories,\n"
+    "  then add or average. Don't skip values present in the memories.\n\n"
+    "## Superlative questions ('which X had the most')\n"
+    "- Compare actual magnitudes across all candidates. A specifically-stated\n"
+    "  number is not automatically larger than an approximately-stated one;\n"
+    "  compare the numbers themselves.\n\n"
+    "## Recommendation / preference questions\n"
+    "- Do NOT invent specific product names, course titles, or brand names.\n"
+    "- DO mention brands or tools the user already uses from their memories.\n"
+    "- Describe what kind of recommendation the user would prefer, referencing\n"
+    "  their existing habits and stated preferences.\n\n"
+    "## When to say you don't know\n"
+    "- If the question asks about something absent from the memories, say so.\n"
+    "- Partial knowledge is fine: if the question has two parts and the\n"
+    "  memories cover one, answer that one and note the other is missing.\n"
+    "- Don't guess dates or facts not explicit in the memories.\n\n"
+    "## Answer format\n"
+    "- Emit the short final answer: a phrase, date, count, name, or single\n"
+    "  sentence. Do not show your working. Do not restate the question.\n"
+    "- Do not apologize or narrate.\n"
 )
 
 # Preference questions get a different treatment. The LME gold answers for this
@@ -234,24 +267,65 @@ PREFERENCE_SYSTEM_PROMPT = (
 )
 
 
+def _format_date(value) -> Optional[str]:
+    """Strip a Postgres timestamp to YYYY-MM-DD for answer-model display."""
+    if not value:
+        return None
+    s = str(value)
+    return s[:10] if len(s) >= 10 else s
+
+
+def _render_memory(idx: int, mem: dict) -> str:
+    """Hindsight-style Fact/When/Source block for a single memory."""
+    content = (mem.get("content") or "").strip()[:MAX_MEMORY_CHARS]
+    mem_type = (mem.get("memory_type") or "fact")
+    parts = [f"Fact {idx} ({mem_type}): {content}"]
+
+    occurred_start = _format_date(mem.get("event_date_start"))
+    occurred_end = _format_date(mem.get("event_date_end"))
+    mentioned = _format_date(mem.get("mentioned_at")) or _format_date(mem.get("created_at"))
+    when_bits: list[str] = []
+    if occurred_start:
+        if occurred_end and occurred_end != occurred_start:
+            when_bits.append(f"occurred={occurred_start}..{occurred_end}")
+        else:
+            when_bits.append(f"occurred={occurred_start}")
+    if mentioned:
+        when_bits.append(f"mentioned={mentioned}")
+    if when_bits:
+        parts.append("When: " + " | ".join(when_bits))
+
+    src_user = (mem.get("source_user") or "").strip()
+    src_asst = (mem.get("source_assistant") or "").strip()
+    if src_user or src_asst:
+        src_lines = ["Source:"]
+        if src_user:
+            src_lines.append(f"  USER: {src_user[:1200]}")
+        if src_asst:
+            src_lines.append(f"  ASSISTANT: {src_asst[:1200]}")
+        parts.append("\n".join(src_lines))
+
+    return "\n".join(parts)
+
+
 def generate_answer(
     openai_client: OpenAI,
     question: str,
-    memories: list[str],
+    memories: list[dict],
     question_date: Optional[str] = None,
     question_type: Optional[str] = None,
 ) -> str:
     if not memories:
         mem_block = "(no memories available)"
     else:
-        lines = [f"- {m[:MAX_MEMORY_CHARS]}" for m in memories]
-        mem_block = "\n".join(lines)
+        blocks = [_render_memory(i + 1, m) for i, m in enumerate(memories)]
+        mem_block = "\n\n---\n\n".join(blocks)
 
     date_block = f"Question date: {question_date}\n\n" if question_date else ""
 
     prompt = (
         f"{date_block}"
-        f"Memories about the user:\n{mem_block}\n\n"
+        f"Retrieved memories:\n\n{mem_block}\n\n"
         f"Question: {question}\n\n"
         f"Answer:"
     )

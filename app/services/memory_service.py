@@ -649,6 +649,16 @@ class MemoryService:
             if ede:
                 row["event_date_end"] = ede
 
+            # mentioned_at (Phase 4a) — when the conversation brought up
+            # the fact. Anchors relative-reference resolution at answer
+            # time and powers the temporal retrieval arm. Default to the
+            # observation date (wall-clock date of the session). Harmless
+            # no-op until migration 027 lands: column is optional and the
+            # DB rejects unknown columns, which _insert_rows_with_recovery
+            # handles by stripping and retrying.
+            if obs_date:
+                row["mentioned_at"] = obs_date
+
             # Supersession decision from LLM-provided links. We pick the
             # first link that's a clear update/contradiction (same subject,
             # same type, overlapping entities).
@@ -992,14 +1002,21 @@ class MemoryService:
     def _insert_without_optional_columns(
         self, rows: list[dict], to_supersede: list[str]
     ) -> list[dict]:
-        """Fallback insert path when migrations 022/023 haven't landed."""
+        """Fallback insert path when optional migrations haven't landed.
+
+        Strips every column whose migration may be pending so the create
+        still succeeds on an older schema. Covers 022 (parent_memory_id),
+        023 (content_hash), and 027 (mentioned_at).
+        """
         logger.info(
-            "create_batch column error — retrying without content_hash + "
-            "parent_memory_id (migrations 022/023 pending?)"
+            "create_batch column error — retrying without optional columns "
+            "(content_hash / parent_memory_id / mentioned_at; migrations "
+            "022 / 023 / 027 pending?)"
         )
         for r in rows:
             r.pop("content_hash", None)
             r.pop("parent_memory_id", None)
+            r.pop("mentioned_at", None)
         to_supersede.clear()
         return self.repo.create_batch(rows)
 
@@ -1046,13 +1063,14 @@ class MemoryService:
         with gpt-4o-mini and returns the top `limit`.
         """
         embedding = self.embedding.generate_embedding(query[:8000])
-        # Extract entities from the query and resolve them against the entity
-        # store (migration 024). Returns parallel arrays of memory ids and
-        # spread-attenuated boost scores for the entity arm of the RPC.
-        query_entities = self._extract_query_entities(query)
+        # One LLM analysis call returns both the named entities we should
+        # boost (Phase 2 entity store) and, if the query implies one, a
+        # time window for the temporal retrieval arm (Phase 4b).
+        query_entities, temporal = self._analyze_query(query)
         entity_mem_ids, entity_mem_scores = self._resolve_entity_boosts(
             user_id, query_entities
         )
+        temporal_start, temporal_end = (temporal if temporal else (None, None))
         pool = self.repo.search(
             user_id=user_id,
             query_text=query,
@@ -1061,6 +1079,8 @@ class MemoryService:
             memory_type=memory_type,
             entity_mem_ids=entity_mem_ids,
             entity_mem_scores=entity_mem_scores,
+            temporal_start=temporal_start,
+            temporal_end=temporal_end,
         )
         # Dedup by normalized content hash. Legacy rows without a unique
         # content_hash column occasionally land the same memory (same wording,
@@ -1131,12 +1151,24 @@ class MemoryService:
     # Query entity extraction (for entity retrieval arm)
     # -----------------------------------------------------------------------
 
-    _QUERY_ENTITY_PROMPT = (
-        "Extract named entities from this search query. Return ONLY a JSON object "
-        "of the form {\"entities\": [\"entity1\", \"entity2\"]}. Include products, "
-        "places, people, organizations, events, book/movie titles, specific technologies. "
-        "Exclude generic nouns (car, phone, meeting) unless qualified. Use canonical "
-        "form. Max 5 entities. If none, return {\"entities\": []}."
+    _QUERY_ANALYSIS_PROMPT = (
+        "Analyze this search query and return JSON with two fields:\n\n"
+        "1. `entities`: list of named entities (products, places, people, organizations, "
+        "events, titles, specific technologies). Use canonical form. Exclude generic "
+        "nouns (car, phone, meeting) unless qualified. Max 5. Empty list if none.\n\n"
+        "2. `temporal`: if the query implies a time window, return "
+        "{\"start\": \"YYYY-MM-DD\", \"end\": \"YYYY-MM-DD\"} describing that window "
+        "interpreted relative to the Reference Date. Otherwise null.\n"
+        "Windows must be inclusive and cover the whole period implied:\n"
+        "  - \"last month\"       → start=first of prior month, end=last of prior month\n"
+        "  - \"past month\"       → start=Reference - 30 days, end=Reference\n"
+        "  - \"three weeks ago\"  → start=Ref -21, end=Ref -14 (the week in question)\n"
+        "  - \"in March\"         → start=March 1 of the most-recent March, end=March 31\n"
+        "  - \"this year\"        → start=Jan 1 of Reference year, end=Dec 31\n"
+        "  - \"recently\"         → start=Reference - 30 days, end=Reference\n"
+        "A query without a time reference MUST have temporal: null.\n\n"
+        "Return ONLY the JSON object:\n"
+        "{\"entities\": [...], \"temporal\": {\"start\": \"...\", \"end\": \"...\"} | null}"
     )
 
     def _resolve_entity_boosts(
@@ -1214,37 +1246,56 @@ class MemoryService:
         vals = [float(s) for _, s in ordered]
         return ids, vals
 
-    def _extract_query_entities(self, query: str) -> list[str]:
-        """Light LLM call to pull entities from the search query.
+    def _analyze_query(self, query: str) -> tuple[list[str], Optional[tuple[str, str]]]:
+        """Single LLM call that extracts both entities and a temporal window.
 
-        Cheap: single gpt-4o-mini call with max_tokens=80. Returns empty list on
-        any failure — entity arm then becomes a no-op, not a search break.
+        Returns `(entities, (start, end))` where the window is an ISO-date
+        tuple or None. Combining the two into one call saves a roundtrip
+        versus running separate entity + temporal extractors.
+
+        On any failure returns `([], None)` — both arms become no-ops and
+        fusion degrades to vector + keyword.
         """
         if not query or len(query.strip()) < 3:
-            return []
+            return [], None
+        reference_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         try:
             resp = self._openai.chat.completions.create(
-                model="gpt-4o-mini",  # small + fast, quality isn't critical here
+                model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": self._QUERY_ENTITY_PROMPT},
-                    {"role": "user", "content": query[:1000]},
+                    {"role": "system", "content": self._QUERY_ANALYSIS_PROMPT},
+                    {
+                        "role": "user",
+                        "content": f"Reference Date: {reference_date}\n\nQuery: {query[:1000]}",
+                    },
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.0,
-                max_tokens=120,
+                max_tokens=200,
             )
             raw = resp.choices[0].message.content or "{}"
             data = json.loads(raw)
-            ents = data.get("entities") or []
-            if not isinstance(ents, list):
-                return []
-            return [
-                str(e).strip() for e in ents
-                if isinstance(e, (str, int, float)) and str(e).strip()
-            ][:5]
         except Exception as e:
-            logger.debug("query entity extraction failed: %s", e)
-            return []
+            logger.debug("query analysis failed: %s", e)
+            return [], None
+
+        ents_raw = data.get("entities") or []
+        entities = [
+            str(e).strip() for e in ents_raw
+            if isinstance(e, (str, int, float)) and str(e).strip()
+        ][:5] if isinstance(ents_raw, list) else []
+
+        temporal = None
+        t = data.get("temporal")
+        if isinstance(t, dict):
+            start = _coerce_iso_date(t.get("start"))
+            end = _coerce_iso_date(t.get("end"))
+            if start and end:
+                # Guard against inverted windows — swap instead of erroring.
+                if start > end:
+                    start, end = end, start
+                temporal = (start, end)
+        return entities, temporal
 
     def delete(self, identifier: str, user_id: UUID, hard: bool = False) -> None:
         memory = self.repo.get_by_identifier(identifier, user_id)
