@@ -848,43 +848,98 @@ class MemoryService:
         self, rows: list[dict], to_supersede: list[str]
     ) -> list[dict]:
         """Insert rows, recovering from the two known failure modes:
-           (a) content_hash unique-constraint collision — drop those rows
-               and retry.
-           (b) missing column errors (migrations 022/023 pending) — strip
-               the offending columns and retry.
+
+           (a) `content_hash` uniqueness collision with an existing row —
+               query the DB for which hashes in this batch already exist,
+               drop those specific rows, retry with the remainder. The
+               PRIOR implementation incorrectly deduped the batch against
+               itself (which never removed anything) and fell through to
+               stripping `content_hash` entirely, silently bypassing
+               migration 023's uniqueness guarantee. Verified post-hoc:
+               62% of production rows had NULL content_hash.
+
+           (b) A schema-cache / missing-column error (i.e. migration 022,
+               023, or 027 isn't live) — strip the affected columns and
+               retry.
         """
         try:
             return self.repo.create_batch(rows)
         except Exception as e:
             err = str(e).lower()
+
             if "uq_memories_user_content_hash" in err or (
                 "duplicate key value" in err and "content_hash" in err
             ):
-                logger.info(
-                    "Content-hash collision — dropping exact duplicates and retrying"
-                )
-                hashes_dropped: set[str] = set()
+                # Find which hashes in our batch collide with existing rows.
+                user_id_str = rows[0].get("user_id") if rows else None
+                batch_hashes = [
+                    r.get("content_hash") for r in rows if r.get("content_hash")
+                ]
+                colliding: set[str] = set()
+                if user_id_str:
+                    try:
+                        colliding = self.repo.existing_hashes(
+                            UUID(user_id_str), batch_hashes
+                        )
+                    except Exception as lookup_err:
+                        logger.warning(
+                            "existing_hashes lookup failed; falling back to batch "
+                            "dedup (may retain duplicates): %s", lookup_err,
+                        )
+
+                # Also dedup within the batch itself (the LLM occasionally
+                # emits the same content twice in one response).
+                seen_hashes: set[str] = set(colliding)
                 survivors: list[dict] = []
                 for r in rows:
                     h = r.get("content_hash")
-                    if h in hashes_dropped:
+                    if not h:
+                        survivors.append(r)
                         continue
+                    if h in seen_hashes:
+                        continue
+                    seen_hashes.add(h)
                     survivors.append(r)
-                    hashes_dropped.add(h)
+
+                dropped = len(rows) - len(survivors)
+                logger.info(
+                    "Content-hash collision: %d of %d rows collide with existing "
+                    "memories; retrying with %d remaining",
+                    dropped, len(rows), len(survivors),
+                )
                 if not survivors:
                     return []
                 try:
                     return self.repo.create_batch(survivors)
                 except Exception as e2:
                     err2 = str(e2).lower()
-                    if "content_hash" in err2 or "parent_memory_id" in err2 or "schema cache" in err2 or "column" in err2:
+                    # Only fall through to stripping columns when it is a
+                    # genuine schema error, NOT when it's still a uniqueness
+                    # issue. A second uniqueness violation means our
+                    # colliding-hash lookup missed something (race, logic
+                    # bug) — returning empty is safer than silently
+                    # degrading dedup.
+                    if "duplicate key value" in err2:
+                        logger.warning(
+                            "Second uniqueness collision after recovery — "
+                            "returning empty to preserve dedup invariant"
+                        )
+                        return []
+                    if (
+                        "parent_memory_id" in err2 or "mentioned_at" in err2
+                        or "schema cache" in err2
+                    ):
                         return self._insert_without_optional_columns(
                             survivors, to_supersede
                         )
                     raise
+
+            # Pure schema-cache / column errors (migrations 022 / 027
+            # pending). Do NOT treat content_hash errors here — those are
+            # handled by the uniqueness branch above.
             if (
-                "content_hash" in err or "parent_memory_id" in err
-                or "schema cache" in err or "column" in err
+                "parent_memory_id" in err or "mentioned_at" in err
+                or "schema cache" in err
             ):
                 return self._insert_without_optional_columns(rows, to_supersede)
             raise

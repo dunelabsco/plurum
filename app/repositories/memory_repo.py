@@ -139,6 +139,34 @@ class MemoryRepository:
         )
         return result.data or []
 
+    def existing_hashes(self, user_id: UUID, hashes: list[str]) -> set[str]:
+        """Return the subset of `hashes` that already exist as active
+        memories for this user.
+
+        Used by the insert-recovery path to identify which content_hash
+        values in a pending batch collide with existing rows. Unlike the
+        previous recovery logic (which incorrectly looked for within-batch
+        duplicates), this targets the actual conflict source.
+        """
+        if not hashes:
+            return set()
+        try:
+            result = (
+                self.client.table("memories")
+                .select("content_hash")
+                .eq("user_id", str(user_id))
+                .eq("is_active", True)
+                .in_("content_hash", hashes)
+                .execute()
+            )
+        except Exception:
+            return set()
+        return {
+            row.get("content_hash")
+            for row in (result.data or [])
+            if row.get("content_hash")
+        }
+
     # -----------------------------------------------------------------------
     # Search (hybrid RRF, user-scoped)
     # -----------------------------------------------------------------------

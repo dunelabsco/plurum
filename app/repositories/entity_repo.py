@@ -19,10 +19,13 @@ Two access paths:
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 from uuid import UUID
 
 from app.db.supabase_client import get_supabase_client
+
+logger = logging.getLogger(__name__)
 
 
 class EntityRepository:
@@ -138,11 +141,89 @@ class EntityRepository:
         memory_id: UUID,
         entity_type: Optional[str] = None,
     ) -> dict:
-        """Merge into existing entity or insert a new one. Returns the row."""
+        """Atomic merge-or-insert via the entity_upsert RPC (migration 029).
+
+        Previous version ran find_match (SELECT) then either append or
+        create — a classic check-then-act race. Two concurrent upserts for
+        the same (user, text) both saw no match, both inserted, and
+        produced duplicate entity rows. Audit of the entities table showed
+        up to 8 duplicate rows per (user_id, text_normalized).
+
+        This path now delegates to a single SQL statement that uses
+        INSERT ... ON CONFLICT DO UPDATE. Postgres serializes the conflict
+        branch so concurrent upserts converge to one row with both linked
+        memory ids appended.
+
+        Falls back to the old find_match + create / append flow only if
+        the RPC is missing (migration 029 not yet applied). That fallback
+        retains the race but keeps the service functional during a staged
+        migration rollout.
+        """
         text_normalized = (text or "").strip().lower()
         if not text_normalized:
             raise ValueError("entity text is empty after normalization")
 
+        try:
+            result = self.client.rpc(
+                "entity_upsert",
+                {
+                    "p_user_id": str(user_id),
+                    "p_text": text.strip(),
+                    "p_text_normalized": text_normalized,
+                    "p_embedding": embedding,
+                    "p_memory_id": str(memory_id),
+                    "p_entity_type": entity_type,
+                },
+            ).execute()
+        except Exception as e:
+            err = str(e).lower()
+            if (
+                "entity_upsert" in err
+                or "function" in err and "does not exist" in err
+                or "schema cache" in err
+            ):
+                logger.info(
+                    "entity_upsert RPC missing (migration 029 pending); "
+                    "falling back to legacy find_match + create path"
+                )
+                return self._upsert_legacy(
+                    user_id=user_id,
+                    text=text,
+                    text_normalized=text_normalized,
+                    embedding=embedding,
+                    memory_id=memory_id,
+                    entity_type=entity_type,
+                )
+            raise
+
+        # The RPC returns the entity id. We fetch the row so callers that
+        # inspect it (e.g. for tests) still get the full record shape.
+        row_id = None
+        if result.data:
+            # Supabase .rpc() returns either a bare value or a list of
+            # dicts depending on the return shape. Handle both.
+            entry = result.data[0] if isinstance(result.data, list) else result.data
+            if isinstance(entry, dict):
+                row_id = entry.get("id") or entry.get("entity_upsert")
+            else:
+                row_id = entry
+        if not row_id:
+            # Should not happen — the RPC always returns an id. Fail loud.
+            raise Exception("entity_upsert returned no id")
+        return {"id": str(row_id), "text": text.strip(), "text_normalized": text_normalized}
+
+    def _upsert_legacy(
+        self,
+        user_id: UUID,
+        text: str,
+        text_normalized: str,
+        embedding: list[float],
+        memory_id: UUID,
+        entity_type: Optional[str] = None,
+    ) -> dict:
+        """Legacy non-atomic upsert path. Kept only as a fallback when
+        migration 029 isn't live. Subject to the race condition the new
+        RPC was introduced to fix."""
         match = self.find_match(user_id, text_normalized, embedding)
         if match:
             self.append_memory_id(UUID(match["id"]), memory_id)
