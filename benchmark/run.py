@@ -53,7 +53,7 @@ TOP_K_MEMORIES = int(os.environ.get("PLURUM_TOP_K", "30"))
 # 10-row shift schedule, a 15-item job list, or a dense multi-paragraph
 # assistant answer without inflating the prompt to absurd sizes.
 MAX_MEMORY_CHARS = 2000
-REQUEST_TIMEOUT = 60.0
+REQUEST_TIMEOUT = 180.0  # extracts under concurrent load + slow OpenAI calls can legitimately take 60-90s; 180s leaves headroom without hiding real hangs
 INGEST_PARALLELISM = int(os.environ.get("PLURUM_INGEST_PARALLELISM", "8"))
 
 BENCH_DIR = Path(__file__).resolve().parent
