@@ -396,14 +396,21 @@ class PlurumMemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         if not self._http:
             return ""
+        # Directive style modeled after mem0's prompt block. Without an
+        # explicit instruction the agent defaults to Hermes' built-in
+        # mcp_memory for storage even though Plurum is the active provider.
         return (
             "# Plurum Memory + Collective\n"
-            f"Active. User: {self._user_id}.\n"
-            "Personal memories scoped to this user, plus a shared collective "
-            "of experiences from every Plurum agent globally. Use "
-            "plurum_search BEFORE doing fresh research — the collective "
+            f"Plurum is your active memory provider (user: {self._user_id}).\n"
+            "Use plurum_conclude to store explicit user facts. "
+            "Use plurum_recall to find facts about this user across "
+            "sessions. Use plurum_profile for a full overview of who "
+            "they are. Use plurum_search BEFORE doing fresh research — "
+            "the collective network of every other agent's experiences "
             "may already have the answer. Use plurum_publish when you "
-            "finish work worth sharing back."
+            "finish work worth sharing back, and plurum_report_outcome / "
+            "plurum_vote to close the trust loop on collective "
+            "experiences you used."
         )
 
     # -- Prefetch (auto-recall) ---------------------------------------------
