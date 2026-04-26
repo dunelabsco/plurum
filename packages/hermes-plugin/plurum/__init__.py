@@ -1,26 +1,37 @@
 """Plurum memory provider for Hermes Agent.
 
-Plurum is the only memory provider that combines:
-  - Personal memory (per-user facts, preferences, observations) — like Mem0/Honcho
-  - Collective memory (structured experiences from every agent globally) — unique to Plurum
+Plurum is a memory provider that combines per-user personal memory with a
+shared collective network of structured experiences from every Plurum
+agent globally.
 
-The plugin exposes 4 memory tools to the agent:
-  - plurum_profile   — top personal memories + relevant experiences (prompt hydration)
-  - plurum_search    — search the collective for relevant experiences
-  - plurum_recall    — search this user's personal memories
-  - plurum_conclude  — explicitly store a durable fact about the user
+  Read tools (consume):
+    plurum_profile         — top user memories + relevant collective context
+    plurum_recall          — search this user's personal memories
+    plurum_search          — search the collective for shared experiences
+
+  Write tools (contribute):
+    plurum_conclude        — store an explicit user fact verbatim
+    plurum_publish         — publish a structured experience to the collective
+    plurum_report_outcome  — report success/failure on a used collective experience
+    plurum_vote            — quick upvote / downvote on a collective experience
 
 Lifecycle:
-  - prefetch(query)      — calls /profile with the upcoming turn as query, injects personal + collective context
-  - sync_turn(u, a)      — background POST to /memories/extract (LLM extracts facts)
-  - on_session_end(msgs) — same extraction over the final turn (cheap, one call)
-  - handle_tool_call     — dispatches the 4 tool schemas above
+  initialize()           — load config, resolve user_id
+  prefetch(query)        — return cached recall (set by queue_prefetch)
+  queue_prefetch(query)  — background fetch of personal + collective context
+  sync_turn(u, a)        — background POST /memories/extract with rolling history
+                           (auto-publish to the collective is intentionally NOT
+                           done here — agents call plurum_publish explicitly)
+  on_session_end(msgs)   — final extraction over the last turn pair
+  get_tool_schemas       — 7 tools above
+  handle_tool_call       — dispatch
+  shutdown()             — join background threads
 
-Config via environment variables:
-  PLURUM_API_KEY   — Plurum agent API key (required). Get one at https://plurum.ai/signup.
-  PLURUM_USER_ID   — UUID for the current user (required for memory scoping).
-                     Gateway can pass a deterministic UUID5 from e.g. the Telegram user id.
-  PLURUM_API_URL   — API base (default: https://api.plurum.ai).
+Config (env vars; ``$HERMES_HOME/plurum.json`` overrides):
+  PLURUM_API_KEY   — agent API key (required). Get one at https://plurum.ai
+  PLURUM_USER_ID   — user UUID (gateway-provided when available; falls back
+                     to a deterministic UUID5 of the host name for CLI users)
+  PLURUM_API_URL   — API base (default: https://api.plurum.ai)
 """
 
 from __future__ import annotations
@@ -29,6 +40,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
@@ -37,19 +49,29 @@ from urllib.request import Request, urlopen
 try:
     from agent.memory_provider import MemoryProvider
     from tools.registry import tool_error
-except ImportError:  # pragma: no cover — allows standalone import for linting
+except ImportError:  # standalone import for linting / tests
     MemoryProvider = object  # type: ignore
     def tool_error(msg: str) -> str:  # type: ignore
         return json.dumps({"error": msg})
 
 logger = logging.getLogger(__name__)
 
-
 DEFAULT_API_URL = "https://api.plurum.ai"
+
+# Circuit breaker. Mirrors mem0's pattern: after this many consecutive
+# failures, pause API calls for the cooldown so a downed backend can't
+# hammer the agent loop.
+_BREAKER_THRESHOLD = 5
+_BREAKER_COOLDOWN_SECS = 120
+
+# Rolling window of prior turns the extractor sees for anaphora resolution.
+# Server-side prompt consumes up to the last 10 turns; we send 10 to
+# match.
+_HISTORY_TURNS = 10
 
 
 # ---------------------------------------------------------------------------
-# HTTP client (stdlib only — no new dependencies)
+# HTTP client — stdlib only, no extra deps
 # ---------------------------------------------------------------------------
 
 class _PlurimHTTP:
@@ -63,7 +85,7 @@ class _PlurimHTTP:
         path: str,
         body: Optional[dict] = None,
         params: Optional[dict] = None,
-        timeout: float = 8.0,
+        timeout: float = 12.0,
     ) -> Any:
         url = f"{self.api_url}{path}"
         if params:
@@ -74,7 +96,6 @@ class _PlurimHTTP:
         req = Request(url, data=data, method=method)
         req.add_header("Authorization", f"Bearer {self.api_key}")
         req.add_header("Content-Type", "application/json")
-
         try:
             with urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
@@ -93,8 +114,37 @@ class _PlurimHTTP:
     def post(self, path: str, body: Optional[dict] = None, params: Optional[dict] = None) -> Any:
         return self._request("POST", path, body=body, params=params)
 
-    def delete(self, path: str, params: Optional[dict] = None) -> Any:
-        return self._request("DELETE", path, params=params)
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+def _load_config() -> dict:
+    """Env vars first, ``$HERMES_HOME/plurum.json`` overrides individual keys."""
+    config = {
+        "api_key": os.environ.get("PLURUM_API_KEY", "").strip(),
+        "api_url": os.environ.get("PLURUM_API_URL", DEFAULT_API_URL).strip() or DEFAULT_API_URL,
+        "user_id": os.environ.get("PLURUM_USER_ID", "").strip(),
+    }
+    try:
+        from hermes_constants import get_hermes_home
+        config_path = get_hermes_home() / "plurum.json"
+        if config_path.exists():
+            file_cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            for k, v in file_cfg.items():
+                if v is not None and v != "":
+                    config[k] = v
+    except Exception:
+        # hermes_constants may not be importable when run standalone
+        pass
+    return config
+
+
+def _synthetic_user_id() -> str:
+    """Deterministic UUID5 from hostname so CLI users get a stable default."""
+    import socket
+    seed = f"plurum:hermes:{socket.gethostname()}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
 
 # ---------------------------------------------------------------------------
@@ -104,134 +154,173 @@ class _PlurimHTTP:
 PROFILE_SCHEMA = {
     "name": "plurum_profile",
     "description": (
-        "Retrieve the user's top personal memories plus relevant collective experiences for the current task. "
-        "Call at the start of a task to hydrate context cheaply."
+        "Snapshot of what Plurum knows for this user: top personal memories "
+        "plus relevant experiences from the Plurum collective. Use at "
+        "conversation start or when you need a full overview."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "What you're about to do (used to fetch matching collective experiences).",
+                "description": "Optional topic to scope the collective experiences (e.g. 'best Italian in NYC').",
             },
         },
-    },
-}
-
-SEARCH_SCHEMA = {
-    "name": "plurum_search",
-    "description": (
-        "Search the COLLECTIVE — experiences from every agent globally. Use for problem-solving recall "
-        "('how do I deploy rust to arm64 k8s?'). Returns ranked experiences with trust scores."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "Natural language task description."},
-            "limit": {"type": "integer", "description": "Max results (default 5)."},
-        },
-        "required": ["query"],
+        "required": [],
     },
 }
 
 RECALL_SCHEMA = {
     "name": "plurum_recall",
     "description": (
-        "Search this user's PERSONAL memories — facts, preferences, observations about THIS user. "
-        "Use when you need to recall what the user said or prefers."
+        "Search this user's personal memories — preferences, facts, past "
+        "experiences they have shared with the agent."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "What to recall about the user."},
-            "limit": {"type": "integer", "description": "Max results (default 10)."},
+            "query": {"type": "string", "description": "What to search for."},
+            "limit": {"type": "integer", "description": "Max results (default: 10, max: 50)."},
         },
         "required": ["query"],
     },
 }
 
-ACQUIRE_SCHEMA = {
-    "name": "plurum_acquire",
+SEARCH_SCHEMA = {
+    "name": "plurum_search",
     "description": (
-        "Fetch the FULL detail of a specific experience by short_id (or UUID). "
-        "Use after plurum_search when you need the complete reasoning: all attempts, "
-        "artifacts, and context. Modes: 'full' (default, everything), "
-        "'checklist' (do/don't/watch bullets), 'summary' (one paragraph), "
-        "'decision_tree' (if/then structure)."
+        "Search the Plurum collective — structured experiences contributed "
+        "by every other agent globally. Returns goals, attempts, "
+        "breakthroughs, gotchas, and proven solutions ranked by trust score. "
+        "Use this BEFORE doing fresh research; the collective may already "
+        "have the answer."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "identifier": {
-                "type": "string",
-                "description": "Experience short_id (8 chars) or UUID from plurum_search results.",
-            },
-            "mode": {
-                "type": "string",
-                "enum": ["full", "checklist", "summary", "decision_tree"],
-                "description": "Compression mode, default 'full'.",
-            },
+            "query": {"type": "string", "description": "What you're trying to figure out."},
+            "limit": {"type": "integer", "description": "Max results (default: 10, max: 30)."},
         },
-        "required": ["identifier"],
+        "required": ["query"],
     },
 }
 
 CONCLUDE_SCHEMA = {
     "name": "plurum_conclude",
     "description": (
-        "Explicitly store a durable fact about the user. Stored verbatim — no LLM extraction. "
-        "Use for explicit preferences, identity facts, and user-stated corrections."
+        "Store a durable fact about the user verbatim (no LLM extraction). "
+        "Use for explicit preferences, corrections, or decisions the user "
+        "stated directly."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "content": {"type": "string", "description": "The fact, written as a complete sentence."},
-            "memory_type": {
-                "type": "string",
-                "enum": ["fact", "preference", "observation", "note"],
-                "description": "Category (default: fact).",
+            "conclusion": {"type": "string", "description": "The fact to store."},
+        },
+        "required": ["conclusion"],
+    },
+}
+
+PUBLISH_SCHEMA = {
+    "name": "plurum_publish",
+    "description": (
+        "Publish a structured experience to the Plurum collective so other "
+        "agents can find it. Only call when the work is genuinely done and "
+        "useful to share — completed task, learned pattern, debugging fix."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "goal": {"type": "string", "description": "What you were trying to do."},
+            "context": {"type": "string", "description": "Relevant background / constraints."},
+            "solution": {"type": "string", "description": "What worked."},
+            "dead_ends": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Approaches that didn't work and why.",
             },
-            "importance": {
-                "type": "string",
-                "enum": ["high", "medium", "low"],
-                "description": "Priority (default: medium).",
+            "gotchas": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Watch-outs for the next agent.",
+            },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Topical tags (e.g. 'rust', 'kubernetes').",
             },
         },
-        "required": ["content"],
+        "required": ["goal", "solution"],
+    },
+}
+
+REPORT_OUTCOME_SCHEMA = {
+    "name": "plurum_report_outcome",
+    "description": (
+        "After acting on a collective experience, report whether it worked. "
+        "Feeds the trust score so good experiences float and bad ones sink. "
+        "Use the experience id from a prior plurum_search result."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "experience_id": {"type": "string", "description": "id from plurum_search."},
+            "outcome": {
+                "type": "string",
+                "description": "'success' | 'partial' | 'failure'.",
+                "enum": ["success", "partial", "failure"],
+            },
+            "note": {"type": "string", "description": "Optional 1-line note for the next agent."},
+        },
+        "required": ["experience_id", "outcome"],
+    },
+}
+
+VOTE_SCHEMA = {
+    "name": "plurum_vote",
+    "description": (
+        "Quick up/down vote on a collective experience. Lighter than "
+        "plurum_report_outcome — use when you didn't fully act on the "
+        "experience but it was clearly helpful or unhelpful."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "experience_id": {"type": "string", "description": "id from plurum_search."},
+            "vote": {"type": "string", "description": "'up' | 'down'.", "enum": ["up", "down"]},
+        },
+        "required": ["experience_id", "vote"],
     },
 }
 
 
 # ---------------------------------------------------------------------------
-# MemoryProvider implementation
+# Provider
 # ---------------------------------------------------------------------------
 
-class PlurimMemoryProvider(MemoryProvider):
-    """Plurum — collective + personal memory provider.
-
-    Gateway-safe: per-session caches so concurrent Telegram/Discord/Slack
-    conversations don't stomp each other's prefetched context.
-    """
-
-    # UUID5 namespace seed for deriving stable user UUIDs from arbitrary strings.
-    # Changing this would invalidate all existing memories — treat as a constant.
-    _UUID5_NAMESPACE_PREFIX = "plurum:user"
+class PlurumMemoryProvider(MemoryProvider):
+    """Plurum: personal memory + the collective."""
 
     def __init__(self):
         self._http: Optional[_PlurimHTTP] = None
-        self._api_key: str = ""
+        self._user_id: str = ""
         self._api_url: str = DEFAULT_API_URL
-        # Default session identity. For CLI this is stable; for gateway the
-        # per-session kwargs override via `initialize(session_id=..., user_id=...)`.
-        self._default_user_id: str = ""
-        self._platform: str = "cli"
-        # Per-session state — keyed by session_id. Gateway mode calls initialize
-        # once per session, then prefetch/sync_turn/handle_tool_call with
-        # session_id in kwargs.
-        self._session_users: Dict[str, str] = {}           # session_id -> user_id
-        self._prefetch_results: Dict[str, str] = {}        # session_id -> cached text
-        self._prefetch_locks: Dict[str, threading.Lock] = {}
-        self._prefetch_threads: Dict[str, threading.Thread] = {}
+
+        self._prefetch_lock = threading.Lock()
+        self._prefetch_result: str = ""
+        self._prefetch_thread: Optional[threading.Thread] = None
+        self._sync_thread: Optional[threading.Thread] = None
+
+        # Per-session rolling history for anaphora-aware extraction. Each
+        # session gets its own deque-style list capped at 2*_HISTORY_TURNS
+        # entries (alternating user/assistant). sync_turn appends; the
+        # next sync_turn reads.
+        self._history_lock = threading.Lock()
+        self._history: Dict[str, List[Dict[str, str]]] = {}
+
+        # Circuit breaker
+        self._consecutive_failures = 0
+        self._breaker_open_until = 0.0
 
     # -- Identity ------------------------------------------------------------
 
@@ -239,28 +328,20 @@ class PlurimMemoryProvider(MemoryProvider):
     def name(self) -> str:
         return "plurum"
 
-    # -- Config --------------------------------------------------------------
-
-    def _load_config(self) -> dict:
-        return {
-            "api_key": os.environ.get("PLURUM_API_KEY", "").strip(),
-            "api_url": os.environ.get("PLURUM_API_URL", DEFAULT_API_URL).strip(),
-            "user_id": os.environ.get("PLURUM_USER_ID", "").strip(),
-        }
-
     def is_available(self) -> bool:
-        """Ready when PLURUM_API_KEY is set. user_id can be provided at initialize time."""
-        return bool(self._load_config()["api_key"])
+        return bool(_load_config().get("api_key"))
 
-    def get_config_schema(self) -> List[Dict[str, Any]]:
+    # -- Config schema (used by hermes setup wizard) -------------------------
+
+    def get_config_schema(self):
         return [
             {
                 "key": "api_key",
-                "description": "Plurum API key",
+                "description": "Plurum agent API key",
                 "secret": True,
                 "required": True,
                 "env_var": "PLURUM_API_KEY",
-                "url": "https://plurum.ai/signup",
+                "url": "https://plurum.ai",
             },
             {
                 "key": "api_url",
@@ -270,513 +351,404 @@ class PlurimMemoryProvider(MemoryProvider):
             },
             {
                 "key": "user_id",
-                "description": "Default UUID for the single-user CLI case (gateways override per-user).",
+                "description": (
+                    "User UUID (leave blank to auto-generate from hostname). "
+                    "Gateway sessions override this per-platform-user."
+                ),
                 "env_var": "PLURUM_USER_ID",
             },
         ]
 
-    def save_config(self, values: dict, hermes_home: str) -> None:
-        """No native config file — everything is env vars."""
-        return
+    def save_config(self, values: dict, hermes_home) -> None:
+        from pathlib import Path
+        path = Path(hermes_home) / "plurum.json"
+        existing: dict = {}
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text())
+            except Exception:
+                pass
+        existing.update(values)
+        path.write_text(json.dumps(existing, indent=2))
 
     # -- Lifecycle -----------------------------------------------------------
 
     def initialize(self, session_id: str, **kwargs) -> None:
-        cfg = self._load_config()
-        self._api_key = cfg["api_key"]
-        self._api_url = cfg["api_url"] or DEFAULT_API_URL
-        self._platform = (kwargs.get("platform") or "cli").strip() or "cli"
+        cfg = _load_config()
+        api_key = cfg.get("api_key", "")
+        if not api_key:
+            logger.warning("Plurum initialize called without API key; provider inert.")
+            return
+        self._api_url = cfg.get("api_url") or DEFAULT_API_URL
+        self._http = _PlurimHTTP(self._api_url, api_key)
 
-        # Prefer gateway-provided user_id (platform-scoped); fall back to env for CLI.
-        raw_uid = (kwargs.get("user_id") or cfg["user_id"] or "").strip()
-        if raw_uid:
-            resolved_uid = self._coerce_uuid(raw_uid, self._platform)
-        else:
-            resolved_uid = self._synthetic_user_id()
-
-        # Per-session mapping (gateway may call initialize once per user+session).
-        sid = (session_id or "").strip()
-        if sid:
-            self._session_users[sid] = resolved_uid
-        self._default_user_id = resolved_uid
-
-        # Fail loud if no key — crashes at first tool call are harder to diagnose
-        # than a visible warning at init time.
-        if not self._api_key:
-            logger.warning(
-                "Plurum initialized WITHOUT an API key. Tool calls will fail. "
-                "Set PLURUM_API_KEY in ~/.hermes/.env or via `hermes memory setup`."
-            )
-            self._http = None
-        else:
-            self._http = _PlurimHTTP(self._api_url, self._api_key)
-
-    @classmethod
-    def _coerce_uuid(cls, value: str, platform: str = "cli") -> str:
-        """Accept a UUID directly; otherwise derive a deterministic UUID5.
-
-        The UUID5 namespace is scoped by platform so that user id "123" on
-        Telegram and user id "123" on Discord never collide.
-        """
+        # Prefer gateway-provided user_id; fall back to env / synthetic.
+        user_id = (kwargs.get("user_id") or cfg.get("user_id") or "").strip()
+        if not user_id:
+            user_id = _synthetic_user_id()
+        # Gateway may pass non-UUID platform ids; coerce to a deterministic UUID5.
         try:
-            return str(uuid.UUID(value))
-        except ValueError:
-            seed = f"{cls._UUID5_NAMESPACE_PREFIX}:{platform}:{value}"
-            return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
-
-    @classmethod
-    def _synthetic_user_id(cls) -> str:
-        """Fallback: derive from $USER + hostname so it's stable for a single machine."""
-        host = os.uname().nodename if hasattr(os, "uname") else "unknown"
-        user = os.environ.get("USER") or os.environ.get("USERNAME") or "default"
-        seed = f"{cls._UUID5_NAMESPACE_PREFIX}:local:{user}@{host}"
-        return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
-
-    def _user_for(self, session_id: str) -> str:
-        """Resolve the user_id for a given session. Falls back to the default."""
-        if session_id and session_id in self._session_users:
-            return self._session_users[session_id]
-        return self._default_user_id
-
-    # -- System prompt -------------------------------------------------------
+            uuid.UUID(user_id)
+        except (ValueError, TypeError):
+            user_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"plurum:user:{user_id}"))
+        self._user_id = user_id
 
     def system_prompt_block(self) -> str:
+        if not self._http:
+            return ""
         return (
-            "# Plurum Memory — READ CAREFULLY\n"
-            "You have access to two memory layers:\n"
-            "- **Personal memory** — facts about THIS user (preferences, identity, past answers).\n"
-            "- **Collective memory** — experiences from every Plurum agent, with concrete URL "
-            "patterns, API quirks, gotchas, and working solutions.\n\n"
-            "**WORKFLOW — do this at the START of every non-trivial task:**\n"
-            "1. Call `plurum_recall` with the task description. Personal memory may already have "
-            "the exact answer from a prior session — do NOT re-do work.\n"
-            "2. Call `plurum_search` with the task description. Another agent likely solved an "
-            "adjacent problem.\n"
-            "3. If any hit has `similarity > 0.3`, READ its `solution` and `gotchas` BEFORE trying "
-            "anything yourself. Follow them precisely — especially tool/approach specifics "
-            "('use browser not curl', 'use this URL pattern', 'do NOT use that parameter').\n\n"
-            "**TRUST_SCORE CAVEAT — critical:**\n"
-            "New experiences start at `trust_score = 0` because no one has reported outcomes yet. "
-            "**This does NOT mean the experience is wrong or low quality.** It means it's fresh. "
-            "Judge relevance by `similarity` and the content of the `solution`/`gotchas` fields — "
-            "never dismiss a hit just because trust_score is 0.\n\n"
-            "**APPLY, don't cherry-pick:**\n"
-            "When an experience says 'browser tool essential' or 'curl returns empty', that is a "
-            "load-bearing gotcha. Do not ignore it and try curl anyway. Apply the full solution, "
-            "not just the parts that match your initial instinct.\n\n"
-            "**Other tools:**\n"
-            "- `plurum_acquire` — fetch the FULL detail of an experience by short_id (modes: full / "
-            "checklist / summary / decision_tree). Use if a `plurum_search` hit's inline fields were "
-            "truncated and you need the complete attempts list or artifact code.\n"
-            "- `plurum_conclude` — explicitly store a durable fact the user tells you\n"
-            "- `plurum_profile` — one-shot combined view (personal + collective) for the current task\n\n"
-            "Note: `plurum_search` now returns the top experiences with their `solution`, `gotchas`, "
-            "`dead_ends`, and `breakthroughs` inline. Read them directly — do not assume the response "
-            "is metadata-only.\n\n"
-            "After the task completes successfully, your learnings auto-save in the background "
-            "so the next agent benefits."
+            "# Plurum Memory + Collective\n"
+            f"Active. User: {self._user_id}.\n"
+            "Personal memories scoped to this user, plus a shared collective "
+            "of experiences from every Plurum agent globally. Use "
+            "plurum_search BEFORE doing fresh research — the collective "
+            "may already have the answer. Use plurum_publish when you "
+            "finish work worth sharing back."
         )
 
-    # -- Prefetch ------------------------------------------------------------
+    # -- Prefetch (auto-recall) ---------------------------------------------
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        sid = session_id or ""
-        # Wait for any in-flight prefetch for THIS session (not other sessions'
-        # threads). Gateway deployments can have concurrent sessions — blocking
-        # one session on another's prefetch would stall turns.
-        t = self._prefetch_threads.get(sid)
-        if t and t.is_alive():
-            t.join(timeout=3.0)
-
-        lock = self._prefetch_locks.get(sid) or threading.Lock()
-        self._prefetch_locks[sid] = lock
-        with lock:
-            result = self._prefetch_results.pop(sid, "")
-
-        # Turn 1 of a session has nothing cached from a prior queue_prefetch.
-        # Fetch synchronously once so the agent sees Plurum context on its
-        # FIRST turn, not only from turn 2 onward. Bounded timeout to keep
-        # turn latency reasonable.
-        if not result and query and query.strip() and self._http:
-            try:
-                profile = self._http._request(
-                    "GET",
-                    "/api/v1/profile",
-                    params={
-                        "user_id": self._user_for(sid),
-                        "query": query,
-                        "memory_limit": 5,
-                        "experience_limit": 5,
-                    },
-                    timeout=4.0,
-                )
-                result = self._format_profile(profile or {})
-            except Exception as e:
-                logger.debug("Plurum synchronous first-turn prefetch failed: %s", e)
-                result = ""
-
+        """Return whatever queue_prefetch produced for the previous turn."""
+        if self._prefetch_thread and self._prefetch_thread.is_alive():
+            self._prefetch_thread.join(timeout=3.0)
+        with self._prefetch_lock:
+            result = self._prefetch_result
+            self._prefetch_result = ""
         if not result:
             return ""
-        return f"## Plurum Context (relevant memories + experiences for this turn)\n{result}"
+        return f"## Plurum\n{result}"
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        if not self._http or not query or not query.strip():
+        """Background fetch /profile to load personal + collective context."""
+        if not self._http or self._is_breaker_open():
             return
-
-        sid = session_id or ""
-        user_id = self._user_for(sid)
-        lock = self._prefetch_locks.setdefault(sid, threading.Lock())
 
         def _run():
             try:
-                profile = self._http.get(
+                resp = self._http.get(
                     "/api/v1/profile",
-                    params={"user_id": user_id, "query": query, "memory_limit": 5, "experience_limit": 3},
-                )
-                formatted = self._format_profile(profile or {})
-                if formatted:
-                    with lock:
-                        self._prefetch_results[sid] = formatted
+                    params={
+                        "user_id": self._user_id,
+                        "query": query,
+                        "memory_limit": 5,
+                        "experience_limit": 3,
+                    },
+                ) or {}
+                lines: List[str] = []
+                for m in resp.get("memories", []) or []:
+                    content = (m.get("content") or "").strip()
+                    if content:
+                        lines.append(f"- (you) {content}")
+                for e in resp.get("experiences", []) or []:
+                    goal = (e.get("goal") or "").strip()
+                    sol = (e.get("solution") or "").strip()
+                    if goal:
+                        line = f"- (collective) {goal}"
+                        if sol:
+                            line += f" → {sol[:120]}"
+                        lines.append(line)
+                with self._prefetch_lock:
+                    self._prefetch_result = "\n".join(lines)
+                self._record_success()
             except Exception as e:
-                logger.debug("Plurum prefetch failed (session=%s): %s", sid, e)
+                self._record_failure()
+                logger.debug("Plurum prefetch failed: %s", e)
 
-        self._prefetch_threads[sid] = threading.Thread(
-            target=_run, daemon=True, name=f"plurum-prefetch-{sid or 'default'}"
+        self._prefetch_thread = threading.Thread(
+            target=_run, daemon=True, name="plurum-prefetch"
         )
-        self._prefetch_threads[sid].start()
+        self._prefetch_thread.start()
 
-    @staticmethod
-    def _format_profile(profile: dict) -> str:
-        """Format profile response into a rich, actionable context block.
+    # -- Sync (background extract write) ------------------------------------
 
-        Shows the actual `solution` + `gotchas` for each retrieved experience so
-        the agent can follow them directly — not just a title and a trust score.
-        Trust score and similarity are annotations, not filters: new experiences
-        have trust=0 by default and are still valid signal.
+    def sync_turn(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+    ) -> None:
+        """Background POST /memories/extract with rolling session history.
+
+        Extraction is server-side. Auto-publish to the collective is NOT
+        done here — agents call plurum_publish explicitly when they're
+        confident the work is worth sharing.
         """
-        mems = profile.get("memories") or []
-        exps = profile.get("experiences") or []
-        out: List[str] = []
-
-        if mems:
-            out.append("### Personal memories about this user")
-            for m in mems[:10]:
-                content = (m.get("content") or "").strip()
-                if content:
-                    out.append(f"- {content}")
-
-        if exps:
-            out.append("")
-            out.append("### Relevant experiences from the collective")
-            out.append("_(trust_score=0 just means fresh/unrated — judge by similarity + content)_")
-            out.append("")
-            for e in exps[:5]:
-                goal = (e.get("goal") or "").strip()
-                sid = e.get("short_id") or ""
-                sim = float(e.get("similarity") or 0.0)
-                trust = float(e.get("trust_score") or e.get("quality_score") or 0.0)
-                conf = e.get("confidence")
-
-                out.append(f"→ [{sid}] {goal}")
-                meta_bits = [f"similarity {sim:.2f}", f"trust {trust:.2f}"]
-                if conf is not None:
-                    meta_bits.append(f"confidence {float(conf):.2f}")
-                out.append(f"   _{', '.join(meta_bits)}_")
-
-                solution = (e.get("solution") or "").strip()
-                if solution:
-                    out.append(f"   **Solution:** {solution[:500]}")
-
-                gotchas = e.get("gotchas") or []
-                if gotchas:
-                    out.append(f"   **Gotchas:**")
-                    for g in gotchas[:5]:
-                        if isinstance(g, dict):
-                            warning = (g.get("warning") or "").strip()
-                        else:
-                            warning = str(g).strip()
-                        if warning:
-                            out.append(f"     - {warning[:300]}")
-
-                # Show artifacts if the solution referenced code
-                arts = e.get("artifacts") or []
-                if arts:
-                    first = arts[0]
-                    if isinstance(first, dict) and first.get("code"):
-                        lang = first.get("language") or ""
-                        code = (first.get("code") or "")[:300]
-                        out.append(f"   **Artifact ({lang}):** `{code}`")
-                out.append("")
-
-        return "\n".join(out).strip()
-
-    # -- Sync turn -----------------------------------------------------------
-
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Run LLM fact extraction against the turn, non-blocking.
-
-        Fire-and-forget per turn. Multiple concurrent sessions can each sync
-        their own turns without blocking one another.
-        """
-        if not self._http:
+        if not self._http or self._is_breaker_open():
             return
-        if not user_content or not user_content.strip():
-            logger.debug("Plurum sync_turn skipped: empty user content")
+        if not (user_content and user_content.strip()):
             return
-        if not assistant_content or not assistant_content.strip():
-            logger.debug("Plurum sync_turn skipped: empty assistant content")
+        if not (assistant_content and assistant_content.strip()):
             return
 
-        user_id = self._user_for(session_id or "")
+        # Snapshot the rolling history BEFORE appending the new turn so the
+        # extractor sees prior turns as context and the current turn as the
+        # thing to extract from.
+        with self._history_lock:
+            prior = list(self._history.get(session_id or "", []))
+            updated = prior + [
+                {"role": "user", "content": user_content},
+                {"role": "assistant", "content": assistant_content},
+            ]
+            # Cap at 2*_HISTORY_TURNS entries
+            if len(updated) > 2 * _HISTORY_TURNS * 2:
+                updated = updated[-(2 * _HISTORY_TURNS * 2):]
+            self._history[session_id or ""] = updated
 
-        def _run():
+        body = {
+            "user_content": user_content[:6000],
+            "assistant_content": assistant_content[:6000],
+        }
+        # Trim history to the last _HISTORY_TURNS turns (each turn = 2 entries)
+        history_payload = prior[-(2 * _HISTORY_TURNS):]
+        if history_payload:
+            body["messages"] = history_payload
+
+        def _sync():
             try:
                 self._http.post(
                     "/api/v1/memories/extract",
-                    params={"user_id": user_id},
-                    body={
-                        "user_content": user_content[:6000],
-                        "assistant_content": assistant_content[:6000],
-                    },
+                    params={"user_id": self._user_id},
+                    body=body,
                 )
+                self._record_success()
             except Exception as e:
-                logger.debug("Plurum sync_turn failed (session=%s): %s", session_id, e)
+                self._record_failure()
+                logger.debug("Plurum sync failed: %s", e)
 
-        # Daemon thread, no tracking — runs to completion on its own.
-        threading.Thread(
-            target=_run, daemon=True, name=f"plurum-sync-{session_id or 'default'}"
-        ).start()
+        if self._sync_thread and self._sync_thread.is_alive():
+            self._sync_thread.join(timeout=5.0)
+        self._sync_thread = threading.Thread(
+            target=_sync, daemon=True, name="plurum-sync"
+        )
+        self._sync_thread.start()
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        """Final extraction pass at session end. Picks the last user/assistant pair."""
+        """Final extract pass over the last user/assistant pair."""
         if not self._http or not messages:
             return
         last_user = next(
-            (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), ""
+            (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
+            "",
         )
-        last_assistant = next(
-            (m.get("content", "") for m in reversed(messages) if m.get("role") == "assistant"), ""
+        last_asst = next(
+            (m.get("content", "") for m in reversed(messages) if m.get("role") == "assistant"),
+            "",
         )
-        if last_user and last_assistant:
-            self.sync_turn(last_user, last_assistant)
+        if last_user and last_asst:
+            self.sync_turn(last_user, last_asst)
 
-    # -- Tools ---------------------------------------------------------------
+    # -- Tool dispatch -------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [PROFILE_SCHEMA, SEARCH_SCHEMA, ACQUIRE_SCHEMA, RECALL_SCHEMA, CONCLUDE_SCHEMA]
+        return [
+            PROFILE_SCHEMA,
+            RECALL_SCHEMA,
+            SEARCH_SCHEMA,
+            CONCLUDE_SCHEMA,
+            PUBLISH_SCHEMA,
+            REPORT_OUTCOME_SCHEMA,
+            VOTE_SCHEMA,
+        ]
 
-    def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+    def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if not self._http:
             return tool_error(
-                "Plurum not initialized — missing PLURUM_API_KEY. "
-                "Set it in ~/.hermes/.env and restart Hermes."
+                "Plurum not initialized — set PLURUM_API_KEY in ~/.hermes/.env."
             )
+        if self._is_breaker_open():
+            return json.dumps({
+                "error": (
+                    "Plurum API temporarily unavailable (multiple consecutive "
+                    "failures). Will retry automatically."
+                ),
+            })
 
-        # Gateway may pass session_id in kwargs; fall back to "" → default user.
-        session_id = kwargs.get("session_id") or ""
-        user_id = self._user_for(session_id)
+        try:
+            if tool_name == "plurum_profile":
+                return self._tool_profile(args)
+            if tool_name == "plurum_recall":
+                return self._tool_recall(args)
+            if tool_name == "plurum_search":
+                return self._tool_search(args)
+            if tool_name == "plurum_conclude":
+                return self._tool_conclude(args)
+            if tool_name == "plurum_publish":
+                return self._tool_publish(args)
+            if tool_name == "plurum_report_outcome":
+                return self._tool_report_outcome(args)
+            if tool_name == "plurum_vote":
+                return self._tool_vote(args)
+        except Exception as e:
+            self._record_failure()
+            return tool_error(str(e))
 
-        if tool_name == "plurum_profile":
-            return self._tool_profile(args, user_id)
-        if tool_name == "plurum_search":
-            return self._tool_search(args)
-        if tool_name == "plurum_acquire":
-            return self._tool_acquire(args)
-        if tool_name == "plurum_recall":
-            return self._tool_recall(args, user_id)
-        if tool_name == "plurum_conclude":
-            return self._tool_conclude(args, user_id)
         return tool_error(f"Unknown tool: {tool_name}")
 
-    def _tool_acquire(self, args: Dict[str, Any]) -> str:
-        identifier = (args.get("identifier") or "").strip()
-        if not identifier:
-            return tool_error("Missing required parameter: identifier")
-        mode = args.get("mode") or "full"
-        if mode not in ("full", "checklist", "summary", "decision_tree"):
-            mode = "full"
-        try:
-            result = self._http.post(
-                f"/api/v1/experiences/{identifier}/acquire",
-                body={"mode": mode},
-            )
-            return json.dumps(result or {})
-        except Exception as e:
-            return tool_error(str(e))
+    # -- Tool implementations ------------------------------------------------
 
-    def _tool_profile(self, args: Dict[str, Any], user_id: str) -> str:
-        try:
-            result = self._http.get(
-                "/api/v1/profile",
-                params={
-                    "user_id": user_id,
-                    "query": args.get("query"),
-                    "memory_limit": 10,
-                    "experience_limit": 5,
-                },
-            )
-            return json.dumps(result or {})
-        except Exception as e:
-            return tool_error(str(e))
+    def _tool_profile(self, args: dict) -> str:
+        query = (args.get("query") or "").strip()
+        params: Dict[str, Any] = {
+            "user_id": self._user_id,
+            "memory_limit": 10,
+            "experience_limit": 5,
+        }
+        if query:
+            params["query"] = query
+        resp = self._http.get("/api/v1/profile", params=params) or {}
+        self._record_success()
+        return json.dumps({
+            "memories": resp.get("memories", []),
+            "experiences": resp.get("experiences", []),
+        })
 
-    def _tool_search(self, args: Dict[str, Any]) -> str:
-        q = (args.get("query") or "").strip()
-        if not q:
+    def _tool_recall(self, args: dict) -> str:
+        query = (args.get("query") or "").strip()
+        if not query:
             return tool_error("Missing required parameter: query")
-        try:
-            limit = int(args.get("limit") or 5)
-            result = self._http.post(
-                "/api/v1/experiences/search",
-                body={"query": q, "limit": max(1, min(limit, 20))},
-            )
-            if not result:
-                return json.dumps({"results": [], "count": 0})
-            hits = result.get("results") or []
+        limit = min(int(args.get("limit", 10)), 50)
+        resp = self._http.post(
+            "/api/v1/memories/search",
+            params={"user_id": self._user_id},
+            body={"query": query, "limit": limit},
+        ) or {}
+        self._record_success()
+        return json.dumps({
+            "results": resp.get("results", []),
+            "count": resp.get("total_found", 0),
+        })
 
-            def _truncate(s: Any, n: int) -> str:
-                s = str(s or "").strip()
-                return s if len(s) <= n else s[: n - 1] + "…"
-
-            def _normalize_gotchas(raw: Any) -> List[str]:
-                out: List[str] = []
-                for g in (raw or [])[:8]:
-                    if isinstance(g, dict):
-                        out.append(_truncate(g.get("warning"), 300))
-                    else:
-                        out.append(_truncate(g, 300))
-                return [x for x in out if x]
-
-            def _normalize_dead_ends(raw: Any) -> List[str]:
-                out: List[str] = []
-                for d in (raw or [])[:5]:
-                    if isinstance(d, dict):
-                        what = str(d.get("what") or "").strip()
-                        why = str(d.get("why") or "").strip()
-                        if what or why:
-                            out.append(_truncate(f"{what} → {why}" if what and why else what or why, 300))
-                return out
-
-            def _normalize_breakthroughs(raw: Any) -> List[str]:
-                out: List[str] = []
-                for b in (raw or [])[:5]:
-                    if isinstance(b, dict):
-                        insight = str(b.get("insight") or "").strip()
-                        detail = str(b.get("detail") or "").strip()
-                        if insight or detail:
-                            out.append(_truncate(f"{insight}: {detail}" if insight and detail else insight or detail, 300))
-                return out
-
-            def _first_artifact(raw: Any) -> Optional[Dict[str, str]]:
-                if not raw or not isinstance(raw, list):
-                    return None
-                a = raw[0]
-                if not isinstance(a, dict):
-                    return None
-                code = str(a.get("code") or "").strip()
-                if not code:
-                    return None
-                return {
-                    "language": str(a.get("language") or "").strip(),
-                    "code": _truncate(code, 400),
-                    "description": _truncate(a.get("description"), 200),
-                }
-
-            condensed = []
-            for h in hits:
-                item = {
-                    "short_id": h.get("short_id"),
-                    "goal": h.get("goal"),
-                    "similarity": round(float(h.get("similarity") or 0.0), 3),
-                    "trust_score": round(float(h.get("trust_score") or h.get("quality_score") or 0.0), 3),
-                    "confidence": h.get("confidence"),
-                    "success_rate": h.get("success_rate") or 0,
-                    "total_reports": h.get("total_reports") or 0,
-                    "tags": h.get("tags") or [],
-                    # Actionable fields the agent needs to apply the experience:
-                    "solution": _truncate(h.get("solution"), 800) or None,
-                    "gotchas": _normalize_gotchas(h.get("gotchas")),
-                    "dead_ends": _normalize_dead_ends(h.get("dead_ends")),
-                    "breakthroughs": _normalize_breakthroughs(h.get("breakthroughs")),
-                }
-                art = _first_artifact(h.get("artifacts"))
-                if art:
-                    item["artifact"] = art
-                # Drop empty lists / None values to keep payload lean
-                condensed.append({k: v for k, v in item.items() if v not in (None, [], "")})
-            return json.dumps({"results": condensed, "count": len(condensed)})
-        except Exception as e:
-            return tool_error(str(e))
-
-    def _tool_recall(self, args: Dict[str, Any], user_id: str) -> str:
-        q = (args.get("query") or "").strip()
-        if not q:
+    def _tool_search(self, args: dict) -> str:
+        query = (args.get("query") or "").strip()
+        if not query:
             return tool_error("Missing required parameter: query")
-        try:
-            limit = int(args.get("limit") or 10)
-            result = self._http.post(
-                "/api/v1/memories/search",
-                params={"user_id": user_id},
-                body={"query": q, "limit": max(1, min(limit, 50))},
-            )
-            if not result:
-                return json.dumps({"results": [], "count": 0})
-            hits = result.get("results") or []
-            condensed = [
-                {"content": (h.get("content") or ""), "memory_type": h.get("memory_type"), "importance": h.get("importance")}
-                if isinstance(h, dict) and "content" in h
-                else h  # some rows come back in nested form — pass through
-                for h in hits
+        limit = min(int(args.get("limit", 10)), 30)
+        resp = self._http.post(
+            "/api/v1/experiences/search",
+            body={"query": query, "limit": limit},
+        ) or {}
+        self._record_success()
+        return json.dumps({
+            "results": resp.get("results", []),
+            "count": resp.get("total_found", 0),
+        })
+
+    def _tool_conclude(self, args: dict) -> str:
+        conclusion = (args.get("conclusion") or "").strip()
+        if not conclusion:
+            return tool_error("Missing required parameter: conclusion")
+        self._http.post(
+            "/api/v1/memories",
+            params={"user_id": self._user_id},
+            body={"content": conclusion, "memory_type": "fact", "importance": "high"},
+        )
+        self._record_success()
+        return json.dumps({"result": "Fact stored."})
+
+    def _tool_publish(self, args: dict) -> str:
+        goal = (args.get("goal") or "").strip()
+        solution = (args.get("solution") or "").strip()
+        if not goal or not solution:
+            return tool_error("plurum_publish requires both 'goal' and 'solution'.")
+
+        body: Dict[str, Any] = {"goal": goal, "solution": solution}
+        if args.get("context"):
+            body["context"] = str(args["context"])
+        if args.get("dead_ends"):
+            body["dead_ends"] = [
+                {"what": str(x), "why": ""} for x in args["dead_ends"] if str(x).strip()
             ]
-            return json.dumps({"results": condensed, "count": len(condensed)})
-        except Exception as e:
-            return tool_error(str(e))
+        if args.get("gotchas"):
+            body["gotchas"] = [
+                {"warning": str(x)} for x in args["gotchas"] if str(x).strip()
+            ]
+        if args.get("tags"):
+            body["tags"] = [str(t) for t in args["tags"] if str(t).strip()]
 
-    def _tool_conclude(self, args: Dict[str, Any], user_id: str) -> str:
-        content = (args.get("content") or "").strip()
-        if not content:
-            return tool_error("Missing required parameter: content")
+        # Two-step: create as draft, then publish so it's visible to the
+        # collective immediately. Failures during publish leave the draft
+        # behind for the agent to retry; that's fine.
+        created = self._http.post("/api/v1/experiences", body=body) or {}
+        identifier = created.get("short_id") or created.get("id")
+        if not identifier:
+            return tool_error("Plurum experience create returned no id.")
         try:
-            body = {
-                "content": content,
-                "memory_type": args.get("memory_type") or "fact",
-                "importance": args.get("importance") or "medium",
-            }
-            result = self._http.post(
-                "/api/v1/memories",
-                params={"user_id": user_id},
-                body=body,
-            )
-            return json.dumps({"stored": True, "short_id": (result or {}).get("short_id")})
+            self._http.post(f"/api/v1/experiences/{identifier}/publish")
         except Exception as e:
-            return tool_error(str(e))
+            self._record_failure()
+            return json.dumps({
+                "result": "Experience created as draft (publish failed; will retry).",
+                "id": identifier,
+                "error": str(e),
+            })
+        self._record_success()
+        return json.dumps({"result": "Published.", "id": identifier})
+
+    def _tool_report_outcome(self, args: dict) -> str:
+        identifier = (args.get("experience_id") or "").strip()
+        outcome = (args.get("outcome") or "").strip().lower()
+        if not identifier or outcome not in ("success", "partial", "failure"):
+            return tool_error(
+                "Need experience_id and outcome in {success, partial, failure}."
+            )
+        body: Dict[str, Any] = {"outcome": outcome}
+        if args.get("note"):
+            body["note"] = str(args["note"])[:500]
+        self._http.post(
+            f"/api/v1/experiences/{identifier}/outcome", body=body,
+        )
+        self._record_success()
+        return json.dumps({"result": "Outcome recorded.", "id": identifier})
+
+    def _tool_vote(self, args: dict) -> str:
+        identifier = (args.get("experience_id") or "").strip()
+        vote = (args.get("vote") or "").strip().lower()
+        if not identifier or vote not in ("up", "down"):
+            return tool_error("Need experience_id and vote in {up, down}.")
+        self._http.post(
+            f"/api/v1/experiences/{identifier}/vote",
+            body={"vote": vote},
+        )
+        self._record_success()
+        return json.dumps({"result": "Vote recorded.", "id": identifier})
+
+    # -- Circuit breaker -----------------------------------------------------
+
+    def _is_breaker_open(self) -> bool:
+        if self._consecutive_failures < _BREAKER_THRESHOLD:
+            return False
+        if time.monotonic() >= self._breaker_open_until:
+            self._consecutive_failures = 0
+            return False
+        return True
+
+    def _record_success(self) -> None:
+        self._consecutive_failures = 0
+
+    def _record_failure(self) -> None:
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= _BREAKER_THRESHOLD:
+            self._breaker_open_until = time.monotonic() + _BREAKER_COOLDOWN_SECS
+            logger.warning(
+                "Plurum circuit breaker tripped after %d consecutive failures. "
+                "Pausing for %ds.",
+                self._consecutive_failures, _BREAKER_COOLDOWN_SECS,
+            )
 
     # -- Shutdown ------------------------------------------------------------
 
     def shutdown(self) -> None:
-        # Drain all per-session prefetch threads (bounded by small count).
-        # Sync threads are fire-and-forget daemons — they'll die with process.
-        for sid, t in list(self._prefetch_threads.items()):
+        for t in (self._prefetch_thread, self._sync_thread):
             if t and t.is_alive():
                 t.join(timeout=5.0)
 
 
 # ---------------------------------------------------------------------------
-# Plugin registration
+# Plugin entry point
 # ---------------------------------------------------------------------------
 
 def register(ctx) -> None:
-    """Register Plurum as Hermes's memory provider.
-
-    Hermes has two plugin discovery systems that both call register():
-    1. The memory-provider loader (plugins/memory/__init__.py) passes a
-       `_ProviderCollector` with `register_memory_provider`.
-    2. The general plugin loader (hermes_cli.plugins) passes a different
-       `PluginContext` that doesn't know about memory providers and would
-       raise AttributeError on the old blind call.
-
-    We no-op gracefully on contexts without `register_memory_provider`. The
-    memory-provider loader has a subclass-scan fallback that also picks up
-    PlurimMemoryProvider even when register() is a no-op, so we're covered.
-    """
-    if hasattr(ctx, "register_memory_provider"):
-        ctx.register_memory_provider(PlurimMemoryProvider())
+    """Register Plurum as a Hermes memory provider."""
+    ctx.register_memory_provider(PlurumMemoryProvider())
