@@ -163,12 +163,30 @@ class ExperienceRepository:
     # Outcome Reports
     # -----------------------------------------------------------------------
 
-    def create_outcome_report(self, data: dict) -> dict:
-        """Create an outcome report for an experience."""
-        result = self.client.table("outcome_reports").insert(data).execute()
+    def upsert_outcome_report(self, data: dict) -> dict:
+        """Insert or overwrite an agent's outcome report for an experience.
+
+        The outcome_reports table has a UNIQUE(experience_id, agent_id)
+        constraint, so re-reports from the same agent collide. We treat
+        a re-report as the agent's most recent verdict and overwrite
+        the prior one. This keeps the trust-loop tool useful — agents
+        that try an experience, fail, fix the approach, try again can
+        update the outcome rather than hitting a 422 on the second
+        attempt.
+        """
+        result = (
+            self.client.table("outcome_reports")
+            .upsert(data, on_conflict="experience_id,agent_id")
+            .execute()
+        )
         if not result.data:
-            raise Exception("Failed to create outcome report")
+            raise Exception("Failed to upsert outcome report")
         return result.data[0]
+
+    # Legacy alias — same behavior as upsert now. New code should use
+    # upsert_outcome_report directly for clarity.
+    def create_outcome_report(self, data: dict) -> dict:
+        return self.upsert_outcome_report(data)
 
     def get_outcome_report(self, experience_id: UUID, agent_id: UUID) -> dict | None:
         """Get an agent's outcome report for an experience."""

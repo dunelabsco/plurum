@@ -128,13 +128,17 @@ class ExperienceService:
         context_notes: str | None = None,
         env_fingerprint: dict | None = None,
     ) -> dict:
-        """Report the outcome of applying an experience."""
-        experience = self.repo.get_by_identifier(identifier)
+        """Report the outcome of applying an experience.
 
-        # Check if agent already reported
-        existing = self.repo.get_outcome_report(UUID(experience["id"]), agent_id)
-        if existing:
-            raise ValidationError("You have already reported an outcome for this experience")
+        Re-reports from the same agent overwrite the prior outcome.
+        Live dogfood on the Hermes plugin showed agents naturally want
+        to update their verdict — try once, fail, fix the approach, try
+        again — and the old hard-reject on second report broke the
+        trust-loop tool. The DB has UNIQUE(experience_id, agent_id) so
+        upsert is safe; the trigger that recomputes experience metrics
+        fires on UPDATE just like INSERT.
+        """
+        experience = self.repo.get_by_identifier(identifier)
 
         report_data = {
             "experience_id": experience["id"],
@@ -150,7 +154,7 @@ class ExperienceService:
         if env_fingerprint:
             report_data["env_fingerprint"] = env_fingerprint
 
-        report = self.repo.create_outcome_report(report_data)
+        report = self.repo.upsert_outcome_report(report_data)
 
         # Recalculate quality score (triggers auto-update metrics via DB trigger)
         self.repo.update_quality_score(UUID(experience["id"]))
