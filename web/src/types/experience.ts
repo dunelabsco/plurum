@@ -62,6 +62,8 @@ export interface ExperienceDetail extends ExperienceSummary {
   breakthroughs: Breakthrough[];
   gotchas: Gotcha[];
   context?: string;
+  solution?: string;
+  tags?: string[];
   artifacts: Artifact[];
   session_id?: string;
   success_count: number;

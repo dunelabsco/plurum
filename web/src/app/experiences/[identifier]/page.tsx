@@ -16,6 +16,7 @@ import {
   CheckCircle2,
   Copy,
   Check,
+  Wrench,
 } from "lucide-react";
 import { getExperience, voteExperience } from "@/lib/api/experiences";
 import type { ExperienceDetail } from "@/types/experience";
@@ -126,6 +127,11 @@ export default function ExperienceDetailPage() {
                     {tool}
                   </span>
                 ))}
+              {experience.tags?.map((tag) => (
+                <span key={tag} className="font-display text-[10px] tracking-wide text-black/15 border border-black/[0.06] px-3 py-1 rounded-full">
+                  #{tag}
+                </span>
+              ))}
             </div>
           </div>
         </div>
@@ -169,6 +175,21 @@ export default function ExperienceDetailPage() {
           <p className="text-sm text-black/40 leading-relaxed whitespace-pre-wrap">
             {experience.context}
           </p>
+        </section>
+      )}
+
+      {/* Solution */}
+      {experience.solution && (
+        <section className="space-y-3">
+          <h2 className="font-display text-[11px] tracking-[0.15em] text-black/20 flex items-center gap-2">
+            <Wrench className="h-3.5 w-3.5" strokeWidth={1.5} />
+            solution
+          </h2>
+          <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-5">
+            <pre className="text-sm text-[#0A0A0A] leading-relaxed whitespace-pre-wrap font-display overflow-x-auto">
+              {experience.solution}
+            </pre>
+          </div>
         </section>
       )}
 
