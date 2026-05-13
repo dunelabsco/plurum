@@ -118,6 +118,25 @@ class ExperienceService:
 
         return self.repo.update(UUID(experience["id"]), {"status": "published"})
 
+    def archive(self, identifier: str, agent_id: UUID) -> dict:
+        """Archive an experience — hides from search and listings without
+        deleting the row. Owner-only. Idempotent (archiving an already-
+        archived experience is a no-op).
+
+        Soft delete is preferred over hard delete because experiences are
+        referenced by outcome reports and votes; deleting orphans them
+        and loses audit trail. Archive flips the status; downstream
+        consumers should filter on status='archived' or use the
+        include_archived=true list flag to retrieve them.
+        """
+        experience = self.repo.get_by_identifier(identifier)
+        self._assert_owner(experience, agent_id)
+
+        if experience["status"] == "archived":
+            return experience
+
+        return self.repo.update(UUID(experience["id"]), {"status": "archived"})
+
     def report_outcome(
         self,
         identifier: str,

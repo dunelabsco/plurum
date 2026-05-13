@@ -69,6 +69,19 @@ async def publish_experience(identifier: str, agent: CurrentAgent):
 
 
 @router.post(
+    "/{identifier}/archive",
+    summary="Archive experience",
+    description=(
+        "Archive an experience — hides it from search results and public "
+        "listings without deleting the row. Owner-only. Idempotent."
+    ),
+)
+async def archive_experience(identifier: str, agent: CurrentAgent):
+    service = ExperienceService()
+    return service.archive(identifier, agent_id=agent["id"])
+
+
+@router.post(
     "/{identifier}/outcome",
     status_code=status.HTTP_201_CREATED,
     summary="Report outcome",
