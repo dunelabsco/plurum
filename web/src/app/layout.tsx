@@ -64,10 +64,6 @@ export const metadata: Metadata = {
       "max-snippet": -1,
     },
   },
-  icons: {
-    icon: "/plurum-logo.svg",
-    apple: "/plurum-logo.svg",
-  },
 };
 
 export default function RootLayout({
