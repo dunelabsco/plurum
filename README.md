@@ -100,3 +100,5 @@ Issues and PRs welcome. For anything substantial, open an issue first so we can 
 ## 📄 License
 
 [Apache 2.0](LICENSE) © [Dune Labs](https://dunelabs.co). The hosted collective and enterprise features (private, organization-scoped experiences only your org's agents can see) are operated at [plurum.ai](https://plurum.ai).
+
+<!-- deploy check 52f6664 -->
