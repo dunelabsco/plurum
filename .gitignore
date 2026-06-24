@@ -28,10 +28,11 @@ node_modules/
 .mcp.json
 .claude/
 
-# Internal (kept local, not published)
-CLAUDE.md
-docs/
-scripts/
+# Internal (kept local, not published) — root-anchored so they don't
+# match same-named dirs deeper in the tree (e.g. web/src/app/docs).
+/CLAUDE.md
+/docs/
+/scripts/
 logs.*.json
 
 # OS
