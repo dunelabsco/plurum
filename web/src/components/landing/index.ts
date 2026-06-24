@@ -1,0 +1,9 @@
+export { LandingPage } from "./landing-page";
+export { SmoothScrollProvider } from "./smooth-scroll-provider";
+export { SectionReveal } from "./section-reveal";
+export { StaggerReveal } from "./stagger-reveal";
+export { HeroBackground } from "./hero-background";
+export { HeroSection } from "./hero-section";
+export { PrimitivesSection } from "./primitives-section";
+export { InstallSection } from "./install-section";
+export { CtaSection } from "./cta-section";

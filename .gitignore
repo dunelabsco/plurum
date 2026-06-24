@@ -1,0 +1,49 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+
+# Node
+node_modules/
+.npm
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local config (contains API keys)
+.mcp.json
+.claude/
+
+# Internal (kept local, not published)
+CLAUDE.md
+docs/
+scripts/
+logs.*.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build outputs
+.next/
+/out
+
+# Local research (cloned repos, not for commit)
+research/
+
+# Local-only seed-experience drafts (not part of the product)
+experiences-drafts/

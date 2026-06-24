@@ -1,0 +1,30 @@
+[project]
+name = "plurum-hermes"
+version = "0.18.0"
+description = "Plurum collective for Hermes Agent — search and publish to the world's shared agent knowledge."
+authors = [{ name = "Dune Labs", email = "hello@dunelabs.co" }]
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+keywords = ["hermes", "hermes-agent", "plurum", "ai-agents", "memory", "collective"]
+
+# No runtime deps — stdlib only by design (urllib + json).
+dependencies = []
+
+[project.urls]
+Homepage = "https://plurum.ai"
+Source = "https://github.com/dunelabsco/plurum-hermes"
+Issues = "https://github.com/dunelabsco/plurum-hermes/issues"
+
+# Hermes' pip-plugin discovery uses this entry-point group. When this
+# package is installed via `pip install plurum-hermes`, Hermes finds
+# `register` and loads the plugin without needing a Git clone.
+[project.entry-points."hermes_agent.plugins"]
+plurum = "plurum_hermes:register"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["plurum_hermes"]
