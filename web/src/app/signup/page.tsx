@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
-import { Loader2 } from "lucide-react";
+import { Loader2, MailCheck } from "lucide-react";
 import { OAuthButtons, OAuthDivider } from "@/components/auth/oauth-buttons";
 
 export default function SignupPage() {
@@ -12,21 +12,23 @@ export default function SignupPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [sent, setSent] = useState(false);
+  const [resent, setResent] = useState(false);
+  const [resending, setResending] = useState(false);
   const supabase = createClient();
+
+  const redirectTo = () => `${window.location.origin}/auth/callback`;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setError(null);
-    setMessage(null);
 
     if (password !== confirmPassword) {
       setError("passwords do not match");
       setIsLoading(false);
       return;
     }
-
     if (password.length < 8) {
       setError("password must be at least 8 characters");
       setIsLoading(false);
@@ -37,12 +39,10 @@ export default function SignupPage() {
       const { error } = await supabase.auth.signUp({
         email,
         password,
-        options: {
-          emailRedirectTo: `${window.location.origin}/auth/callback`,
-        },
+        options: { emailRedirectTo: redirectTo() },
       });
       if (error) throw error;
-      setMessage("check your email to confirm your account.");
+      setSent(true);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
@@ -50,8 +50,70 @@ export default function SignupPage() {
     }
   };
 
+  const handleResend = async () => {
+    setResending(true);
+    setResent(false);
+    const { error } = await supabase.auth.resend({
+      type: "signup",
+      email,
+      options: { emailRedirectTo: redirectTo() },
+    });
+    setResending(false);
+    if (!error) setResent(true);
+  };
+
   const inputClasses =
     "w-full bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-xl px-4 py-3 text-sm text-[#0A0A0A] placeholder:text-black/20 focus:border-black/15 focus:outline-none transition-colors";
+
+  if (sent) {
+    return (
+      <div className="min-h-svh flex flex-col items-center justify-center px-6">
+        <div className="w-full max-w-sm">
+          <div className="text-center mb-10">
+            <Link href="/" className="font-display text-sm tracking-tight text-[#0A0A0A]">
+              plurum
+            </Link>
+          </div>
+          <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-6 sm:p-8 text-center space-y-4">
+            <MailCheck className="h-8 w-8 mx-auto text-[#0A0A0A]/55" strokeWidth={1.5} />
+            <h1 className="font-display text-xl text-[#0A0A0A]">check your email</h1>
+            <p className="text-black/35 text-sm leading-relaxed">
+              we sent a confirmation link to{" "}
+              <span className="text-[#0A0A0A]">{email}</span>. click it to finish
+              creating your account.
+            </p>
+            <div className="pt-2 space-y-3">
+              {resent ? (
+                <p className="text-[13px] text-black/40">link resent — check again in a moment.</p>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleResend}
+                  disabled={resending}
+                  className="text-[13px] text-black/40 hover:text-[#0A0A0A] transition-colors disabled:opacity-40"
+                >
+                  {resending ? "resending..." : "didn't get it? resend"}
+                </button>
+              )}
+              <p className="text-[12px] text-black/25">
+                wrong email?{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSent(false);
+                    setResent(false);
+                  }}
+                  className="text-black/40 hover:text-[#0A0A0A] transition-colors"
+                >
+                  go back
+                </button>
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-svh flex flex-col items-center justify-center px-6">
@@ -66,9 +128,7 @@ export default function SignupPage() {
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="text-center space-y-2">
               <h1 className="font-display text-xl text-[#0A0A0A]">create an account</h1>
-              <p className="text-black/30 text-sm">
-                get started with plurum today
-              </p>
+              <p className="text-black/30 text-sm">get started with plurum today</p>
             </div>
 
             <OAuthButtons next="/dashboard" />
@@ -100,9 +160,7 @@ export default function SignupPage() {
                   required
                   className={inputClasses}
                 />
-                <p className="text-[11px] text-black/20">
-                  must be at least 8 characters
-                </p>
+                <p className="text-[11px] text-black/20">must be at least 8 characters</p>
               </div>
 
               <div className="space-y-2">
@@ -121,12 +179,6 @@ export default function SignupPage() {
               {error && (
                 <div className="border border-[#D71921]/20 rounded-xl bg-[#D71921]/5 px-4 py-2.5 text-sm text-[#D71921]">
                   {error}
-                </div>
-              )}
-
-              {message && (
-                <div className="border border-black/[0.06] rounded-xl bg-white/60 px-4 py-2.5 text-sm text-[#0A0A0A]">
-                  {message}
                 </div>
               )}
 
