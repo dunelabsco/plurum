@@ -20,7 +20,7 @@ export default function TermsPage() {
               <h1 className="font-display text-3xl tracking-tight text-[#0A0A0A] mb-3">
                 terms of service
               </h1>
-              <p className="text-sm text-black/35">last updated: may 27, 2026</p>
+              <p className="text-sm text-black/35">last updated: june 25, 2026</p>
             </header>
 
             <div className="w-full h-px bg-black/[0.06] mb-12" />
@@ -90,6 +90,22 @@ export default function TermsPage() {
             </section>
 
             <section className="space-y-3 mb-10">
+              <h2 className="font-display text-lg text-[#0A0A0A]">reporting infringement</h2>
+              <p className="text-sm text-black/45 leading-relaxed">
+                if you believe content on plurum infringes your copyright or
+                other rights, email{" "}
+                <a href="mailto:plurum@dunelabs.co" className="text-[#0A0A0A] hover:underline">
+                  plurum@dunelabs.co
+                </a>{" "}
+                with a description of the work, the id or url of the infringing
+                content, your contact details, and a good-faith statement that
+                the use isn&apos;t authorized. we&apos;ll review, remove
+                infringing content where appropriate, and may terminate repeat
+                infringers.
+              </p>
+            </section>
+
+            <section className="space-y-3 mb-10">
               <h2 className="font-display text-lg text-[#0A0A0A]">api keys</h2>
               <p className="text-sm text-black/45 leading-relaxed">
                 you&apos;re responsible for keeping your api keys secret. anything
@@ -126,6 +142,16 @@ export default function TermsPage() {
             </section>
 
             <section className="space-y-3 mb-10">
+              <h2 className="font-display text-lg text-[#0A0A0A]">indemnification</h2>
+              <p className="text-sm text-black/45 leading-relaxed">
+                you agree to defend and indemnify dune labs and its people from
+                claims, damages, losses, and costs — including reasonable legal
+                fees — arising from content you publish, your use of plurum, or
+                your violation of these terms or anyone else&apos;s rights.
+              </p>
+            </section>
+
+            <section className="space-y-3 mb-10">
               <h2 className="font-display text-lg text-[#0A0A0A]">changes to the service</h2>
               <p className="text-sm text-black/45 leading-relaxed">
                 we may update, change, or discontinue parts of plurum at any
@@ -147,11 +173,60 @@ export default function TermsPage() {
             </section>
 
             <section className="space-y-3 mb-10">
+              <h2 className="font-display text-lg text-[#0A0A0A]">disputes</h2>
+              <p className="text-sm text-black/45 leading-relaxed">
+                if something goes wrong, email{" "}
+                <a href="mailto:plurum@dunelabs.co" className="text-[#0A0A0A] hover:underline">
+                  plurum@dunelabs.co
+                </a>{" "}
+                first — most issues are resolved informally. if we can&apos;t
+                resolve it, you and dune labs agree any dispute will be handled
+                exclusively in the state or federal courts located in delaware,
+                and both of us consent to their jurisdiction. nothing here stops
+                either party from seeking injunctive relief for misuse or ip
+                violations.
+              </p>
+            </section>
+
+            <section className="space-y-3 mb-10">
               <h2 className="font-display text-lg text-[#0A0A0A]">governing law</h2>
               <p className="text-sm text-black/45 leading-relaxed">
                 these terms are governed by the laws of the state of delaware,
                 usa, without regard to its conflict-of-laws principles.
               </p>
+            </section>
+
+            <section className="space-y-3 mb-10">
+              <h2 className="font-display text-lg text-[#0A0A0A]">changes to these terms</h2>
+              <p className="text-sm text-black/45 leading-relaxed">
+                we may update these terms. if a change is material, we&apos;ll
+                update the date above and notify active users. continuing to use
+                plurum after changes take effect means you accept them.
+              </p>
+            </section>
+
+            <section className="space-y-3 mb-10">
+              <h2 className="font-display text-lg text-[#0A0A0A]">the rest</h2>
+              <ul className="space-y-2 text-sm text-black/45 leading-relaxed list-disc ml-5">
+                <li>
+                  <strong className="text-[#0A0A0A]">severability</strong> — if any
+                  part of these terms is unenforceable, the rest still applies.
+                </li>
+                <li>
+                  <strong className="text-[#0A0A0A]">no waiver</strong> — if we
+                  don&apos;t enforce a right, that isn&apos;t a waiver of it.
+                </li>
+                <li>
+                  <strong className="text-[#0A0A0A]">assignment</strong> — you
+                  can&apos;t transfer these terms; we may, in connection with a
+                  merger, acquisition, or sale of assets.
+                </li>
+                <li>
+                  <strong className="text-[#0A0A0A]">entire agreement</strong> —
+                  these terms and the privacy policy are the whole agreement
+                  between you and dune labs about plurum.
+                </li>
+              </ul>
             </section>
 
             <section className="space-y-3 mb-10">

@@ -20,7 +20,7 @@ export default function PrivacyPage() {
               <h1 className="font-display text-3xl tracking-tight text-[#0A0A0A] mb-3">
                 privacy policy
               </h1>
-              <p className="text-sm text-black/35">last updated: may 27, 2026</p>
+              <p className="text-sm text-black/35">last updated: june 25, 2026</p>
             </header>
 
             <div className="w-full h-px bg-black/[0.06] mb-12" />
@@ -105,6 +105,29 @@ export default function PrivacyPage() {
             </section>
 
             <section className="space-y-3 mb-10">
+              <h2 className="font-display text-lg text-[#0A0A0A]">how we protect it</h2>
+              <p className="text-sm text-black/45 leading-relaxed">
+                data is encrypted in transit (tls) and at rest. passwords and
+                api keys are stored only as hashes — we can&apos;t read them.
+                access to production data is limited to what&apos;s needed to run
+                the service. no system is perfectly secure, but we take
+                reasonable measures and will notify you of a breach affecting
+                your data as required by law.
+              </p>
+            </section>
+
+            <section className="space-y-3 mb-10">
+              <h2 className="font-display text-lg text-[#0A0A0A]">where your data lives</h2>
+              <p className="text-sm text-black/45 leading-relaxed">
+                plurum is operated from the united states, and our providers
+                (supabase, vercel, openai) process data there. if you use plurum
+                from the eu, uk, or elsewhere, your data is transferred to and
+                processed in the us. where required, those transfers rely on
+                appropriate safeguards such as standard contractual clauses.
+              </p>
+            </section>
+
+            <section className="space-y-3 mb-10">
               <h2 className="font-display text-lg text-[#0A0A0A]">your rights</h2>
               <p className="text-sm text-black/45 leading-relaxed">
                 you can update your display name and password in{" "}
@@ -120,6 +143,24 @@ export default function PrivacyPage() {
                 intact for the collective, but they will no longer surface in
                 search or listings.
               </p>
+              <p className="text-sm text-black/45 leading-relaxed">
+                depending on where you live, you may have extra rights — to
+                access, correct, export, restrict, or object to our use of your
+                data, and to withdraw consent.{" "}
+                <strong className="text-[#0A0A0A]">eu / uk (gdpr):</strong> we
+                process your data to provide the service (contract), to keep it
+                safe and prevent abuse (legitimate interests), and with your
+                consent where it applies; you can complain to your local data
+                protection authority.{" "}
+                <strong className="text-[#0A0A0A]">california (ccpa/cpra):</strong>{" "}
+                we don&apos;t sell or share your personal information and
+                won&apos;t discriminate against you for exercising your rights.
+                to use any of these, email{" "}
+                <a href="mailto:plurum@dunelabs.co" className="text-[#0A0A0A] hover:underline">
+                  plurum@dunelabs.co
+                </a>
+                .
+              </p>
             </section>
 
             <section className="space-y-3 mb-10">
@@ -128,6 +169,31 @@ export default function PrivacyPage() {
                 we use first-party cookies for authentication (keeping you
                 signed in). no third-party tracking cookies. no advertising
                 pixels.
+              </p>
+            </section>
+
+            <section className="space-y-3 mb-10">
+              <h2 className="font-display text-lg text-[#0A0A0A]">how long we keep it</h2>
+              <p className="text-sm text-black/45 leading-relaxed">
+                we keep account data while your account is active. request logs
+                are kept up to 30 days. if you delete your account, we remove
+                your personal data within 30 days — except where we must keep it
+                to comply with the law or resolve disputes. published
+                experiences are archived rather than hard-deleted, so the
+                collective&apos;s quality signals stay intact.
+              </p>
+            </section>
+
+            <section className="space-y-3 mb-10">
+              <h2 className="font-display text-lg text-[#0A0A0A]">children</h2>
+              <p className="text-sm text-black/45 leading-relaxed">
+                plurum isn&apos;t for anyone under 13 (or under 16 in the eu),
+                and we don&apos;t knowingly collect data from children. if you
+                think a child has given us data, email{" "}
+                <a href="mailto:plurum@dunelabs.co" className="text-[#0A0A0A] hover:underline">
+                  plurum@dunelabs.co
+                </a>{" "}
+                and we&apos;ll delete it.
               </p>
             </section>
 
