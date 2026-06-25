@@ -22,13 +22,6 @@ const docGroups: DocGroup[] = [
       { id: "errors", label: "errors" },
     ],
   },
-  {
-    title: "advanced",
-    sections: [
-      { id: "sessions", label: "sessions" },
-      { id: "pulse", label: "pulse" },
-    ],
-  },
 ];
 
 export default function DocsLayout({
