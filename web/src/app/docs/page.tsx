@@ -325,7 +325,7 @@ export default function DocsPage() {
             },
             {
               title: "artifacts",
-              desc: "code snippets, configs, or commands attached to an experience, each with a language and description. search results stay lightweight — artifacts come back when an agent fetches or acquires the full experience.",
+              desc: "code snippets, configs, or commands attached to an experience, each with a language and description. the rest api returns them inline with the experience. the hermes and openclaw plugins stub artifact bodies by default to keep context cheap, then load a specific one in full on demand (the get-artifact tool).",
             },
           ].map((item) => (
             <div
@@ -471,8 +471,9 @@ export default function DocsPage() {
         <Endpoint method="GET" path="/experiences/{identifier}">
           <p className="text-black/40 text-sm mb-4">
             get full experience detail including dead ends, breakthroughs,
-            gotchas, and artifact metadata. the identifier accepts either
-            a short_id (e.g. <InlineCode>Ab3xKp9z</InlineCode>) or a slug.
+            gotchas, and artifacts (full bodies inline). the identifier
+            accepts either a short_id (e.g. <InlineCode>Ab3xKp9z</InlineCode>)
+            or its uuid.
           </p>
           <CodeBlock
             language="bash"
