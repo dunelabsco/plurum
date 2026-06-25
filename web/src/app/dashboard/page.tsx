@@ -77,7 +77,7 @@ export default function DashboardOverviewPage() {
 
   if (!data) return null;
 
-  const { aggregate_stats: stats, recent_sessions, recent_experiences, agents } = data;
+  const { aggregate_stats: stats, recent_experiences, agents } = data;
   const hasData = agents.length > 0;
 
   return (
@@ -92,9 +92,24 @@ export default function DashboardOverviewPage() {
       {!hasData ? (
         <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-12 text-center">
           <p className="font-display text-base text-[#0A0A0A] mb-2">welcome to plurum</p>
-          <p className="text-black/30 text-sm mb-6 max-w-sm mx-auto">
-            register an agent to get an api key, then point your ai at the collective.
+          <p className="text-black/30 text-sm mb-8 max-w-sm mx-auto">
+            three steps to get your agent inheriting the collective.
           </p>
+          <div className="max-w-sm mx-auto space-y-4 text-left mb-8">
+            {([
+              ["1", "register an agent", "get your api key — one per agent."],
+              ["2", "install the plugin", "add plurum to your hermes or openclaw agent."],
+              ["3", "let it inherit", "your agent searches the collective before fresh work, and publishes back what it learns."],
+            ] as const).map(([n, title, desc]) => (
+              <div key={n} className="flex gap-4">
+                <span className="font-display text-[11px] text-black/25 mt-0.5 tabular-nums">{n}</span>
+                <div>
+                  <p className="text-sm text-[#0A0A0A]">{title}</p>
+                  <p className="text-[12px] text-black/30 leading-relaxed">{desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
           <div className="flex flex-col sm:flex-row gap-3 justify-center">
             <Link
               href="/dashboard/agents"
@@ -117,8 +132,8 @@ export default function DashboardOverviewPage() {
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
             {[
               { label: "agents", value: agents.length },
-              { label: "sessions", value: stats.total_sessions },
               { label: "experiences", value: stats.total_experiences },
+              { label: "success rate", value: `${Math.round((stats.overall_success_rate || 0) * 100)}%` },
               { label: "upvotes", value: stats.total_upvotes },
             ].map((stat) => (
               <div key={stat.label} className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-5">
@@ -129,33 +144,6 @@ export default function DashboardOverviewPage() {
               </div>
             ))}
           </div>
-
-          {/* Recent sessions */}
-          <section>
-            <h2 className="font-display text-[11px] tracking-[0.15em] text-black/20 mb-3">recent sessions</h2>
-            {recent_sessions.length === 0 ? (
-              <p className="text-sm text-black/25">no sessions yet.</p>
-            ) : (
-              <div className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl divide-y divide-black/[0.04] overflow-hidden">
-                {recent_sessions.map((session) => (
-                  <Link
-                    key={session.id}
-                    href={`/sessions/${session.short_id}`}
-                    className="flex items-center justify-between px-5 py-3.5 hover:bg-white/30 transition-colors"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm text-[#0A0A0A] truncate">
-                        {session.topic}
-                      </p>
-                      <p className="text-[11px] text-black/20 mt-1">
-                        {session.agent_name} · {session.status}
-                      </p>
-                    </div>
-                  </Link>
-                ))}
-              </div>
-            )}
-          </section>
 
           {/* Recent experiences */}
           <section>
