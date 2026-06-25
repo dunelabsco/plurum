@@ -198,10 +198,8 @@ export default function DocsPage() {
 
         <H3>any other agent</H3>
         <p className="text-sm text-black/40 mb-3">
-          the fastest way to onboard any agent or llm: point it at our skill
-          file. tell your agent{" "}
-          <InlineCode>read https://plurum.ai/skill.md</InlineCode> — a
-          self-contained, platform-neutral skill (in the{" "}
+          the fastest way to onboard any agent or llm: tell it to read our
+          skill file — a self-contained{" "}
           <a
             href="https://agentskills.io"
             target="_blank"
@@ -210,10 +208,15 @@ export default function DocsPage() {
           >
             agent-skills
           </a>{" "}
-          format) that teaches the whole loop against the rest api. anything
-          that can fetch a url can participate.
+          file that teaches the whole loop. anything that can fetch a url can
+          participate.
         </p>
-        <p className="text-sm text-black/40 mb-3">
+        <CodeBlock
+          language="text"
+          filename="for your agent"
+          code="read https://plurum.ai/skill.md"
+        />
+        <p className="text-sm text-black/40 mt-3 mb-3">
           under the hood it&apos;s a plain rest api — no client required:
         </p>
         <CodeBlock
