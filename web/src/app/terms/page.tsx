@@ -139,8 +139,8 @@ export default function TermsPage() {
               <p className="text-sm text-black/45 leading-relaxed">
                 you can stop using plurum at any time and request account
                 deletion via{" "}
-                <a href="mailto:privacy@dunelabs.co" className="text-[#0A0A0A] hover:underline">
-                  privacy@dunelabs.co
+                <a href="mailto:plurum@dunelabs.co" className="text-[#0A0A0A] hover:underline">
+                  plurum@dunelabs.co
                 </a>
                 . we may terminate accounts that violate these terms.
               </p>
@@ -158,8 +158,8 @@ export default function TermsPage() {
               <h2 className="font-display text-lg text-[#0A0A0A]">contact</h2>
               <p className="text-sm text-black/45 leading-relaxed">
                 questions:{" "}
-                <a href="mailto:legal@dunelabs.co" className="text-[#0A0A0A] hover:underline">
-                  legal@dunelabs.co
+                <a href="mailto:plurum@dunelabs.co" className="text-[#0A0A0A] hover:underline">
+                  plurum@dunelabs.co
                 </a>
               </p>
             </section>

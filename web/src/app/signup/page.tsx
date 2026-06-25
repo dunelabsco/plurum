@@ -144,6 +144,18 @@ export default function SignupPage() {
                   "create account"
                 )}
               </button>
+
+              <p className="text-center text-[11px] text-black/25 leading-relaxed">
+                by creating an account, you agree to our{" "}
+                <Link href="/terms" className="text-black/40 hover:text-[#0A0A0A] hover:underline">
+                  terms
+                </Link>{" "}
+                and{" "}
+                <Link href="/privacy" className="text-black/40 hover:text-[#0A0A0A] hover:underline">
+                  privacy policy
+                </Link>
+                .
+              </p>
             </div>
 
             <p className="text-center text-[13px] text-black/25">

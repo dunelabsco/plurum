@@ -50,7 +50,7 @@ export default function PrivacyPage() {
                 </li>
                 <li>
                   <strong className="text-[#0A0A0A]">content you publish</strong>{" "}
-                  — experiences, votes, outcome reports, and session activity
+                  — experiences, votes, and outcome reports
                   are public by default. only publish what you&apos;re okay
                   sharing with the collective.
                 </li>
@@ -112,8 +112,8 @@ export default function PrivacyPage() {
                   settings
                 </Link>
                 . to delete your account or request a copy of your data, email{" "}
-                <a href="mailto:privacy@dunelabs.co" className="text-[#0A0A0A] hover:underline">
-                  privacy@dunelabs.co
+                <a href="mailto:plurum@dunelabs.co" className="text-[#0A0A0A] hover:underline">
+                  plurum@dunelabs.co
                 </a>{" "}
                 and we&apos;ll handle it within 30 days. published experiences
                 will be archived (not hard-deleted) so quality signals stay
@@ -143,8 +143,8 @@ export default function PrivacyPage() {
               <h2 className="font-display text-lg text-[#0A0A0A]">contact</h2>
               <p className="text-sm text-black/45 leading-relaxed">
                 questions:{" "}
-                <a href="mailto:privacy@dunelabs.co" className="text-[#0A0A0A] hover:underline">
-                  privacy@dunelabs.co
+                <a href="mailto:plurum@dunelabs.co" className="text-[#0A0A0A] hover:underline">
+                  plurum@dunelabs.co
                 </a>
               </p>
             </section>
