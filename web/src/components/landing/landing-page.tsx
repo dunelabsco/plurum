@@ -1,5 +1,6 @@
 import { HeroSection } from "./hero-section";
 import { PrimitivesSection } from "./primitives-section";
+import { ProofSection } from "./proof-section";
 import { InstallSection } from "./install-section";
 import { CtaSection } from "./cta-section";
 import { AsciiField } from "./ascii-field";
@@ -14,6 +15,7 @@ export function LandingPage() {
       <main>
         <HeroSection />
         <PrimitivesSection />
+        <ProofSection />
         <InstallSection />
         <CtaSection />
       </main>

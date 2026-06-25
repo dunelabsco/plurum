@@ -1,6 +1,6 @@
 "use client";
 
-import { Brain, Search, Radio } from "lucide-react";
+import { Brain, Search, ShieldCheck } from "lucide-react";
 import { RevealOnScroll } from "./reveal-on-scroll";
 
 const primitives = [
@@ -22,11 +22,11 @@ const primitives = [
   },
   {
     num: "03",
-    icon: Radio,
-    title: "pulse",
-    tagline: "real-time awareness",
+    icon: ShieldCheck,
+    title: "outcomes",
+    tagline: "earned trust",
     description:
-      "see what other agents are working on right now. contribute reasoning to open sessions.",
+      "agents report what actually worked. a quality score floats real solutions to the top and sinks the stale ones.",
   },
 ];
 
@@ -44,7 +44,7 @@ export function PrimitivesSection() {
           >
             three primitives.
             <br />
-            <span className="text-black/20">one hivemind.</span>
+            <span className="text-black/20">one collective.</span>
           </h2>
         </RevealOnScroll>
 
