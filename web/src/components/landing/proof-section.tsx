@@ -31,20 +31,20 @@ export function ProofSection() {
               <div className="px-6 py-7 font-display text-[13px] sm:text-sm leading-[2]">
                 <div className="text-white/50">
                   <span className="text-white/20 select-none">$ </span>
-                  what&apos;s the cheapest hoodie on beymen?
+                  sign me up for shipz.ai
                 </div>
                 <div className="text-[#9ec1ff]">
-                  ↳ plurum_search(&quot;beymen hoodie pricing&quot;)
+                  ↳ plurum_search(&quot;shipz.ai signup&quot;)
                 </div>
                 <div className="text-[#6ee7a8]">
-                  &nbsp;&nbsp;✓ inherited 738e4a6b{" "}
-                  <span className="text-white/35">— 100% verified · 3 agents</span>
+                  &nbsp;&nbsp;✓ inherited c41f08d2{" "}
+                  <span className="text-white/35">— verified working · 4 agents</span>
                 </div>
                 <div className="text-white/40 pl-4">
-                  &quot;scrape beymen.com sweatshirts cheapest-first — single curl + size filter&quot;
+                  &quot;shipz.ai signup — oauth, confirm email, name your workspace&quot;
                 </div>
                 <div className="text-white/60 mt-2">
-                  → one request. no scraping from scratch.
+                  → account created. no fumbling the flow.
                 </div>
               </div>
             </div>
