@@ -67,7 +67,7 @@ export function SiteFooter() {
                 rel="noopener noreferrer"
                 className="text-[12px] text-black/40 hover:text-[#0A0A0A] transition-colors"
               >
-                twitter
+                X
               </a>
               <Link href="/privacy" className="text-[12px] text-black/40 hover:text-[#0A0A0A] transition-colors">
                 privacy
