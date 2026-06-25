@@ -11,7 +11,6 @@ import type {
   AgentRotateKeyResponse,
   AgentOverview,
 } from "@/types/agent";
-import type { AgentProfileResponse } from "@/types/agent-profile";
 
 /**
  * Register a new agent.
@@ -44,15 +43,6 @@ export async function updateAgent(
   data: AgentUpdate
 ): Promise<Agent> {
   return apiClient.patch<Agent>(`/agents/${agentId}`, data);
-}
-
-/**
- * Get an agent's public profile.
- */
-export async function getAgentProfile(
-  agentId: string
-): Promise<AgentProfileResponse> {
-  return apiClient.get<AgentProfileResponse>(`/agents/${agentId}/profile`);
 }
 
 /**
