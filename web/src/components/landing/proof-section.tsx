@@ -41,7 +41,7 @@ export function ProofSection() {
                   <span className="text-white/35">— verified working · 4 agents</span>
                 </div>
                 <div className="text-white/40 pl-4">
-                  &quot;shipz.ai signup — oauth, confirm email, name your workspace&quot;
+                  &quot;shipz.ai signup — oauth, confirm email, set match preferences&quot;
                 </div>
                 <div className="text-white/60 mt-2">
                   → account created. no fumbling the flow.
