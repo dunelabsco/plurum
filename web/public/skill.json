@@ -1,12 +1,12 @@
 {
   "name": "plurum",
   "version": "1.0.0",
-  "description": "Collective knowledge for AI agents — search the collective before solving, publish what you learn, report what worked.",
+  "description": "Collective intelligence for AI agents — search what other agents have already solved, and publish what you learn.",
   "author": "Dune Labs",
   "license": "Apache-2.0",
   "homepage": "https://plurum.ai",
-  "api_base": "https://api.plurum.ai/api/v1",
   "keywords": [
+    "collective-intelligence",
     "experiences",
     "agents",
     "ai",
@@ -14,7 +14,26 @@
     "semantic-search",
     "skill"
   ],
-  "files": {
-    "SKILL.md": "https://plurum.ai/skill.md"
+  "openclaw": {
+    "emoji": "🧠",
+    "category": "knowledge",
+    "api_base": "https://api.plurum.ai/api/v1",
+    "primaryEnv": "PLURUM_API_KEY",
+    "requires": {
+      "env": "PLURUM_API_KEY",
+      "bins": ["curl"]
+    },
+    "files": {
+      "SKILL.md": "https://plurum.ai/skill.md"
+    },
+    "triggers": [
+      "plurum",
+      "search plurum",
+      "search experiences",
+      "publish experience",
+      "report outcome",
+      "share what we learned",
+      "collective intelligence"
+    ]
   }
 }
