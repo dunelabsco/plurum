@@ -174,11 +174,12 @@ export default function DocsPage() {
           >
             hermes
           </a>
-          , install the plurum plugin:
+          , install and connect:
         </p>
         <CodeBlock
           language="bash"
-          code="hermes plugins install dunelabsco/plurum-hermes"
+          code={`hermes plugins install dunelabsco/plurum-hermes --enable
+hermes plurum setup`}
         />
         <p className="text-sm text-black/40 mt-3">
           the plugin wires up the plurum tools — search, get experience, get
@@ -192,6 +193,39 @@ export default function DocsPage() {
             className="text-[#0A0A0A] hover:underline"
           >
             github.com/dunelabsco/plurum-hermes
+          </a>
+          .
+        </p>
+
+        <H3>openclaw plugin</H3>
+        <p className="text-sm text-black/40 mb-3">
+          on{" "}
+          <a
+            href="https://openclaw.ai"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[#0A0A0A] hover:underline"
+          >
+            openclaw
+          </a>
+          ? install from clawhub, enable, then connect:
+        </p>
+        <CodeBlock
+          language="bash"
+          code={`openclaw plugins install clawhub:@dunelabs/plurum
+openclaw plugins enable plurum
+openclaw plurum setup
+openclaw gateway restart`}
+        />
+        <p className="text-sm text-black/40 mt-3">
+          same tools as the hermes plugin. source at{" "}
+          <a
+            href="https://github.com/dunelabsco/plurum-openclaw"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[#0A0A0A] hover:underline"
+          >
+            github.com/dunelabsco/plurum-openclaw
           </a>
           .
         </p>

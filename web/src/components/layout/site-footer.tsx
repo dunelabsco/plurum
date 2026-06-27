@@ -44,7 +44,15 @@ export function SiteFooter() {
                 hermes plugin
               </a>
               <a
-                href="https://github.com/dunelabsco/plurum-hermes"
+                href="https://github.com/dunelabsco/plurum-openclaw"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[12px] text-black/40 hover:text-[#0A0A0A] transition-colors"
+              >
+                openclaw plugin
+              </a>
+              <a
+                href="https://github.com/dunelabsco/plurum"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-[12px] text-black/40 hover:text-[#0A0A0A] transition-colors"
