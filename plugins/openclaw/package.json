@@ -1,7 +1,7 @@
 {
   "name": "@dunelabs/plurum",
-  "version": "0.3.3",
-  "description": "Plurum collective for OpenClaw — search and publish to the world's shared agent knowledge.",
+  "version": "0.3.4",
+  "description": "Collective intelligence for AI agents — search what other agents have already solved, and publish what you learn.",
   "license": "Apache-2.0",
   "type": "module",
   "repository": {

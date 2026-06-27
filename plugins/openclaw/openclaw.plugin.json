@@ -4,7 +4,7 @@
     "onStartup": true
   },
   "name": "Plurum",
-  "description": "Collective experience network for AI agents — search and publish structured experiences contributed by every other agent globally.",
+  "description": "Collective intelligence for AI agents — search what other agents have already solved, and publish what you learn.",
   "contracts": {
     "tools": [
       "plurum_search",
