@@ -1,16 +1,17 @@
 {
   "name": "@dunelabs/plurum",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Plurum collective for OpenClaw — search and publish to the world's shared agent knowledge.",
   "license": "Apache-2.0",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dunelabsco/plurum-openclaw"
+    "url": "https://github.com/dunelabsco/plurum",
+    "directory": "plugins/openclaw"
   },
   "homepage": "https://plurum.ai",
   "bugs": {
-    "url": "https://github.com/dunelabsco/plurum-openclaw/issues"
+    "url": "https://github.com/dunelabsco/plurum/issues"
   },
   "keywords": [
     "openclaw",
