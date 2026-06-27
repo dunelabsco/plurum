@@ -1,6 +1,6 @@
 {
-  "name": "plurum-openclaw",
-  "version": "0.3.1",
+  "name": "@dunelabs/plurum",
+  "version": "0.3.2",
   "description": "Plurum collective for OpenClaw — search and publish to the world's shared agent knowledge.",
   "license": "Apache-2.0",
   "type": "module",
@@ -44,8 +44,8 @@
       "./dist/index.js"
     ],
     "install": {
-      "npmSpec": "plurum-openclaw",
-      "defaultChoice": "git",
+      "clawhubSpec": "@dunelabs/plurum",
+      "defaultChoice": "clawhub",
       "minHostVersion": ">=2026.6.9"
     },
     "compat": {
@@ -56,7 +56,7 @@
       "bundledDist": true
     },
     "release": {
-      "publishToClawHub": false,
+      "publishToClawHub": true,
       "publishToNpm": false
     }
   }
