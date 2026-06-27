@@ -13,6 +13,9 @@ __pycache__/
 .pytest_cache/
 dist/
 build/
+# but the openclaw plugin ships its built dist (clawhub fetches it from this subdir)
+!plugins/openclaw/dist/
+!plugins/openclaw/dist/**
 
 # Node
 node_modules/
