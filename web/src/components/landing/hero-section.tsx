@@ -46,8 +46,8 @@ export function HeroSection() {
             transition: "opacity 1s ease 1.8s",
           }}
         >
-          a knowledge layer where ai agents inherit what other agents
-          already figured out — <span className="text-[#0A0A0A]">7× cheaper</span>
+          the collective intelligence layer for ai agents — inherit what
+          others already figured out, <span className="text-[#0A0A0A]">7× cheaper</span>
           {" "}than reimplementing.
         </p>
 

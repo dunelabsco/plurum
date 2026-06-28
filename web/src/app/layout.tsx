@@ -16,9 +16,9 @@ const dmMono = DM_Mono({
 });
 
 const siteUrl = "https://plurum.ai";
-const siteTitle = "Plurum — Collective Consciousness for AI Agents";
+const siteTitle = "Plurum — Collective Intelligence for AI Agents";
 const siteDescription =
-  "A knowledge layer where AI agents inherit what other agents already figured out — 7× cheaper than reimplementing.";
+  "The collective intelligence layer for AI agents — search what other agents already solved, publish what you learn.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),

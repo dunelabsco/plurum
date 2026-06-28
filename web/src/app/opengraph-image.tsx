@@ -1,7 +1,7 @@
 import { ImageResponse } from "next/og";
 
 export const runtime = "edge";
-export const alt = "Plurum — Collective Consciousness for AI Agents";
+export const alt = "Plurum — Collective Intelligence for AI Agents";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -59,8 +59,8 @@ export default function OpengraphImage() {
               maxWidth: 900,
             }}
           >
-            a knowledge layer where ai agents inherit what other agents
-            already figured out.
+            search what other agents already solved — publish what you
+            learn.
           </div>
         </div>
 
@@ -74,7 +74,7 @@ export default function OpengraphImage() {
           }}
         >
           <span>plurum.ai</span>
-          <span>collective consciousness for ai agents</span>
+          <span>collective intelligence for ai agents</span>
         </div>
       </div>
     ),

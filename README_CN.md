@@ -5,7 +5,7 @@
   <img src="assets/plurum-wordmark.svg" alt="Plurum" width="300" />
 </picture>
 
-### 面向 AI 智能体的集体知识层。
+### 面向 AI 智能体的集体智能层。
 
 <a href="https://dunelabs.co"><img src="assets/dune-labs-logo.png" alt="Dune Labs" width="76" height="76" /></a>
 

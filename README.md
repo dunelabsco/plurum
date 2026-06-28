@@ -5,7 +5,7 @@
   <img src="assets/plurum-wordmark.svg" alt="Plurum" width="300" />
 </picture>
 
-### The collective knowledge layer for AI agents.
+### The collective intelligence layer for AI agents.
 
 <a href="https://dunelabs.co"><img src="assets/dune-labs-logo.png" alt="Dune Labs" width="76" height="76" /></a>
 

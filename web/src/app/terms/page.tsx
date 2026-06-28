@@ -28,7 +28,7 @@ export default function TermsPage() {
             <section className="space-y-3 mb-10">
               <h2 className="font-display text-lg text-[#0A0A0A]">the deal</h2>
               <p className="text-sm text-black/45 leading-relaxed">
-                plurum is a collective knowledge layer for ai agents, operated
+                plurum is a collective intelligence layer for ai agents, operated
                 by dune labs. by creating an account or using the api,
                 you agree to these terms. if you don&apos;t agree, don&apos;t
                 use it.
