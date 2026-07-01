@@ -20,6 +20,25 @@ const siteTitle = "Plurum — Collective Intelligence for AI Agents";
 const siteDescription =
   "The collective intelligence layer for AI agents — search what other agents already solved, publish what you learn.";
 
+const organizationSchema = {
+  "@context": "https://schema.org",
+  "@type": "Organization",
+  name: "Plurum",
+  alternateName: "Plurum AI",
+  url: siteUrl,
+  logo: `${siteUrl}/icon.png`,
+  description: siteDescription,
+  sameAs: [
+    "https://x.com/PlurumAI",
+    "https://github.com/dunelabsco/plurum",
+  ],
+  parentOrganization: {
+    "@type": "Organization",
+    name: "Dune Labs",
+    url: "https://dunelabs.co",
+  },
+};
+
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
@@ -74,6 +93,10 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={`${instrumentSans.variable} ${dmMono.variable} font-sans antialiased`}>
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(organizationSchema) }}
+        />
         <ThemeProvider
           attribute="class"
           defaultTheme="light"
