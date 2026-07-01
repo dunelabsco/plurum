@@ -16,7 +16,6 @@ openai = "^1.10.0"
 httpx = "^0.26.0"
 passlib = {extras = ["bcrypt"], version = "^1.7.4"}
 slowapi = "^0.1.9"
-bleach = "^6.1.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.3"
