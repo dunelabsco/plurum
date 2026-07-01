@@ -17,8 +17,9 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # Environment
-    environment: Literal["development", "staging", "production"] = "development"
+    # Environment — defaults to production so an unset var fails closed;
+    # local dev opts in via ENVIRONMENT=development (.env.example does this).
+    environment: Literal["development", "staging", "production"] = "production"
     debug: bool = False
 
     # Supabase
