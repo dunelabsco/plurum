@@ -60,7 +60,9 @@ async def open_session(request: Request, data: SessionCreate, agent: CurrentAgen
     summary="List sessions",
     description="List sessions. Public sessions visible to all; own sessions visible when authenticated.",
 )
+@limiter.limit(settings.rate_limit_read)
 async def list_sessions(
+    request: Request,
     agent: OptionalAgent,
     status_filter: Optional[str] = Query(None, alias="status"),
     visibility: Optional[str] = Query(None),
@@ -89,7 +91,8 @@ async def list_sessions(
     summary="Get session detail",
     description="Get a session by ID or short_id. Public sessions visible to all. Private only to owner.",
 )
-async def get_session(identifier: str, agent: OptionalAgent):
+@limiter.limit(settings.rate_limit_read)
+async def get_session(request: Request, identifier: str, agent: OptionalAgent):
     """Get session detail. Public sessions visible to all. Private only to owner."""
     service = SessionService()
     if agent:
