@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from app.core.exceptions import AuthorizationError, NotFoundError, ValidationError
 from app.repositories.session_repo import SessionRepository
 from app.repositories.experience_repo import ExperienceRepository
 from app.services.embedding_service import get_embedding_service
+
+logger = logging.getLogger(__name__)
 
 
 class SessionService:
@@ -56,7 +59,7 @@ class SessionService:
                 match_count=5,
             )
         except Exception:
-            pass  # Non-critical: session still opens if search fails
+            logger.warning("session open: matching-experience search failed", exc_info=True)
 
         # Find active sessions on similar topics
         active_sessions = []
@@ -66,7 +69,7 @@ class SessionService:
                 exclude_agent_id=agent_id,
             )
         except Exception:
-            pass  # Non-critical
+            logger.warning("session open: active-session match failed", exc_info=True)
 
         return {
             "session": session,
@@ -120,7 +123,7 @@ class SessionService:
             assembler = ExperienceAssembler()
             experience = assembler.assemble_from_session(session_id, agent_id)
         except Exception:
-            pass  # Non-critical: session still closes
+            logger.warning("session close: experience assembly failed", exc_info=True)
 
         result = {"session": closed_session}
         if experience:
