@@ -70,6 +70,22 @@ app.add_middleware(
 )
 
 
+# Reject oversized request bodies early
+@app.middleware("http")
+async def limit_body_size(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > settings.max_request_body_bytes:
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": "Request body too large"},
+                )
+        except ValueError:
+            pass
+    return await call_next(request)
+
+
 # Security headers on every response
 @app.middleware("http")
 async def security_headers(request: Request, call_next):

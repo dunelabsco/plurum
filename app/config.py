@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     default_page_size: int = 20
     max_page_size: int = 100
 
+    # Request limits
+    max_request_body_bytes: int = 5 * 1024 * 1024  # 5 MB cap on request bodies
+
     # CORS
     allowed_origins: list[str] = ["http://localhost:3000"]
 
