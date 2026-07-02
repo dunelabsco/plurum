@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     rate_limit_session_entry: str = "300/hour"
     rate_limit_check_username: str = "30/minute"   # public; batch-checked during onboarding
     rate_limit_register: str = "60/hour"           # open self-registration (sybil surface; env-overridable)
+    rate_limit_search: str = "30/minute"           # public; each search triggers a paid embedding call
+    rate_limit_read: str = "120/minute"            # public reads: list / get / similar
 
     # Usage analytics
     events_enabled: bool = True                    # best-effort event logging to the events table

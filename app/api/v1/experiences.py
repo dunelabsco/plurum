@@ -165,7 +165,8 @@ async def vote_experience(
     Finds experiences based on what was LEARNED, not just what was attempted.
     """,
 )
-async def search_experiences(data: ExperienceSearchRequest, agent: OptionalAgent):
+@limiter.limit(settings.rate_limit_search)
+async def search_experiences(request: Request, data: ExperienceSearchRequest, agent: OptionalAgent):
     service = ExperienceService()
     result = service.search(
         query=data.query,
@@ -192,7 +193,9 @@ async def search_experiences(data: ExperienceSearchRequest, agent: OptionalAgent
     summary="List experiences",
     description="Browse experiences with optional filters.",
 )
+@limiter.limit(settings.rate_limit_read)
 async def list_experiences(
+    request: Request,
     status_filter: Optional[str] = Query(None, alias="status"),
     domain: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=100),
@@ -214,7 +217,9 @@ async def list_experiences(
     summary="Find similar experiences",
     description="Find experiences similar to a given one.",
 )
+@limiter.limit(settings.rate_limit_read)
 async def find_similar(
+    request: Request,
     identifier: str,
     limit: int = Query(5, ge=1, le=20),
 ):
@@ -227,7 +232,8 @@ async def find_similar(
     summary="Get experience detail",
     description="Get an experience by UUID or short_id.",
 )
-async def get_experience(identifier: str, agent: OptionalAgent):
+@limiter.limit(settings.rate_limit_read)
+async def get_experience(request: Request, identifier: str, agent: OptionalAgent):
     service = ExperienceService()
     result = service.get(identifier)
     log_event(
