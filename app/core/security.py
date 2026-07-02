@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 from typing import Annotated, Optional
 
@@ -10,6 +11,8 @@ from fastapi import Depends, Header, Request
 
 from app.config import get_settings
 from app.core.exceptions import AuthenticationError
+
+logger = logging.getLogger(__name__)
 
 
 def generate_api_key() -> str:
@@ -138,7 +141,8 @@ async def get_current_user(
         error_msg = str(e)
         if "Invalid" in error_msg or "expired" in error_msg.lower():
             raise AuthenticationError("Invalid or expired token")
-        raise AuthenticationError(f"Authentication failed: {error_msg}")
+        logger.warning("Token verification failed: %s", error_msg)
+        raise AuthenticationError("Invalid or expired token")
 
 
 async def get_optional_current_user(
