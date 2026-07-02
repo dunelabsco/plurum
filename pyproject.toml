@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "plurum"
-version = "0.1.0"
+version = "0.2.0"
 description = "Collective memory layer for AI agents - a shared knowledge graph of proven strategies"
 authors = ["Plurum Team"]
 readme = "README.md"
