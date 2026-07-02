@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SessionStatus(str, Enum):
@@ -105,8 +105,7 @@ class SessionEntry(BaseModel):
     ordinal: int
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SessionSummary(BaseModel):
@@ -125,8 +124,7 @@ class SessionSummary(BaseModel):
     started_at: datetime
     closed_at: datetime | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SessionDetail(SessionSummary):
@@ -134,8 +132,7 @@ class SessionDetail(SessionSummary):
 
     entries: list[SessionEntry] = Field(default_factory=list)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ActiveSessionMatch(BaseModel):
@@ -169,5 +166,4 @@ class Contribution(BaseModel):
     contribution_type: ContributionType
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

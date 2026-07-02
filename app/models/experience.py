@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Union
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.session import Visibility
 
@@ -252,9 +252,7 @@ class ExperienceSummary(BaseModel):
     tags: list[str] = Field(default_factory=list)
     confidence: float | None = None
 
-    class Config:
-        from_attributes = True
-        populate_by_name = True
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
 class ExperienceDetail(ExperienceSummary):
@@ -274,9 +272,7 @@ class ExperienceDetail(ExperienceSummary):
     solution: str | None = None
     context_structured: ContextStructured | None = None
 
-    class Config:
-        from_attributes = True
-        populate_by_name = True
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
 class ExperienceAcquireResponse(BaseModel):

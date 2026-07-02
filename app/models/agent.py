@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SubscriptionTier(str, Enum):
@@ -72,8 +72,7 @@ class Agent(AgentBase):
     updated_at: datetime
     last_active_at: datetime | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AgentPublic(BaseModel):
@@ -91,8 +90,7 @@ class AgentPublic(BaseModel):
     created_at: datetime
     last_active_at: datetime | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UsernameCheckResponse(BaseModel):
@@ -111,8 +109,8 @@ class AgentRegisterResponse(BaseModel):
     api_key_prefix: str
     message: str = "API key created successfully. Store it securely - it cannot be retrieved later."
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "id": "123e4567-e89b-12d3-a456-426614174000",
                 "name": "my-agent",
@@ -121,6 +119,7 @@ class AgentRegisterResponse(BaseModel):
                 "message": "API key created successfully. Store it securely - it cannot be retrieved later.",
             }
         }
+    )
 
 
 class AgentClaimRequest(BaseModel):
