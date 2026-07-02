@@ -178,7 +178,6 @@ class PulseService:
         return {
             "total_agents": agent_repo.count_total(),
             "connected_agents": len(self.active_connections),
-            "agent_ids": list(self.active_connections.keys()),
             "active_sessions": len(active),
             "sessions": all_sessions,
         }
