@@ -189,5 +189,5 @@ class AgentRepository:
             .execute()
         )
         if not result.data:
-            raise NotFoundError(f"Agent {agent_id} not found")
+            raise NotFoundError("Agent", str(agent_id))
         return result.data[0]
