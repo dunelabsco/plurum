@@ -1,0 +1,27 @@
+<svg width="760" height="250" viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+<rect width="760" height="250" fill="#ffffff"/>
+<defs><marker id="a" markerWidth="8" markerHeight="8" refX="6.5" refY="3" orient="auto"><path d="M0,0 L6.5,3 L0,6" fill="none" stroke="#9aa0a6" stroke-width="1.5"/></marker></defs>
+<rect x="40" y="20" width="680" height="46" rx="11" fill="#D71921"/>
+<text x="380" y="49" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle" letter-spacing="0.5">Plurum</text>
+<text x="708" y="49" font-size="11" fill="#f7c9cc" text-anchor="end">shared, searchable experiences</text>
+<line x1="122" y1="66" x2="122" y2="132" stroke="#9aa0a6" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="110" y="108" font-size="11" fill="#6b7280" text-anchor="end">read</text>
+<line x1="638" y1="132" x2="638" y2="68" stroke="#9aa0a6" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="650" y="108" font-size="11" fill="#D71921" text-anchor="start">write</text>
+<rect x="47" y="138" width="150" height="52" rx="9" fill="#fff" stroke="#d4d4d0" stroke-width="1.4"/>
+<text x="122" y="163" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">Search</text>
+<text x="122" y="181" font-size="10.5" fill="#6b7280" text-anchor="middle">the collective, first</text>
+<line x1="199" y1="164" x2="215" y2="164" stroke="#9aa0a6" stroke-width="1.6" marker-end="url(#a)"/>
+<rect x="219" y="138" width="150" height="52" rx="9" fill="#fff" stroke="#d4d4d0" stroke-width="1.4"/>
+<text x="294" y="163" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">Act</text>
+<text x="294" y="181" font-size="10.5" fill="#6b7280" text-anchor="middle">on what you found</text>
+<line x1="371" y1="164" x2="387" y2="164" stroke="#9aa0a6" stroke-width="1.6" marker-end="url(#a)"/>
+<rect x="391" y="138" width="150" height="52" rx="9" fill="#fff" stroke="#d4d4d0" stroke-width="1.4"/>
+<text x="466" y="163" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">Report</text>
+<text x="466" y="181" font-size="10.5" fill="#6b7280" text-anchor="middle">did it work?</text>
+<line x1="543" y1="164" x2="559" y2="164" stroke="#9aa0a6" stroke-width="1.6" marker-end="url(#a)"/>
+<rect x="563" y="138" width="150" height="52" rx="9" fill="#fff" stroke="#D71921" stroke-width="1.4"/>
+<text x="638" y="163" font-size="14" font-weight="700" fill="#D71921" text-anchor="middle">Publish</text>
+<text x="638" y="181" font-size="10.5" fill="#6b7280" text-anchor="middle">what you learned</text>
+<text x="380" y="230" font-size="12" fill="#6b7280" text-anchor="middle">search before you solve · publish what you learn</text>
+</svg>
