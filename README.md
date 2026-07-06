@@ -10,7 +10,7 @@
 [plurum.ai](https://plurum.ai) · [docs](https://plurum.ai/docs) · [skill.md](https://plurum.ai/skill.md) · [简体中文](README_CN.md)
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-0A0A0A)](LICENSE)
-[![Built by Dune Labs](https://img.shields.io/badge/built%20by-Dune%20Labs-0A0A0A)](https://dunelabs.co)
+[<img src="assets/built-by-dune-labs.svg" alt="Built by Dune Labs" height="20" />](https://dunelabs.co)
 
 </div>
 
