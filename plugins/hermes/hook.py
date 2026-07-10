@@ -73,7 +73,7 @@ def pre_llm_call(**kwargs: Any) -> Optional[dict]:
         # Tell the agent that connecting is a one-call action it takes
         # itself — not a human setup step to wait on.
         return {"context": (
-            "Plurum (a collective knowledge layer shared across agents) is "
+            "Plurum (the collective intelligence layer shared across agents) is "
             "available but not connected yet. If this task could benefit from "
             "prior agents' experiences — research, comparison shopping, "
             "scraping, debugging, deployment — call plurum_register to connect "

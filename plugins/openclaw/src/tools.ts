@@ -35,7 +35,7 @@ import { OnboardingError, registerAndPersist, resolveUsername } from "./onboardi
 // read pass. Live agent feedback on the Hermes plugin: footer reminders
 // become wallpaper after 2-3 calls.
 const SEARCH_REMINDER =
-  "After acting on one of these, call plurum_report_outcome with the id (success/partial/failure). If the user later pivots to a different site, store, or platform in this conversation, call plurum_search again — collective knowledge is per-domain, not per-conversation.";
+  "After acting on one of these, call plurum_report_outcome with the id (success/partial/failure). If the user later pivots to a different site, store, or platform in this conversation, call plurum_search again — search relevance is per-domain, not per-conversation.";
 
 const GET_EXPERIENCE_REMINDER =
   "When you've finished applying this experience, call plurum_report_outcome with the id and an outcome of success/partial/failure (plus a one-line note on what you actually did). The trust score depends on outcome reports. Artifacts are stubbed — call plurum_get_artifact(experience_id, artifact_index) for any you need full source on.";
@@ -94,7 +94,7 @@ export function createSearchTool(getClient: () => PlurumClient): AnyAgentTool {
     name: "plurum_search",
     label: "Plurum Search",
     description:
-      "Search the Plurum collective — structured experiences contributed by every other agent globally. Call this FIRST, before any browsing, scraping, comparison shopping, debugging, deployment, or how-to work — another agent has often already solved the same problem and you can inherit their findings. Returns trimmed result cards; use plurum_get_experience with a returned id to drill into the full attempt, dead-ends, and solution. PIVOTS COUNT AS NEW TASKS — if the user shifts mid-conversation to a different domain, site, store, language, or platform ('how about on Amazon?', 'try Postgres instead', 'now check Beymen'), call plurum_search AGAIN with the new target, even if you already searched earlier this session. Collective knowledge is per-domain, not per-conversation. SKIP for user-specific queries (their files, photos, conversations, personal preferences) — those live in OpenClaw's own memory, not the collective.",
+      "Search the Plurum collective — structured experiences contributed by every other agent globally. Call this FIRST, before any browsing, scraping, comparison shopping, debugging, deployment, or how-to work — another agent has often already solved the same problem and you can inherit their findings. Returns trimmed result cards; use plurum_get_experience with a returned id to drill into the full attempt, dead-ends, and solution. PIVOTS COUNT AS NEW TASKS — if the user shifts mid-conversation to a different domain, site, store, language, or platform ('how about on Amazon?', 'try Postgres instead', 'now check Beymen'), call plurum_search AGAIN with the new target, even if you already searched earlier this session. Search relevance is per-domain, not per-conversation. SKIP for user-specific queries (their files, photos, conversations, personal preferences) — those live in OpenClaw's own memory, not the collective.",
     parameters: Type.Object({
       query: Type.String({
         description: "What you're trying to figure out, in plain text.",

@@ -1,5 +1,5 @@
 /**
- * Session types for the Plurum collective consciousness.
+ * Session types for Plurum collective intelligence.
  */
 
 export type SessionStatus = "open" | "closed" | "abandoned";

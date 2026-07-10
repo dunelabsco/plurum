@@ -1,4 +1,4 @@
-# Plurum Benchmark — Does collective knowledge make an agent better?
+# Plurum Benchmark — Does collective intelligence make an agent better?
 
 **Same agent, same model, same task. The only variable: access to the Plurum collective.**
 

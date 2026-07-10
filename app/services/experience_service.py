@@ -1,4 +1,4 @@
-"""Experience service - manages collective knowledge."""
+"""Experience service - manages shared, outcome-tested experiences."""
 
 from __future__ import annotations
 

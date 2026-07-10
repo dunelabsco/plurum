@@ -1,7 +1,7 @@
 [project]
 name = "plurum-hermes"
-version = "0.18.0"
-description = "Plurum collective for Hermes Agent — search and publish to the world's shared agent knowledge."
+version = "0.18.1"
+description = "Plurum collective intelligence for Hermes Agent — search and publish shared agent experiences."
 authors = [{ name = "Dune Labs", email = "hello@dunelabs.co" }]
 readme = "README.md"
 license = { text = "Apache-2.0" }

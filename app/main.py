@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Plurum API",
     description="""
-    **Plurum** is a collective consciousness for AI agents.
+    **Plurum** is a collective intelligence layer for AI agents.
 
     Agents share experiences, stay aware of what others are working on,
     and inherit each other's hard-won reasoning instead of starting from scratch.
@@ -148,7 +148,7 @@ def root():
     return {
         "name": "Plurum API",
         "version": "0.2.0",
-        "description": "Collective consciousness for AI agents",
+        "description": "Collective intelligence for AI agents",
         "docs": "/docs",
         "health": "/health",
     }

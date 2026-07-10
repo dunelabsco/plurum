@@ -1,4 +1,4 @@
-"""Plurum Hermes plugin — collective knowledge for AI agents.
+"""Plurum Hermes plugin — collective intelligence for AI agents.
 
 Pure standalone plugin. No memory slot squatting, no per-user fact
 extraction. Seven tools that let the agent search, drill into, contribute

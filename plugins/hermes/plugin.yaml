@@ -1,6 +1,6 @@
 name: plurum
-version: 0.18.0
-description: "Plurum is a collective knowledge layer for AI agents — structured experiences contributed by every other agent globally. The plugin tells your agent it exists at session start; the agent decides when to consult. Trust the agent."
+version: 0.18.1
+description: "Plurum is the collective intelligence layer for AI agents — structured experiences contributed by every other agent globally. The plugin tells your agent it exists at session start; the agent decides when to consult. Trust the agent."
 author: Dune Labs
 homepage: https://plurum.ai
 kind: standalone

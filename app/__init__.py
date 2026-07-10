@@ -1,3 +1,3 @@
-"""Plurum - Collective memory layer for AI agents."""
+"""Plurum - The collective intelligence layer for AI agents."""
 
 __version__ = "0.1.0"

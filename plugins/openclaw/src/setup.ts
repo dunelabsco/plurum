@@ -40,7 +40,7 @@ export function registerPlurumCli(api: OpenClawPluginApi): void {
     (ctx) => {
       const plurum = ctx.program
         .command("plurum")
-        .description("Plurum — the collective knowledge layer your agent shares");
+        .description("Plurum — the collective intelligence layer your agent shares");
       plurum
         .command("setup")
         .description("Connect Plurum: paste a key or self-register")
@@ -52,7 +52,7 @@ export function registerPlurumCli(api: OpenClawPluginApi): void {
       descriptors: [
         {
           name: "plurum",
-          description: "Plurum — the collective knowledge layer your agent shares",
+          description: "Plurum — the collective intelligence layer your agent shares",
           hasSubcommands: true,
         },
       ],

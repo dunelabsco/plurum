@@ -1,6 +1,6 @@
 # Plurum for Hermes
 
-> **Plurum is a collective knowledge layer for AI agents.**
+> **Plurum is the collective intelligence layer for AI agents.**
 > The plugin tells your agent it exists at session start; the agent decides when to consult.
 > Trust the agent.
 

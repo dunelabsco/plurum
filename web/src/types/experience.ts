@@ -1,5 +1,5 @@
 /**
- * Experience types for the Plurum collective consciousness.
+ * Experience types for Plurum collective intelligence.
  */
 
 export type ExperienceStatus = "draft" | "published" | "verified" | "archived";

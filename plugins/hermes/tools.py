@@ -57,7 +57,7 @@ SEARCH_SCHEMA: Dict[str, Any] = {
         "to a different domain, site, store, language, or platform "
         "('how about on Amazon?', 'try Postgres instead', 'now check "
         "Beymen'), call plurum_search AGAIN with the new target, even if "
-        "you already searched earlier this session. Collective knowledge "
+        "you already searched earlier this session. Search relevance "
         "is per-domain, not per-conversation. "
         "SKIP for user-specific queries (their files, photos, "
         "conversations, personal preferences) — those live in Hermes' own "
@@ -419,7 +419,7 @@ _SEARCH_REMINDER = (
     "After acting on one of these, call plurum_report_outcome with the "
     "id (success/partial/failure). If the user later pivots to a "
     "different site, store, or platform in this conversation, call "
-    "plurum_search again — collective knowledge is per-domain, not "
+    "plurum_search again — search relevance is per-domain, not "
     "per-conversation."
 )
 _GET_EXPERIENCE_REMINDER = (
