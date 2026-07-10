@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from uuid import UUID
 
 from fastapi import WebSocket
 

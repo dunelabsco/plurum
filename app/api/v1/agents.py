@@ -9,8 +9,7 @@ from app.services.agent_service import AgentService
 from app.repositories.event_repo import log_event
 from app.models.agent import (
     AgentCreate, AgentUpdate, AgentPublic, AgentRegisterResponse,
-    AgentClaimRequest, AgentClaimResponse, AgentReleaseResponse,
-    AgentOverviewResponse, UsernameCheckResponse,
+    AgentClaimRequest, UsernameCheckResponse,
 )
 
 router = APIRouter(prefix="/agents", tags=["Agents"])

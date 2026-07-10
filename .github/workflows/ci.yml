@@ -24,8 +24,12 @@ jobs:
         run: pipx install poetry
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
-      - name: Run tests
-        run: poetry run pytest -q
+      - name: Lint
+        run: poetry run ruff check app tests
+      - name: Run backend and Hermes plugin tests
+        run: poetry run pytest tests plugins/hermes/tests -q
+      - name: Build production image
+        run: docker build --tag plurum-ci .
 
   web:
     name: web build
@@ -49,3 +53,23 @@ jobs:
         run: npm run lint
       - name: Build
         run: npm run build
+
+  openclaw:
+    name: openclaw plugin
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/openclaw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: plugins/openclaw/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Verify tracked dist
+        run: git diff --exit-code -- dist

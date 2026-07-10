@@ -5,7 +5,6 @@ request. Writes one row to the `events` table (migration 030).
 """
 
 from typing import Optional
-from uuid import UUID
 
 from app.db.supabase_client import get_supabase_client
 from app.config import get_settings
