@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Search, Brain, TrendingUp, ArrowRight } from "lucide-react";
+import { Search, Brain, TrendingUp } from "lucide-react";
 import { toast } from "sonner";
 import { searchExperiences } from "@/lib/api/experiences";
 import type { ExperienceSearchResult } from "@/types/experience";

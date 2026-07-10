@@ -14,18 +14,34 @@ const navLinks = [
 
 export function TopNav() {
   const pathname = usePathname();
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const [mobileOpenPath, setMobileOpenPath] = useState<string | null>(null);
   const [user, setUser] = useState<{ email?: string } | null>(null);
   const [dropdownOpen, setDropdownOpen] = useState(false);
-  const [mounted, setMounted] = useState(false);
-  const supabase = createClient();
+  const [authChecked, setAuthChecked] = useState(false);
+  const [supabase] = useState(createClient);
+  const mobileOpen = mobileOpenPath === pathname;
 
   useEffect(() => {
-    setMounted(true);
-    supabase.auth.getUser().then(({ data }) => {
-      setUser(data.user ? { email: data.user.email ?? undefined } : null);
-    });
-  }, []);
+    let active = true;
+
+    async function loadUser() {
+      try {
+        const { data } = await supabase.auth.getUser();
+        if (active) {
+          setUser(data.user ? { email: data.user.email ?? undefined } : null);
+        }
+      } catch {
+        if (active) setUser(null);
+      } finally {
+        if (active) setAuthChecked(true);
+      }
+    }
+
+    void loadUser();
+    return () => {
+      active = false;
+    };
+  }, [supabase]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -34,11 +50,6 @@ export function TopNav() {
     document.addEventListener("click", handler);
     return () => document.removeEventListener("click", handler);
   }, [dropdownOpen]);
-
-  // Close mobile menu on route change
-  useEffect(() => {
-    setMobileOpen(false);
-  }, [pathname]);
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
@@ -72,7 +83,7 @@ export function TopNav() {
           </div>
 
           {/* Desktop auth area */}
-          {mounted && (
+          {authChecked && (
             <div className="hidden sm:block">
               {user ? (
                 <div className="relative">
@@ -139,7 +150,7 @@ export function TopNav() {
 
           {/* Mobile menu button */}
           <button
-            onClick={() => setMobileOpen(!mobileOpen)}
+            onClick={() => setMobileOpenPath(mobileOpen ? null : pathname)}
             className="sm:hidden text-black/40 hover:text-[#0A0A0A] transition-colors p-1"
             aria-label="Menu"
           >
@@ -154,7 +165,7 @@ export function TopNav() {
           {/* Backdrop */}
           <div
             className="fixed inset-0 z-40 bg-black/5 sm:hidden"
-            onClick={() => setMobileOpen(false)}
+            onClick={() => setMobileOpenPath(null)}
           />
           <div className="fixed z-50 top-20 left-4 right-4 sm:hidden">
             <div className="bg-white/90 backdrop-blur-xl border border-black/[0.06] rounded-2xl p-5 shadow-lg">
@@ -163,6 +174,7 @@ export function TopNav() {
                   <Link
                     key={link.href}
                     href={link.href}
+                    onClick={() => setMobileOpenPath(null)}
                     className={cn(
                       "px-4 py-3 text-sm rounded-xl transition-colors",
                       pathname.startsWith(link.href)
@@ -175,12 +187,13 @@ export function TopNav() {
                 ))}
               </nav>
 
-              {mounted && user && (
+              {authChecked && user && (
                 <>
                   <div className="my-3 border-t border-black/[0.06]" />
                   <nav className="flex flex-col gap-1">
                     <Link
                       href="/dashboard"
+                      onClick={() => setMobileOpenPath(null)}
                       className="flex items-center gap-3 px-4 py-3 text-sm text-black/35 rounded-xl active:bg-black/[0.02]"
                     >
                       <LayoutDashboard className="h-4 w-4" />
@@ -188,6 +201,7 @@ export function TopNav() {
                     </Link>
                     <Link
                       href="/dashboard/agents"
+                      onClick={() => setMobileOpenPath(null)}
                       className="flex items-center gap-3 px-4 py-3 text-sm text-black/35 rounded-xl active:bg-black/[0.02]"
                     >
                       <Key className="h-4 w-4" />
@@ -195,6 +209,7 @@ export function TopNav() {
                     </Link>
                     <Link
                       href="/dashboard/settings"
+                      onClick={() => setMobileOpenPath(null)}
                       className="flex items-center gap-3 px-4 py-3 text-sm text-black/35 rounded-xl active:bg-black/[0.02]"
                     >
                       <Settings className="h-4 w-4" />
@@ -211,11 +226,12 @@ export function TopNav() {
                 </>
               )}
 
-              {mounted && !user && (
+              {authChecked && !user && (
                 <>
                   <div className="my-3 border-t border-black/[0.06]" />
                   <Link
                     href="/signup"
+                    onClick={() => setMobileOpenPath(null)}
                     className="block px-4 py-3 text-sm text-black/50 rounded-xl active:bg-black/[0.02]"
                   >
                     sign in

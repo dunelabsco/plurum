@@ -29,28 +29,46 @@ function ResetPasswordContent() {
   const [success, setSuccess] = useState(false);
   const router = useRouter();
   const searchParams = useSearchParams();
-  const supabase = createClient();
+  const [supabase] = useState(createClient);
 
   useEffect(() => {
-    const tokenHash = searchParams.get("token_hash");
-    const type = searchParams.get("type");
+    let active = true;
 
-    if (tokenHash && type === "recovery") {
-      supabase.auth.verifyOtp({ token_hash: tokenHash, type: "recovery" }).then(({ error }) => {
-        if (error) {
-          setError("reset link is invalid or expired. please request a new one.");
+    async function verifyResetSession() {
+      try {
+        const tokenHash = searchParams.get("token_hash");
+        const type = searchParams.get("type");
+
+        if (tokenHash && type === "recovery") {
+          const { error } = await supabase.auth.verifyOtp({
+            token_hash: tokenHash,
+            type: "recovery",
+          });
+          if (!active) return;
+          if (error) {
+            setError("reset link is invalid or expired. please request a new one.");
+          }
+        } else {
+          const { data: { user } } = await supabase.auth.getUser();
+          if (!active) return;
+          if (!user) {
+            setError("no reset session found. please request a new reset link.");
+          }
         }
-        setIsVerifying(false);
-      });
-    } else {
-      supabase.auth.getUser().then(({ data: { user } }) => {
-        if (!user) {
-          setError("no reset session found. please request a new reset link.");
+      } catch {
+        if (active) {
+          setError("could not verify the reset link. please try again.");
         }
-        setIsVerifying(false);
-      });
+      } finally {
+        if (active) setIsVerifying(false);
+      }
     }
-  }, []);
+
+    void verifyResetSession();
+    return () => {
+      active = false;
+    };
+  }, [searchParams, supabase]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

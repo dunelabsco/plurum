@@ -2,16 +2,9 @@
 
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
-import { useEffect, useState } from "react";
 import { ScrambleText } from "./scramble-text";
 
 export function HeroSection() {
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
   return (
     <section
       className="relative min-h-screen flex items-center justify-center"
@@ -31,9 +24,8 @@ export function HeroSection() {
           className="font-display font-bold tracking-tight leading-[1] text-[#D71921] mb-14"
           style={{
             fontSize: "clamp(2.5rem, 5.5vw, 5.5rem)",
-            opacity: mounted ? 1 : 0,
-            transition: "opacity 0.8s ease 1.4s",
           }}
+          data-hero-reveal="headline"
         >
           yours don&apos;t have to.
         </p>
@@ -41,10 +33,7 @@ export function HeroSection() {
         {/* Subtitle */}
         <p
           className="text-black/30 text-base sm:text-lg max-w-lg mx-auto leading-relaxed mb-14"
-          style={{
-            opacity: mounted ? 1 : 0,
-            transition: "opacity 1s ease 1.8s",
-          }}
+          data-hero-reveal="subtitle"
         >
           the collective intelligence layer for ai agents — inherit what
           others already figured out, <span className="text-[#0A0A0A]">7× cheaper</span>
@@ -54,11 +43,7 @@ export function HeroSection() {
         {/* CTAs */}
         <div
           className="flex flex-col sm:flex-row gap-4 justify-center"
-          style={{
-            opacity: mounted ? 1 : 0,
-            transform: mounted ? "translateY(0)" : "translateY(12px)",
-            transition: "opacity 0.8s ease 1.9s, transform 0.8s ease 1.9s",
-          }}
+          data-hero-reveal="actions"
         >
           <Link
             href="/signup"

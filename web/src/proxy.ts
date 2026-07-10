@@ -10,7 +10,7 @@ const legacyRedirects: Record<string, string> = {
   "/agents/me": "/dashboard/agents",
 };
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Handle legacy redirects first
