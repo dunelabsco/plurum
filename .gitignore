@@ -33,6 +33,8 @@ node_modules/
 
 # Internal (kept local, not published) — root-anchored so they don't
 # match same-named dirs deeper in the tree (e.g. web/src/app/docs).
+/AGENTS.md
+/.codex/
 /CLAUDE.md
 /docs/
 /scripts/
