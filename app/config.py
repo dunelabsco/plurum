@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     # Embedding
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
+    embedding_timeout_seconds: float = 20.0
+    embedding_max_retries: int = 2
 
     # Pagination
     default_page_size: int = 20

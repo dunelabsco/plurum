@@ -2,71 +2,22 @@
 
 from __future__ import annotations
 
-import logging
-import random
-import time
 from functools import lru_cache
-from typing import Callable, TypeVar
 
-from openai import (
-    APIConnectionError,
-    APITimeoutError,
-    OpenAI,
-    RateLimitError,
-    InternalServerError,
-)
+from openai import OpenAI
 
 from app.config import get_settings
-
-logger = logging.getLogger(__name__)
-
-T = TypeVar("T")
-
-# Embeddings back experience publish/search and session topics; without retry,
-# a single OpenAI hiccup would propagate as an HTTP 500 to the caller.
-_RETRYABLE_EXCEPTIONS = (
-    RateLimitError,
-    APITimeoutError,
-    APIConnectionError,
-    InternalServerError,
-)
-_MAX_RETRIES = 5
-_BASE_BACKOFF_SECONDS = 1.0
-_MAX_BACKOFF_SECONDS = 30.0
-
-
-def _with_retry(fn: Callable[[], T]) -> T:
-    """Retry a zero-arg callable with exponential backoff + jitter on transient OpenAI errors."""
-    for attempt in range(_MAX_RETRIES):
-        try:
-            return fn()
-        except _RETRYABLE_EXCEPTIONS as e:
-            if attempt == _MAX_RETRIES - 1:
-                logger.warning(
-                    "OpenAI embedding call failed after %d attempts: %s",
-                    _MAX_RETRIES, e,
-                )
-                raise
-            backoff = min(_BASE_BACKOFF_SECONDS * (2 ** attempt), _MAX_BACKOFF_SECONDS)
-            jitter = random.uniform(0, backoff * 0.25)
-            sleep_for = backoff + jitter
-            logger.info(
-                "OpenAI embedding transient error (attempt %d/%d): %s — retrying in %.2fs",
-                attempt + 1, _MAX_RETRIES, type(e).__name__, sleep_for,
-            )
-            time.sleep(sleep_for)
-    # unreachable
-    raise RuntimeError("retry loop exited without return")
-
 
 class EmbeddingService:
     """Service for generating text embeddings using OpenAI."""
 
     def __init__(self):
         settings = get_settings()
-        # max_retries on the client covers HTTP-level retries (429, 5xx, network).
-        # Our own _with_retry wraps logical failures and adds jitter + extended attempts.
-        self.client = OpenAI(api_key=settings.openai_api_key, max_retries=3)
+        self.client = OpenAI(
+            api_key=settings.openai_api_key,
+            max_retries=settings.embedding_max_retries,
+            timeout=settings.embedding_timeout_seconds,
+        )
         self.model = settings.embedding_model
         self.dimensions = settings.embedding_dimensions
 
@@ -79,7 +30,7 @@ class EmbeddingService:
                 dimensions=self.dimensions,
             )
             return response.data[0].embedding
-        return _with_retry(_call)
+        return _call()
 
     def generate_embeddings(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for multiple texts (retries on transient errors)."""
@@ -95,7 +46,7 @@ class EmbeddingService:
             # Sort by index to maintain order
             sorted_data = sorted(response.data, key=lambda x: x.index)
             return [item.embedding for item in sorted_data]
-        return _with_retry(_call)
+        return _call()
 
     def generate_topic_embedding(
         self,

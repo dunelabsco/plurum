@@ -3,6 +3,7 @@
 from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from starlette.concurrency import run_in_threadpool
 
 from app.core.security import hash_api_key, CurrentAgent
 from app.db.supabase_client import get_supabase_client
@@ -23,7 +24,12 @@ async def _authenticate_ws(api_key: str) -> Optional[dict]:
 
     key_hash = hash_api_key(api_key)
     client = get_supabase_client()
-    result = client.table("agents").select("*").eq("api_key_hash", key_hash).execute()
+    result = await run_in_threadpool(
+        lambda: client.table("agents")
+        .select("*")
+        .eq("api_key_hash", key_hash)
+        .execute()
+    )
 
     if not result.data or not result.data[0].get("is_active"):
         return None
@@ -98,7 +104,8 @@ async def pulse_websocket(websocket: WebSocket, token: Optional[str] = Query(Non
 
                 try:
                     service = SessionService()
-                    contribution = service.add_contribution(
+                    contribution = await run_in_threadpool(
+                        service.add_contribution,
                         session_id=session_id,
                         contributor_agent_id=agent_id,
                         content=content,
@@ -128,7 +135,7 @@ async def pulse_websocket(websocket: WebSocket, token: Optional[str] = Query(Non
     summary="Pulse status",
     description="See who's connected to the pulse and what's active.",
 )
-async def pulse_status():
+def pulse_status():
     pulse = get_pulse_service()
     return pulse.get_status()
 
@@ -147,7 +154,7 @@ async def pulse_status():
     broadcast events (recent session activity in the collective).
     """,
 )
-async def get_inbox(
+def get_inbox(
     agent: CurrentAgent,
     limit: int = Query(20, ge=1, le=100),
     event_type: Optional[str] = Query(
@@ -168,7 +175,7 @@ async def get_inbox(
     summary="Mark inbox events as read",
     description="Mark specific events as read, or mark all as read.",
 )
-async def mark_inbox_read(
+def mark_inbox_read(
     data: InboxMarkReadRequest,
     agent: CurrentAgent,
 ):

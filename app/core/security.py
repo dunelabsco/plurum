@@ -50,7 +50,7 @@ def extract_bearer_token(authorization: str | None) -> str:
     return parts[1]
 
 
-async def get_current_agent(
+def get_current_agent(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict:
@@ -64,7 +64,7 @@ async def get_current_agent(
     # Check if it's an API key (starts with prefix) or a JWT
     if token.startswith(settings.api_key_prefix):
         # It's an API key - validate against database
-        agent = await _validate_api_key(token)
+        agent = _validate_api_key(token)
         # Expose to the rate limiter key func (get_agent_identifier)
         request.state.agent = agent
         return agent
@@ -73,7 +73,7 @@ async def get_current_agent(
         raise AuthenticationError("Invalid API key format")
 
 
-async def _validate_api_key(api_key: str) -> dict:
+def _validate_api_key(api_key: str) -> dict:
     """Validate an API key and return the agent."""
     from app.db.supabase_client import get_supabase_client
 
@@ -103,7 +103,7 @@ async def _validate_api_key(api_key: str) -> dict:
     return agent
 
 
-async def get_current_user(
+def get_current_user(
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict:
     """
@@ -145,7 +145,7 @@ async def get_current_user(
         raise AuthenticationError("Invalid or expired token")
 
 
-async def get_optional_current_user(
+def get_optional_current_user(
     authorization: Annotated[str | None, Header()] = None,
 ) -> Optional[dict]:
     """
@@ -156,12 +156,12 @@ async def get_optional_current_user(
         return None
 
     try:
-        return await get_current_user(authorization)
+        return get_current_user(authorization)
     except AuthenticationError:
         return None
 
 
-async def get_optional_current_agent(
+def get_optional_current_agent(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> Optional[dict]:
@@ -173,7 +173,7 @@ async def get_optional_current_agent(
         return None
 
     try:
-        return await get_current_agent(request, authorization)
+        return get_current_agent(request, authorization)
     except AuthenticationError:
         return None
 

@@ -58,7 +58,7 @@ def register_agent(request: Request, data: AgentCreate):
     Store the API key securely - it won't be shown again.
     """,
 )
-async def register_agent_authenticated(data: AgentCreate, user: CurrentUser):
+def register_agent_authenticated(data: AgentCreate, user: CurrentUser):
     """
     Register a new agent linked to a user account.
     """
@@ -87,7 +87,7 @@ def check_username(request: Request, username: str):
     summary="Get current agent profile",
     description="Get the profile of the currently authenticated agent.",
 )
-async def get_current_profile(agent: CurrentAgent):
+def get_current_profile(agent: CurrentAgent):
     """Get the current agent's profile."""
     service = AgentService()
     return service.get_profile(agent["id"])
@@ -103,7 +103,7 @@ async def get_current_profile(agent: CurrentAgent):
     **Requires authentication**: Pass your Supabase JWT in the Authorization header.
     """,
 )
-async def list_my_agents(user: CurrentUser):
+def list_my_agents(user: CurrentUser):
     """
     List all agents owned by the current user.
 
@@ -114,7 +114,7 @@ async def list_my_agents(user: CurrentUser):
 
 
 @router.get("/me/overview", status_code=status.HTTP_200_OK)
-async def get_overview(user: CurrentUser):
+def get_overview(user: CurrentUser):
     """Get dashboard overview for human user's agents."""
     service = AgentService()
     return service.get_overview(user["id"])
@@ -126,7 +126,7 @@ async def get_overview(user: CurrentUser):
     summary="Rotate API key",
     description="Generate a new API key. The old key will be immediately invalidated.",
 )
-async def rotate_api_key(agent: CurrentAgent):
+def rotate_api_key(agent: CurrentAgent):
     """Rotate the current agent's API key."""
     service = AgentService()
     return service.rotate_api_key(agent["id"])
@@ -134,7 +134,7 @@ async def rotate_api_key(agent: CurrentAgent):
 
 @router.post("/claim", status_code=status.HTTP_200_OK)
 @limiter.limit("10/hour")
-async def claim_agent(request: Request, data: AgentClaimRequest, user: CurrentUser):
+def claim_agent(request: Request, data: AgentClaimRequest, user: CurrentUser):
     """Claim an unclaimed agent using its API key."""
     service = AgentService()
     agent = service.claim_agent(data.api_key, user["id"])
@@ -160,14 +160,14 @@ async def claim_agent(request: Request, data: AgentClaimRequest, user: CurrentUs
     You can only update agents you own.
     """,
 )
-async def update_agent(agent_id: str, data: AgentUpdate, user: CurrentUser):
+def update_agent(agent_id: str, data: AgentUpdate, user: CurrentUser):
     """Update an agent's profile."""
     service = AgentService()
     return service.update(agent_id, data, owner_user_id=user["id"])
 
 
 @router.post("/{agent_id}/release", status_code=status.HTTP_200_OK)
-async def release_agent(agent_id: str, user: CurrentUser):
+def release_agent(agent_id: str, user: CurrentUser):
     """Release a claimed agent back to unclaimed state."""
     service = AgentService()
     from uuid import UUID
@@ -181,7 +181,7 @@ async def release_agent(agent_id: str, user: CurrentUser):
 
 
 @router.post("/{agent_id}/rotate-key", status_code=status.HTTP_200_OK)
-async def rotate_agent_key_as_owner(agent_id: str, user: CurrentUser):
+def rotate_agent_key_as_owner(agent_id: str, user: CurrentUser):
     """Rotate an agent's API key as its human owner."""
     service = AgentService()
     from uuid import UUID

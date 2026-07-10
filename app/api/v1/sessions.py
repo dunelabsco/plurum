@@ -3,6 +3,7 @@
 from typing import Optional
 
 from fastapi import APIRouter, Query, Request, status
+from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
 from app.core.rate_limiter import limiter
@@ -34,7 +35,8 @@ settings = get_settings()
 @limiter.limit(settings.rate_limit_session_write)
 async def open_session(request: Request, data: SessionCreate, agent: CurrentAgent):
     service = SessionService()
-    result = service.open_session(
+    result = await run_in_threadpool(
+        service.open_session,
         agent_id=agent["id"],
         topic=data.topic,
         domain=data.domain,
@@ -61,7 +63,7 @@ async def open_session(request: Request, data: SessionCreate, agent: CurrentAgen
     description="List sessions. Public sessions visible to all; own sessions visible when authenticated.",
 )
 @limiter.limit(settings.rate_limit_read)
-async def list_sessions(
+def list_sessions(
     request: Request,
     agent: OptionalAgent,
     status_filter: Optional[str] = Query(None, alias="status"),
@@ -92,7 +94,7 @@ async def list_sessions(
     description="Get a session by ID or short_id. Public sessions visible to all. Private only to owner.",
 )
 @limiter.limit(settings.rate_limit_read)
-async def get_session(request: Request, identifier: str, agent: OptionalAgent):
+def get_session(request: Request, identifier: str, agent: OptionalAgent):
     """Get session detail. Public sessions visible to all. Private only to owner."""
     service = SessionService()
     if agent:
@@ -110,7 +112,7 @@ async def get_session(request: Request, identifier: str, agent: OptionalAgent):
     summary="Update session metadata",
     description="Update tools_used or domain on an open session.",
 )
-async def update_session(session_id: str, data: SessionUpdate, agent: CurrentAgent):
+def update_session(session_id: str, data: SessionUpdate, agent: CurrentAgent):
     service = SessionService()
     return service.update_session(
         session_id=session_id,
@@ -134,7 +136,7 @@ async def update_session(session_id: str, data: SessionUpdate, agent: CurrentAge
     """,
 )
 @limiter.limit(settings.rate_limit_session_entry)
-async def log_entry(request: Request, session_id: str, data: SessionEntryCreate, agent: CurrentAgent):
+def log_entry(request: Request, session_id: str, data: SessionEntryCreate, agent: CurrentAgent):
     service = SessionService()
     return service.log_entry(
         session_id=session_id,
@@ -155,7 +157,8 @@ async def log_entry(request: Request, session_id: str, data: SessionEntryCreate,
 @limiter.limit(settings.rate_limit_session_write)
 async def close_session(request: Request, session_id: str, data: SessionClose, agent: CurrentAgent):
     service = SessionService()
-    result = service.close_session(
+    result = await run_in_threadpool(
+        service.close_session,
         session_id=session_id,
         agent_id=agent["id"],
         outcome=data.outcome,
@@ -181,7 +184,7 @@ async def close_session(request: Request, session_id: str, data: SessionClose, a
     description="Abandon a session without creating an experience.",
 )
 @limiter.limit(settings.rate_limit_session_write)
-async def abandon_session(request: Request, session_id: str, agent: CurrentAgent):
+def abandon_session(request: Request, session_id: str, agent: CurrentAgent):
     service = SessionService()
     return service.abandon_session(session_id=session_id, agent_id=agent["id"])
 
@@ -201,7 +204,8 @@ async def abandon_session(request: Request, session_id: str, agent: CurrentAgent
 )
 async def contribute(session_id: str, data: ContributionCreate, agent: CurrentAgent):
     service = SessionService()
-    contribution = service.add_contribution(
+    contribution = await run_in_threadpool(
+        service.add_contribution,
         session_id=session_id,
         contributor_agent_id=agent["id"],
         content=data.content,
@@ -210,7 +214,7 @@ async def contribute(session_id: str, data: ContributionCreate, agent: CurrentAg
 
     # Notify session owner via pulse + inbox (non-blocking)
     try:
-        session = service.session_repo.get_by_id(session_id)
+        session = await run_in_threadpool(service.session_repo.get_by_id, session_id)
         session_owner_id = str(session["agent_id"])
 
         # Real-time WS notification
@@ -221,7 +225,8 @@ async def contribute(session_id: str, data: ContributionCreate, agent: CurrentAg
         # Queue to inbox for polling agents
         from app.services.inbox_service import InboxService
         inbox = InboxService()
-        inbox.queue_contribution_event(
+        await run_in_threadpool(
+            inbox.queue_contribution_event,
             session_owner_id=session_owner_id,
             contribution=contribution,
             contributor_agent_id=str(agent["id"]),
@@ -238,6 +243,6 @@ async def contribute(session_id: str, data: ContributionCreate, agent: CurrentAg
     summary="List contributions",
     description="List contributions to your session. Only the session owner can view these.",
 )
-async def list_contributions(session_id: str, agent: CurrentAgent):
+def list_contributions(session_id: str, agent: CurrentAgent):
     service = SessionService()
     return service.list_contributions(session_id=session_id, agent_id=agent["id"])

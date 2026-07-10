@@ -44,7 +44,7 @@ def _exp_id(result) -> Optional[str]:
     """,
 )
 @limiter.limit(settings.rate_limit_experience_write)
-async def create_experience(request: Request, data: ExperienceCreate, agent: CurrentAgent):
+def create_experience(request: Request, data: ExperienceCreate, agent: CurrentAgent):
     service = ExperienceService()
     result = service.create(
         agent_id=agent["id"],
@@ -69,7 +69,7 @@ async def create_experience(request: Request, data: ExperienceCreate, agent: Cur
     """,
 )
 @limiter.limit(settings.rate_limit_acquire)
-async def acquire_experience(
+def acquire_experience(
     request: Request, identifier: str, data: ExperienceAcquire, agent: CurrentAgent,
 ):
     service = ExperienceService()
@@ -89,7 +89,7 @@ async def acquire_experience(
     description="Publish a draft experience to make it visible to the collective.",
 )
 @limiter.limit(settings.rate_limit_experience_write)
-async def publish_experience(request: Request, identifier: str, agent: CurrentAgent):
+def publish_experience(request: Request, identifier: str, agent: CurrentAgent):
     service = ExperienceService()
     result = service.publish(identifier, agent_id=agent["id"])
     log_event("publish", agent_id=agent["id"], experience_id=_exp_id(result))
@@ -105,7 +105,7 @@ async def publish_experience(request: Request, identifier: str, agent: CurrentAg
     ),
 )
 @limiter.limit(settings.rate_limit_experience_write)
-async def archive_experience(request: Request, identifier: str, agent: CurrentAgent):
+def archive_experience(request: Request, identifier: str, agent: CurrentAgent):
     service = ExperienceService()
     result = service.archive(identifier, agent_id=agent["id"])
     log_event("archive", agent_id=agent["id"], experience_id=_exp_id(result))
@@ -119,7 +119,7 @@ async def archive_experience(request: Request, identifier: str, agent: CurrentAg
     description="Report whether an experience worked for you. This feeds the quality score.",
 )
 @limiter.limit(settings.rate_limit_feedback)
-async def report_outcome(
+def report_outcome(
     request: Request, identifier: str, data: OutcomeReportCreate, agent: CurrentAgent,
 ):
     service = ExperienceService()
@@ -143,7 +143,7 @@ async def report_outcome(
     description="Upvote or downvote an experience.",
 )
 @limiter.limit(settings.rate_limit_feedback)
-async def vote_experience(
+def vote_experience(
     request: Request, identifier: str, data: ExperienceVoteCreate, agent: CurrentAgent,
 ):
     service = ExperienceService()
@@ -170,7 +170,7 @@ async def vote_experience(
     """,
 )
 @limiter.limit(settings.rate_limit_search)
-async def search_experiences(request: Request, data: ExperienceSearchRequest, agent: OptionalAgent):
+def search_experiences(request: Request, data: ExperienceSearchRequest, agent: OptionalAgent):
     service = ExperienceService()
     result = service.search(
         query=data.query,
@@ -198,7 +198,7 @@ async def search_experiences(request: Request, data: ExperienceSearchRequest, ag
     description="Browse experiences with optional filters.",
 )
 @limiter.limit(settings.rate_limit_read)
-async def list_experiences(
+def list_experiences(
     request: Request,
     agent: OptionalAgent,
     status_filter: Optional[str] = Query(None, alias="status"),
@@ -224,7 +224,7 @@ async def list_experiences(
     description="Find experiences similar to a given one.",
 )
 @limiter.limit(settings.rate_limit_read)
-async def find_similar(
+def find_similar(
     request: Request,
     identifier: str,
     agent: OptionalAgent,
@@ -244,7 +244,7 @@ async def find_similar(
     description="Get an experience by UUID or short_id.",
 )
 @limiter.limit(settings.rate_limit_read)
-async def get_experience(request: Request, identifier: str, agent: OptionalAgent):
+def get_experience(request: Request, identifier: str, agent: OptionalAgent):
     service = ExperienceService()
     result = service.get(identifier, viewer_agent_id=(agent or {}).get("id"))
     log_event(
