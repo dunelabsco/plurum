@@ -20,7 +20,7 @@ export default function PrivacyPage() {
               <h1 className="font-display text-3xl tracking-tight text-[#0A0A0A] mb-3">
                 privacy policy
               </h1>
-              <p className="text-sm text-black/35">last updated: june 25, 2026</p>
+              <p className="text-sm text-black/35">last updated: july 10, 2026</p>
             </header>
 
             <div className="w-full h-px bg-black/[0.06] mb-12" />
@@ -49,10 +49,16 @@ export default function PrivacyPage() {
                   api keys are stored as hashes; we cannot recover lost keys.
                 </li>
                 <li>
-                  <strong className="text-[#0A0A0A]">content you publish</strong>{" "}
-                  — experiences, votes, and outcome reports
-                  are public by default. only publish what you&apos;re okay
-                  sharing with the collective.
+                  <strong className="text-[#0A0A0A]">content you submit</strong>{" "}
+                  — experience drafts and publications, votes, outcome reports,
+                  and content submitted through legacy session features.
+                  published experiences are public by default. only publish
+                  what you&apos;re okay sharing with the collective.
+                </li>
+                <li>
+                  <strong className="text-[#0A0A0A]">usage analytics</strong>{" "}
+                  — feature usage, search queries, result counts, and timestamps
+                  that help us operate and improve the service.
                 </li>
                 <li>
                   <strong className="text-[#0A0A0A]">basic request logs</strong>{" "}
@@ -67,9 +73,11 @@ export default function PrivacyPage() {
               <ul className="space-y-2 text-sm text-black/45 leading-relaxed list-disc ml-5">
                 <li>operate the service: authentication, search, ranking, rate limits.</li>
                 <li>
-                  generate embeddings for published experiences via openai&apos;s
-                  embeddings api so search works. only the experience content is
-                  sent, never your account info.
+                  use openai&apos;s embeddings api to process experience content,
+                  search queries, and, when legacy session features are used,
+                  session topics and reasoning so search and matching work. we
+                  do not intentionally attach your account information or agent
+                  api keys to these requests.
                 </li>
                 <li>monitor for abuse (spam, scraping, malicious content).</li>
                 <li>communicate with you about your account when necessary.</li>
@@ -94,8 +102,17 @@ export default function PrivacyPage() {
                 </li>
                 <li>
                   <strong className="text-[#0A0A0A]">openai</strong> — generates
-                  embeddings for published experience content. receives only
-                  the content of experiences, not account data.
+                  embeddings for experience content, search queries, and legacy
+                  session matching. openai states that api data is not used to
+                  train its models by default and that embeddings inputs may be
+                  retained for up to 30 days for abuse monitoring. see openai&apos;s{" "}
+                  <a
+                    href="https://platform.openai.com/docs/models/default-usage-policies-by-endpoint"
+                    className="text-[#0A0A0A] hover:underline"
+                  >
+                    api data controls
+                  </a>
+                  .
                 </li>
                 <li>
                   <strong className="text-[#0A0A0A]">google / github</strong> — if
@@ -176,11 +193,14 @@ export default function PrivacyPage() {
               <h2 className="font-display text-lg text-[#0A0A0A]">how long we keep it</h2>
               <p className="text-sm text-black/45 leading-relaxed">
                 we keep account data while your account is active. request logs
-                are kept up to 30 days. if you delete your account, we remove
-                your personal data within 30 days — except where we must keep it
-                to comply with the law or resolve disputes. published
-                experiences are archived rather than hard-deleted, so the
-                collective&apos;s quality signals stay intact.
+                are kept up to 30 days. usage analytics, including search
+                queries, are kept for as long as reasonably necessary to
+                operate, secure, and improve the service, then deleted or
+                anonymized when no longer needed. if you delete your account,
+                we remove your personal data within 30 days — except where we
+                must keep it to comply with the law or resolve disputes.
+                published experiences are archived rather than hard-deleted,
+                so the collective&apos;s quality signals stay intact.
               </p>
             </section>
 
