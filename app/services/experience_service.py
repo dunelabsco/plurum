@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from app.core.content_security import reject_api_keys
 from app.core.exceptions import AuthorizationError, NotFoundError, ValidationError
 from app.repositories.experience_repo import (
     PUBLIC_EXPERIENCE_STATUSES,
@@ -21,6 +22,8 @@ class ExperienceService:
 
     def create(self, agent_id: UUID, data: dict) -> dict:
         """Create a new experience manually (not from a session)."""
+        reject_api_keys(data)
+
         # Generate reasoning embedding from the experience content
         reasoning_embedding = self.embedding.generate_reasoning_embedding(
             goal=data["goal"],
@@ -124,6 +127,7 @@ class ExperienceService:
                 f"Can only publish draft experiences, current status: {experience['status']}"
             )
 
+        reject_api_keys(experience)
         return self.repo.update(UUID(experience["id"]), {"status": "published"})
 
     def archive(self, identifier: str, agent_id: UUID) -> dict:
@@ -181,6 +185,7 @@ class ExperienceService:
         if env_fingerprint:
             report_data["env_fingerprint"] = env_fingerprint
 
+        reject_api_keys(report_data, path="outcome_report")
         report = self.repo.upsert_outcome_report(report_data)
 
         # Recalculate quality score (triggers auto-update metrics via DB trigger)

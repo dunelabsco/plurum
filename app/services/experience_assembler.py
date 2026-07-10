@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from app.core.content_security import reject_api_keys
 from app.repositories.session_repo import SessionRepository
 from app.repositories.experience_repo import ExperienceRepository
 from app.services.embedding_service import get_embedding_service
@@ -84,17 +85,8 @@ class ExperienceAssembler:
 
         context = "\n\n".join(context_parts) if context_parts else None
 
-        # Generate reasoning embedding
-        reasoning_embedding = self.embedding.generate_reasoning_embedding(
-            goal=session["topic"],
-            dead_ends=dead_ends or None,
-            breakthroughs=breakthroughs or None,
-            gotchas=gotchas or None,
-            context=context,
-            attempts=attempts or None,
-        )
-
-        # Create experience draft
+        # Assemble and validate all user-controlled content before it reaches
+        # the embedding provider or database.
         experience_data = {
             "session_id": str(session_id),
             "agent_id": str(agent_id),
@@ -109,9 +101,21 @@ class ExperienceAssembler:
             "status": "published" if session.get("visibility") == "public" else "draft",
             "visibility": session.get("visibility", "public"),
             "outcome": session.get("outcome"),
-            "reasoning_embedding": reasoning_embedding,
             # Auto-assembled attempts from session entries
             "attempts_json": attempts,
         }
+
+        reject_api_keys(experience_data)
+
+        experience_data["reasoning_embedding"] = (
+            self.embedding.generate_reasoning_embedding(
+                goal=session["topic"],
+                dead_ends=dead_ends or None,
+                breakthroughs=breakthroughs or None,
+                gotchas=gotchas or None,
+                context=context,
+                attempts=attempts or None,
+            )
+        )
 
         return self.experience_repo.create(experience_data)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from enum import Enum
 from typing import Union
@@ -11,33 +10,6 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.session import Visibility
-
-
-# ---------------------------------------------------------------------------
-# Secret scrubbing patterns (change 8a)
-# ---------------------------------------------------------------------------
-
-SECRET_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9]{20,}"),          # OpenAI keys
-    re.compile(r"sk-ant-[A-Za-z0-9\-]{20,}"),    # Anthropic keys
-    re.compile(r"ghp_[A-Za-z0-9]{36,}"),          # GitHub PATs
-    re.compile(r"gho_[A-Za-z0-9]{36,}"),          # GitHub OAuth
-    re.compile(r"plrm_live_[A-Za-z0-9\-_]{10,}"),# Plurum API keys
-    re.compile(r"Bearer\s+[A-Za-z0-9\-_\.]{20,}"),# Bearer tokens
-    re.compile(r"password\s*=\s*\S{4,}", re.IGNORECASE),
-    re.compile(r"AKIA[0-9A-Z]{16}"),              # AWS access keys
-]
-
-
-def scrub_text(text: str) -> None:
-    """Raise ValueError if text contains secret-like patterns."""
-    for pattern in SECRET_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            raise ValueError(
-                f"Text contains what looks like a secret ({match.group()[:12]}...). "
-                "Remove credentials before submitting."
-            )
 
 
 class ExperienceStatus(str, Enum):
@@ -146,52 +118,6 @@ class ExperienceCreate(BaseModel):
             else:
                 normalized.append(item)
         return normalized
-
-    @field_validator("goal", "solution", "context", mode="after")
-    @classmethod
-    def scrub_secrets_text(cls, v):
-        """Reject text fields that contain secret-like patterns."""
-        if v is not None:
-            scrub_text(v)
-        return v
-
-    @field_validator("attempts", mode="after")
-    @classmethod
-    def scrub_secrets_attempts(cls, v):
-        """Reject attempts that contain secret-like patterns."""
-        for attempt in v:
-            scrub_text(attempt.action)
-            scrub_text(attempt.outcome)
-            if attempt.insight:
-                scrub_text(attempt.insight)
-        return v
-
-    @field_validator("dead_ends", mode="after")
-    @classmethod
-    def scrub_secrets_dead_ends(cls, v):
-        for de in v:
-            scrub_text(de.what)
-            scrub_text(de.why)
-        return v
-
-    @field_validator("breakthroughs", mode="after")
-    @classmethod
-    def scrub_secrets_breakthroughs(cls, v):
-        for b in v:
-            scrub_text(b.insight)
-            scrub_text(b.detail)
-        return v
-
-    @field_validator("gotchas", mode="after")
-    @classmethod
-    def scrub_secrets_gotchas(cls, v):
-        for g in v:
-            if isinstance(g, Gotcha):
-                scrub_text(g.warning)
-            elif isinstance(g, dict):
-                scrub_text(g.get("warning", ""))
-        return v
-
 
 class ExperienceAcquire(BaseModel):
     """Request to acquire an experience in a specific compression format."""
