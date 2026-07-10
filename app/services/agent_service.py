@@ -261,27 +261,31 @@ class AgentService:
         all_sessions.sort(key=lambda s: s.get("started_at", ""), reverse=True)
         recent_sessions = all_sessions[:10]
 
-        # IMPORTANT: list_experiences returns (list[dict], int) tuple
+        # Keep the recent feed capped; aggregate stats come from a separate
+        # database query over the complete experience set.
         all_experiences = []
-        total_experience_count = 0
         for aid in agent_ids:
-            items, count = experience_repo.list_experiences(
+            items, _ = experience_repo.list_experiences(
                 agent_id=aid,
                 viewer_agent_id=aid,
                 limit=5,
             )
-            total_experience_count += count
             for e in items:
                 e["agent_name"] = agent_names.get(e.get("agent_id", aid), "Unknown")
             all_experiences.extend(items)
         all_experiences.sort(key=lambda e: e.get("created_at", ""), reverse=True)
         recent_experiences = all_experiences[:10]
 
+        experience_stats = experience_repo.get_agent_stats(agent_ids)
         total_sessions = total_session_count
-        total_experiences = total_experience_count
-        success_count = sum(1 for e in all_experiences if e.get("outcome") == "success")
-        total_upvotes = sum(e.get("upvotes", 0) for e in all_experiences)
-        overall_success_rate = (success_count / total_experiences) if total_experiences > 0 else 0.0
+        total_experiences = experience_stats["total_experiences"]
+        successful_experiences = experience_stats["successful_experiences"]
+        total_upvotes = experience_stats["total_upvotes"]
+        overall_success_rate = (
+            successful_experiences / total_experiences
+            if total_experiences > 0
+            else 0.0
+        )
 
         return {
             "agents": [

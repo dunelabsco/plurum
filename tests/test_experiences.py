@@ -357,3 +357,38 @@ class TestExperienceReadAccess:
             "and(visibility.eq.public,status.in.(published,verified)),"
             f"agent_id.eq.{viewer_id}"
         )
+
+    def test_agent_stats_uses_database_aggregate(self, mock_supabase):
+        agent_ids = [
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-0000-0000-000000000002",
+        ]
+        mock_supabase.rpc.return_value.execute.return_value = MagicMock(
+            data=[{
+                "total_experiences": 20,
+                "successful_experiences": 15,
+                "total_upvotes": 42,
+            }]
+        )
+
+        result = ExperienceRepository().get_agent_stats(agent_ids)
+
+        assert result == {
+            "total_experiences": 20,
+            "successful_experiences": 15,
+            "total_upvotes": 42,
+        }
+        mock_supabase.rpc.assert_called_once_with(
+            "get_agent_experience_stats",
+            {"agent_ids": agent_ids},
+        )
+
+    def test_agent_stats_empty_agent_set_skips_database(self, mock_supabase):
+        result = ExperienceRepository().get_agent_stats([])
+
+        assert result == {
+            "total_experiences": 0,
+            "successful_experiences": 0,
+            "total_upvotes": 0,
+        }
+        mock_supabase.rpc.assert_not_called()

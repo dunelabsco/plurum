@@ -232,3 +232,61 @@ class TestAgentOverview:
         """Overview requires authentication."""
         response = client.get("/api/v1/agents/me/overview")
         assert response.status_code == 401
+
+    def test_overview_uses_complete_experience_aggregates(self, mock_supabase):
+        """Stats must not be derived from the five-item recent feed."""
+        from app.repositories.agent_repo import AgentRepository
+        from app.repositories.experience_repo import ExperienceRepository
+        from app.repositories.session_repo import SessionRepository
+        from app.services.agent_service import AgentService
+
+        agent = {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "agent-1",
+            "username": "agent1",
+            "is_active": True,
+            "last_active_at": None,
+        }
+        recent = [
+            {
+                "id": f"experience-{index}",
+                "short_id": f"exp{index}",
+                "agent_id": agent["id"],
+                "goal": f"Recent experience {index}",
+                "status": "published",
+                "outcome": "failure",
+                "quality_score": 0.0,
+                "upvotes": 0,
+                "created_at": f"2026-07-0{index}T00:00:00Z",
+            }
+            for index in range(1, 6)
+        ]
+
+        with (
+            patch.object(AgentRepository, "list_by_owner", return_value=[agent]),
+            patch.object(SessionRepository, "list_by_agent", return_value=([], 0)),
+            patch.object(
+                ExperienceRepository,
+                "list_experiences",
+                return_value=(recent, 20),
+            ),
+            patch.object(
+                ExperienceRepository,
+                "get_agent_stats",
+                return_value={
+                    "total_experiences": 20,
+                    "successful_experiences": 15,
+                    "total_upvotes": 42,
+                },
+            ) as mock_stats,
+        ):
+            overview = AgentService().get_overview(MOCK_USER["id"])
+
+        assert overview["aggregate_stats"] == {
+            "total_sessions": 0,
+            "total_experiences": 20,
+            "overall_success_rate": 0.75,
+            "total_upvotes": 42,
+        }
+        assert len(overview["recent_experiences"]) == 5
+        mock_stats.assert_called_once_with([agent["id"]])

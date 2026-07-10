@@ -157,6 +157,26 @@ class ExperienceRepository:
         result = self.client.rpc("find_similar_experiences", params).execute()
         return result.data or []
 
+    def get_agent_stats(self, agent_ids: list[UUID | str]) -> dict:
+        """Return exact non-archived experience aggregates for a set of agents."""
+        if not agent_ids:
+            return {
+                "total_experiences": 0,
+                "successful_experiences": 0,
+                "total_upvotes": 0,
+            }
+
+        result = self.client.rpc(
+            "get_agent_experience_stats",
+            {"agent_ids": [str(agent_id) for agent_id in agent_ids]},
+        ).execute()
+        row = result.data[0] if result.data else {}
+        return {
+            "total_experiences": int(row.get("total_experiences") or 0),
+            "successful_experiences": int(row.get("successful_experiences") or 0),
+            "total_upvotes": int(row.get("total_upvotes") or 0),
+        }
+
     def update_quality_score(self, experience_id: UUID) -> dict:
         """Recalculate and update quality_score using Wilson lower bound.
 
