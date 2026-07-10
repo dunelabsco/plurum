@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from app.core.exceptions import AuthorizationError, ValidationError
-from app.repositories.experience_repo import ExperienceRepository
+from app.core.exceptions import AuthorizationError, NotFoundError, ValidationError
+from app.repositories.experience_repo import (
+    PUBLIC_EXPERIENCE_STATUSES,
+    ExperienceRepository,
+)
 from app.services.embedding_service import get_embedding_service
 
 
@@ -54,9 +57,9 @@ class ExperienceService:
 
         return self.repo.create(experience_data)
 
-    def get(self, identifier: str) -> dict:
+    def get(self, identifier: str, viewer_agent_id: UUID | None = None) -> dict:
         """Get an experience by UUID or short_id."""
-        return self.repo.get_by_identifier(identifier)
+        return self._get_readable_experience(identifier, viewer_agent_id)
 
     def search(
         self,
@@ -86,7 +89,12 @@ class ExperienceService:
             "total_found": len(results),
         }
 
-    def acquire(self, identifier: str, mode: str = "full") -> dict:
+    def acquire(
+        self,
+        identifier: str,
+        viewer_agent_id: UUID,
+        mode: str = "full",
+    ) -> dict:
         """Acquire an experience in a specific compression format.
 
         Modes:
@@ -95,7 +103,7 @@ class ExperienceService:
         - decision_tree: If/then structure
         - full: Complete reasoning dump
         """
-        experience = self.repo.get_by_identifier(identifier)
+        experience = self._get_readable_experience(identifier, viewer_agent_id)
 
         content = self._compress(experience, mode)
 
@@ -108,7 +116,7 @@ class ExperienceService:
 
     def publish(self, identifier: str, agent_id: UUID) -> dict:
         """Publish a draft experience to the collective."""
-        experience = self.repo.get_by_identifier(identifier)
+        experience = self._get_readable_experience(identifier, agent_id)
         self._assert_owner(experience, agent_id)
 
         if experience["status"] != "draft":
@@ -157,7 +165,7 @@ class ExperienceService:
         upsert is safe; the trigger that recomputes experience metrics
         fires on UPDATE just like INSERT.
         """
-        experience = self.repo.get_by_identifier(identifier)
+        experience = self._get_readable_experience(identifier, agent_id)
 
         report_data = {
             "experience_id": experience["id"],
@@ -182,7 +190,7 @@ class ExperienceService:
 
     def vote(self, identifier: str, agent_id: UUID, vote_type: str) -> dict:
         """Vote on an experience."""
-        experience = self.repo.get_by_identifier(identifier)
+        experience = self._get_readable_experience(identifier, agent_id)
 
         result = self.repo.upsert_vote(UUID(experience["id"]), agent_id, vote_type)
 
@@ -199,6 +207,7 @@ class ExperienceService:
         limit: int = 20,
         offset: int = 0,
         include_archived: bool = False,
+        viewer_agent_id: UUID | None = None,
     ) -> dict:
         """List experiences with filters."""
         items, total = self.repo.list_experiences(
@@ -208,6 +217,7 @@ class ExperienceService:
             limit=limit,
             offset=offset,
             include_archived=include_archived,
+            viewer_agent_id=viewer_agent_id,
         )
         return {
             "items": items,
@@ -221,9 +231,10 @@ class ExperienceService:
         self,
         identifier: str,
         limit: int = 5,
+        viewer_agent_id: UUID | None = None,
     ) -> list[dict]:
         """Find experiences similar to a given one."""
-        experience = self.repo.get_by_identifier(identifier)
+        experience = self._get_readable_experience(identifier, viewer_agent_id)
         if not experience.get("reasoning_embedding"):
             return []
 
@@ -349,6 +360,28 @@ class ExperienceService:
     # -----------------------------------------------------------------------
     # Helpers
     # -----------------------------------------------------------------------
+
+    def _get_readable_experience(
+        self,
+        identifier: str,
+        viewer_agent_id: UUID | None,
+    ) -> dict:
+        """Return an experience only when it is public or owned by the viewer."""
+        experience = self.repo.get_by_identifier(identifier)
+
+        is_owner = viewer_agent_id is not None and (
+            str(experience["agent_id"]) == str(viewer_agent_id)
+        )
+        is_public = (
+            experience.get("visibility") == "public"
+            and experience.get("status") in PUBLIC_EXPERIENCE_STATUSES
+        )
+
+        if not is_owner and not is_public:
+            # Use 404 so callers cannot probe whether a private identifier exists.
+            raise NotFoundError("Experience", identifier)
+
+        return experience
 
     @staticmethod
     def _assert_owner(experience: dict, agent_id: UUID) -> None:

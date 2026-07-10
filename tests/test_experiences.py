@@ -2,6 +2,12 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from app.core.exceptions import NotFoundError
+from app.repositories.experience_repo import ExperienceRepository
+from app.services.experience_service import ExperienceService
+
 
 class TestExperiencePublicEndpoints:
     """Public endpoints should work WITHOUT authentication."""
@@ -48,6 +54,7 @@ class TestExperiencePublicEndpoints:
                 limit=10,
                 offset=0,
                 include_archived=False,
+                viewer_agent_id=None,
             )
 
     def test_get_experience_no_auth(self, client, mock_supabase):
@@ -66,6 +73,7 @@ class TestExperiencePublicEndpoints:
             assert response.status_code == 200
             data = response.json()
             assert data["short_id"] == "Ab3xKp9z"
+            mock_get.assert_called_once_with("Ab3xKp9z", viewer_agent_id=None)
 
     def test_find_similar_no_auth(self, client, mock_supabase):
         """Find similar is public."""
@@ -75,7 +83,11 @@ class TestExperiencePublicEndpoints:
             response = client.get("/api/v1/experiences/Ab3xKp9z/similar?limit=3")
 
             assert response.status_code == 200
-            mock_similar.assert_called_once_with("Ab3xKp9z", limit=3)
+            mock_similar.assert_called_once_with(
+                "Ab3xKp9z",
+                limit=3,
+                viewer_agent_id=None,
+            )
 
 
 class TestExperienceAuthRequired:
@@ -189,3 +201,159 @@ class TestExperienceSearch:
         )
         # Pydantic validation should reject empty query
         assert response.status_code == 422
+
+
+class TestExperienceReadAccess:
+    """Visibility and lifecycle status must be enforced by the API layer."""
+
+    @staticmethod
+    def experience(**overrides):
+        data = {
+            "id": "00000000-0000-0000-0000-000000000100",
+            "short_id": "Ab3xKp9z",
+            "agent_id": "00000000-0000-0000-0000-000000000001",
+            "goal": "Deploy Docker safely",
+            "visibility": "public",
+            "status": "published",
+            "reasoning_embedding": [0.1] * 1536,
+        }
+        data.update(overrides)
+        return data
+
+    def test_public_published_experience_is_readable(self, mock_supabase, mock_openai):
+        experience = self.experience()
+        with patch.object(
+            ExperienceRepository,
+            "get_by_identifier",
+            return_value=experience,
+        ):
+            assert ExperienceService().get("Ab3xKp9z") == experience
+
+    @pytest.mark.parametrize(
+        ("visibility", "status"),
+        [
+            ("private", "published"),
+            ("team", "published"),
+            ("public", "draft"),
+            ("public", "archived"),
+        ],
+    )
+    def test_nonpublic_experience_is_hidden(
+        self,
+        mock_supabase,
+        mock_openai,
+        visibility,
+        status,
+    ):
+        experience = self.experience(visibility=visibility, status=status)
+        with patch.object(
+            ExperienceRepository,
+            "get_by_identifier",
+            return_value=experience,
+        ), pytest.raises(NotFoundError):
+            ExperienceService().get("Ab3xKp9z")
+
+    def test_owner_can_read_own_private_draft(self, mock_supabase, mock_openai):
+        experience = self.experience(visibility="private", status="draft")
+        with patch.object(
+            ExperienceRepository,
+            "get_by_identifier",
+            return_value=experience,
+        ):
+            result = ExperienceService().get(
+                "Ab3xKp9z",
+                viewer_agent_id=experience["agent_id"],
+            )
+        assert result == experience
+
+    def test_private_experience_route_returns_404(self, client):
+        experience = self.experience(visibility="private")
+        with patch.object(
+            ExperienceRepository,
+            "get_by_identifier",
+            return_value=experience,
+        ):
+            response = client.get("/api/v1/experiences/Ab3xKp9z")
+
+        assert response.status_code == 404
+
+    def test_unrelated_agent_cannot_acquire_private_experience(
+        self,
+        mock_supabase,
+        mock_openai,
+    ):
+        experience = self.experience(visibility="private")
+        with patch.object(
+            ExperienceRepository,
+            "get_by_identifier",
+            return_value=experience,
+        ), pytest.raises(NotFoundError):
+            ExperienceService().acquire(
+                "Ab3xKp9z",
+                viewer_agent_id="00000000-0000-0000-0000-000000000002",
+            )
+
+    @pytest.mark.parametrize("action", ["vote", "report_outcome"])
+    def test_unrelated_agent_cannot_send_feedback_on_private_experience(
+        self,
+        mock_supabase,
+        mock_openai,
+        action,
+    ):
+        experience = self.experience(visibility="private")
+        service = ExperienceService()
+        with patch.object(
+            ExperienceRepository,
+            "get_by_identifier",
+            return_value=experience,
+        ), pytest.raises(NotFoundError):
+            if action == "vote":
+                service.vote(
+                    "Ab3xKp9z",
+                    agent_id="00000000-0000-0000-0000-000000000002",
+                    vote_type="up",
+                )
+            else:
+                service.report_outcome(
+                    "Ab3xKp9z",
+                    agent_id="00000000-0000-0000-0000-000000000002",
+                    success=True,
+                )
+
+    def test_public_list_applies_visibility_and_status_filters(
+        self,
+        mock_supabase,
+    ):
+        query = MagicMock()
+        mock_supabase.table.return_value.select.return_value = query
+        query.eq.return_value = query
+        query.in_.return_value = query
+        query.neq.return_value = query
+        query.order.return_value = query
+        query.range.return_value = query
+        query.execute.return_value = MagicMock(data=[], count=0)
+
+        ExperienceRepository().list_experiences()
+
+        query.eq.assert_any_call("visibility", "public")
+        query.in_.assert_called_once_with("status", ["published", "verified"])
+
+    def test_authenticated_list_includes_public_records_or_owners_records(
+        self,
+        mock_supabase,
+    ):
+        viewer_id = "00000000-0000-0000-0000-000000000001"
+        query = MagicMock()
+        mock_supabase.table.return_value.select.return_value = query
+        query.or_.return_value = query
+        query.neq.return_value = query
+        query.order.return_value = query
+        query.range.return_value = query
+        query.execute.return_value = MagicMock(data=[], count=0)
+
+        ExperienceRepository().list_experiences(viewer_agent_id=viewer_id)
+
+        query.or_.assert_called_once_with(
+            "and(visibility.eq.public,status.in.(published,verified)),"
+            f"agent_id.eq.{viewer_id}"
+        )

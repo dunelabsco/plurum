@@ -265,7 +265,11 @@ class AgentService:
         all_experiences = []
         total_experience_count = 0
         for aid in agent_ids:
-            items, count = experience_repo.list_experiences(agent_id=aid, limit=5)
+            items, count = experience_repo.list_experiences(
+                agent_id=aid,
+                viewer_agent_id=aid,
+                limit=5,
+            )
             total_experience_count += count
             for e in items:
                 e["agent_name"] = agent_names.get(e.get("agent_id", aid), "Unknown")

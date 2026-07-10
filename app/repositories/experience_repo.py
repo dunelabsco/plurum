@@ -7,6 +7,8 @@ from uuid import UUID
 from app.db.supabase_client import get_supabase_client
 from app.core.exceptions import NotFoundError, PlurimException
 
+PUBLIC_EXPERIENCE_STATUSES = ("published", "verified")
+
 
 class ExperienceRepository:
     """Repository for experience, outcome report, and vote database operations."""
@@ -65,16 +67,29 @@ class ExperienceRepository:
         limit: int = 20,
         offset: int = 0,
         include_archived: bool = False,
+        viewer_agent_id: UUID | None = None,
     ) -> tuple[list[dict], int]:
-        """List experiences with optional filters."""
+        """List experiences visible to the viewer, with optional filters."""
         query = (
             self.client.table("experiences")
             .select("*", count="exact")
         )
 
+        if viewer_agent_id:
+            public_statuses = ",".join(PUBLIC_EXPERIENCE_STATUSES)
+            query = query.or_(
+                "and(visibility.eq.public,"
+                f"status.in.({public_statuses})),"
+                f"agent_id.eq.{viewer_agent_id}"
+            )
+        else:
+            query = query.eq("visibility", "public").in_(
+                "status", list(PUBLIC_EXPERIENCE_STATUSES)
+            )
+
         if status:
             query = query.eq("status", status)
-        elif not include_archived:
+        if not include_archived:
             query = query.neq("status", "archived")
 
         if domain:

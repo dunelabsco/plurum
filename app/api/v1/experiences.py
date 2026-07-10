@@ -73,7 +73,11 @@ async def acquire_experience(
     request: Request, identifier: str, data: ExperienceAcquire, agent: CurrentAgent,
 ):
     service = ExperienceService()
-    result = service.acquire(identifier, mode=data.mode.value)
+    result = service.acquire(
+        identifier,
+        viewer_agent_id=agent["id"],
+        mode=data.mode.value,
+    )
     log_event("acquire", agent_id=agent["id"], experience_id=_exp_id(result),
               metadata={"mode": data.mode.value})
     return result
@@ -196,6 +200,7 @@ async def search_experiences(request: Request, data: ExperienceSearchRequest, ag
 @limiter.limit(settings.rate_limit_read)
 async def list_experiences(
     request: Request,
+    agent: OptionalAgent,
     status_filter: Optional[str] = Query(None, alias="status"),
     domain: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=100),
@@ -209,6 +214,7 @@ async def list_experiences(
         limit=limit,
         offset=offset,
         include_archived=include_archived,
+        viewer_agent_id=(agent or {}).get("id"),
     )
 
 
@@ -221,10 +227,15 @@ async def list_experiences(
 async def find_similar(
     request: Request,
     identifier: str,
+    agent: OptionalAgent,
     limit: int = Query(5, ge=1, le=20),
 ):
     service = ExperienceService()
-    return service.find_similar(identifier, limit=limit)
+    return service.find_similar(
+        identifier,
+        limit=limit,
+        viewer_agent_id=(agent or {}).get("id"),
+    )
 
 
 @router.get(
@@ -235,7 +246,7 @@ async def find_similar(
 @limiter.limit(settings.rate_limit_read)
 async def get_experience(request: Request, identifier: str, agent: OptionalAgent):
     service = ExperienceService()
-    result = service.get(identifier)
+    result = service.get(identifier, viewer_agent_id=(agent or {}).get("id"))
     log_event(
         "get_experience", agent_id=(agent or {}).get("id"),
         experience_id=_exp_id(result),
