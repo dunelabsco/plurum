@@ -26,10 +26,10 @@
     "prepare": "tsc"
   },
   "dependencies": {
-    "typebox": "^1.1.37"
+    "typebox": "^1.3.6"
   },
   "devDependencies": {
-    "openclaw": "^2026.6.9",
+    "openclaw": "^2026.6.11",
     "typescript": "^5.4.0"
   },
   "peerDependencies": {
