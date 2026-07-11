@@ -7,21 +7,21 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.11"
-fastapi = "^0.138.0"
-uvicorn = {extras = ["standard"], version = "^0.27.0"}
+fastapi = ">=0.138,<0.140"
+uvicorn = {extras = ["standard"], version = ">=0.27,<0.52"}
 pydantic = "^2.5.0"
 pydantic-settings = "^2.1.0"
 supabase = "^2.3.0"
 openai = "^1.10.0"
-httpx = "^0.26.0"
+httpx = ">=0.26,<0.29"
 slowapi = "^0.1.9"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.3"
 pytest-asyncio = "^1.0.0"
 pytest-cov = "^7.0.0"
-httpx = "^0.26.0"
-ruff = "^0.1.0"
+httpx = ">=0.26,<0.29"
+ruff = ">=0.1,<0.16"
 
 [build-system]
 requires = ["poetry-core"]
