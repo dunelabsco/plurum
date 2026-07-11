@@ -6,6 +6,7 @@ from uuid import UUID
 
 from app.db.supabase_client import get_supabase_client
 from app.core.exceptions import NotFoundError, PlurimException
+from app.models.experience_views import EXPERIENCE_LIST_SELECT
 
 PUBLIC_EXPERIENCE_STATUSES = ("published", "verified")
 
@@ -72,7 +73,7 @@ class ExperienceRepository:
         """List experiences visible to the viewer, with optional filters."""
         query = (
             self.client.table("experiences")
-            .select("*", count="exact")
+            .select(EXPERIENCE_LIST_SELECT, count="exact")
         )
 
         if viewer_agent_id:

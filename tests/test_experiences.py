@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.core.exceptions import NotFoundError
+from app.models.experience_views import EXPERIENCE_LIST_SELECT
 from app.repositories.experience_repo import ExperienceRepository
 from app.services.experience_service import ExperienceService
 
@@ -227,7 +228,11 @@ class TestExperienceReadAccess:
             "get_by_identifier",
             return_value=experience,
         ):
-            assert ExperienceService().get("Ab3xKp9z") == experience
+            result = ExperienceService().get("Ab3xKp9z")
+
+        assert result["id"] == experience["id"]
+        assert result["goal"] == experience["goal"]
+        assert "reasoning_embedding" not in result
 
     @pytest.mark.parametrize(
         ("visibility", "status"),
@@ -264,7 +269,10 @@ class TestExperienceReadAccess:
                 "Ab3xKp9z",
                 viewer_agent_id=experience["agent_id"],
             )
-        assert result == experience
+        assert result["id"] == experience["id"]
+        assert result["visibility"] == "private"
+        assert result["status"] == "draft"
+        assert "reasoning_embedding" not in result
 
     def test_private_experience_route_returns_404(self, client):
         experience = self.experience(visibility="private")
@@ -335,6 +343,10 @@ class TestExperienceReadAccess:
 
         ExperienceRepository().list_experiences()
 
+        mock_supabase.table.return_value.select.assert_called_once_with(
+            EXPERIENCE_LIST_SELECT,
+            count="exact",
+        )
         query.eq.assert_any_call("visibility", "public")
         query.in_.assert_called_once_with("status", ["published", "verified"])
 

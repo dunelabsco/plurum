@@ -6,6 +6,11 @@ from uuid import UUID
 
 from app.core.content_security import reject_api_keys
 from app.core.exceptions import AuthorizationError, NotFoundError, ValidationError
+from app.models.experience_views import (
+    experience_detail,
+    experience_list_item,
+    experience_search_result,
+)
 from app.repositories.experience_repo import (
     PUBLIC_EXPERIENCE_STATUSES,
     ExperienceRepository,
@@ -58,11 +63,13 @@ class ExperienceService:
             "context_structured": data.get("context_structured"),
         }
 
-        return self.repo.create(experience_data)
+        return experience_detail(self.repo.create(experience_data))
 
     def get(self, identifier: str, viewer_agent_id: UUID | None = None) -> dict:
         """Get an experience by UUID or short_id."""
-        return self._get_readable_experience(identifier, viewer_agent_id)
+        return experience_detail(
+            self._get_readable_experience(identifier, viewer_agent_id)
+        )
 
     def search(
         self,
@@ -88,7 +95,7 @@ class ExperienceService:
 
         return {
             "query": query,
-            "results": results,
+            "results": [experience_search_result(result) for result in results],
             "total_found": len(results),
         }
 
@@ -128,7 +135,9 @@ class ExperienceService:
             )
 
         reject_api_keys(experience)
-        return self.repo.update(UUID(experience["id"]), {"status": "published"})
+        return experience_detail(
+            self.repo.update(UUID(experience["id"]), {"status": "published"})
+        )
 
     def archive(self, identifier: str, agent_id: UUID) -> dict:
         """Archive an experience — hides from search and listings without
@@ -145,9 +154,11 @@ class ExperienceService:
         self._assert_owner(experience, agent_id)
 
         if experience["status"] == "archived":
-            return experience
+            return experience_detail(experience)
 
-        return self.repo.update(UUID(experience["id"]), {"status": "archived"})
+        return experience_detail(
+            self.repo.update(UUID(experience["id"]), {"status": "archived"})
+        )
 
     def report_outcome(
         self,
@@ -225,7 +236,7 @@ class ExperienceService:
             viewer_agent_id=viewer_agent_id,
         )
         return {
-            "items": items,
+            "items": [experience_list_item(item) for item in items],
             "total": total,
             "limit": limit,
             "offset": offset,
@@ -243,11 +254,12 @@ class ExperienceService:
         if not experience.get("reasoning_embedding"):
             return []
 
-        return self.repo.find_similar(
+        results = self.repo.find_similar(
             embedding=experience["reasoning_embedding"],
             match_count=limit,
             exclude_id=UUID(experience["id"]),
         )
+        return [experience_search_result(result) for result in results]
 
     # -----------------------------------------------------------------------
     # Compression modes

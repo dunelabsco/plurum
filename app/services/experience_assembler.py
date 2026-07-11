@@ -5,6 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from app.core.content_security import reject_api_keys
+from app.models.experience_views import experience_detail
 from app.repositories.session_repo import SessionRepository
 from app.repositories.experience_repo import ExperienceRepository
 from app.services.embedding_service import get_embedding_service
@@ -118,4 +119,4 @@ class ExperienceAssembler:
             )
         )
 
-        return self.experience_repo.create(experience_data)
+        return experience_detail(self.experience_repo.create(experience_data))
