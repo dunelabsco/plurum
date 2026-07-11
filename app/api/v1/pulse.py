@@ -1,5 +1,10 @@
 """Pulse API endpoints - real-time awareness layer."""
 
+import asyncio
+import json
+import logging
+import time
+from collections import deque
 from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
@@ -14,6 +19,56 @@ from app.models.inbox import InboxMarkReadRequest
 from app.config import get_settings
 
 router = APIRouter(prefix="/pulse", tags=["Pulse"])
+logger = logging.getLogger(__name__)
+
+
+class _MessageTooLarge(Exception):
+    pass
+
+
+class _InvalidMessage(Exception):
+    pass
+
+
+class _MessageRateLimiter:
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.timestamps: deque[float] = deque()
+
+    def allow(self) -> bool:
+        now = time.monotonic()
+        cutoff = now - 60
+        while self.timestamps and self.timestamps[0] <= cutoff:
+            self.timestamps.popleft()
+        if len(self.timestamps) >= self.limit:
+            return False
+        self.timestamps.append(now)
+        return True
+
+
+def _origin_allowed(origin: str | None, allowed_origins: list[str]) -> bool:
+    """Allow native clients without Origin; constrain browser clients."""
+    return origin is None or origin in allowed_origins
+
+
+async def _receive_json_message(websocket: WebSocket, max_bytes: int) -> dict:
+    message = await websocket.receive()
+    if message["type"] == "websocket.disconnect":
+        raise WebSocketDisconnect(message.get("code", 1000))
+
+    text = message.get("text")
+    if text is None:
+        raise _InvalidMessage
+    if len(text.encode("utf-8")) > max_bytes:
+        raise _MessageTooLarge
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise _InvalidMessage from exc
+    if not isinstance(data, dict):
+        raise _InvalidMessage
+    return data
 
 
 async def _authenticate_ws(api_key: str) -> Optional[dict]:
@@ -51,42 +106,71 @@ async def pulse_websocket(websocket: WebSocket, token: Optional[str] = Query(Non
     - session_closed: A session was closed (may include experience_id)
     - contribution_received: Another agent contributed to your session
     """
+    settings = get_settings()
+    if not _origin_allowed(websocket.headers.get("origin"), settings.allowed_origins):
+        await websocket.close(code=1008)
+        return
+
     pulse = get_pulse_service()
-    agent = None
+    agent_id: str | None = None
+    accepted = False
 
-    # Try query param auth first
-    if token:
-        agent = await _authenticate_ws(token)
+    try:
+        agent = None
 
-    if not agent:
-        # Wait for auth message
-        await websocket.accept()
-        try:
-            data = await websocket.receive_json()
+        # Legacy compatibility. Prefer first-message authentication for new
+        # clients; remove query-token support in a future announced cleanup.
+        if token:
+            agent = await _authenticate_ws(token)
+
+        if not agent:
+            await websocket.accept()
+            accepted = True
+            try:
+                data = await asyncio.wait_for(
+                    _receive_json_message(
+                        websocket,
+                        settings.pulse_max_message_bytes,
+                    ),
+                    timeout=settings.pulse_auth_timeout_seconds,
+                )
+            except TimeoutError:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Authentication timed out",
+                })
+                await websocket.close(code=4001)
+                return
+
             if data.get("type") == "auth" and data.get("api_key"):
                 agent = await _authenticate_ws(data["api_key"])
 
             if not agent:
-                await websocket.send_json({"type": "error", "message": "Authentication failed"})
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Authentication failed",
+                })
                 await websocket.close(code=4001)
                 return
 
-            # Auth successful, register connection
-            agent_id = str(agent["id"])
-            pulse.active_connections[agent_id] = websocket
-            await websocket.send_json({"type": "auth_ok", "agent_id": agent_id})
-        except (WebSocketDisconnect, Exception):
-            return
-    else:
-        # Query param auth succeeded
         agent_id = str(agent["id"])
-        await pulse.connect(websocket, agent_id)
+        await pulse.connect(websocket, agent_id, accept=not accepted)
         await websocket.send_json({"type": "auth_ok", "agent_id": agent_id})
 
-    # Main message loop
-    try:
+        rate_limiter = _MessageRateLimiter(settings.pulse_max_messages_per_minute)
         while True:
-            data = await websocket.receive_json()
+            data = await _receive_json_message(
+                websocket,
+                settings.pulse_max_message_bytes,
+            )
+            if not rate_limiter.allow():
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Message rate limit exceeded",
+                })
+                await websocket.close(code=4008)
+                return
+
             msg_type = data.get("type")
 
             if msg_type == "contribute":
@@ -115,19 +199,28 @@ async def pulse_websocket(websocket: WebSocket, token: Optional[str] = Query(Non
                         "type": "contribute_ok",
                         "data": contribution,
                     })
-                except Exception as e:
+                except Exception:
+                    logger.warning("pulse contribution failed", exc_info=True)
                     await websocket.send_json({
                         "type": "error",
-                        "message": str(e),
+                        "message": "Contribution failed",
                     })
 
             elif msg_type == "ping":
                 await websocket.send_json({"type": "pong"})
 
+    except _MessageTooLarge:
+        await websocket.close(code=1009)
+    except _InvalidMessage:
+        await websocket.send_json({"type": "error", "message": "Invalid message"})
+        await websocket.close(code=1003)
     except WebSocketDisconnect:
-        pulse.disconnect(agent_id)
+        pass
     except Exception:
-        pulse.disconnect(agent_id)
+        logger.warning("pulse websocket failed", exc_info=True)
+    finally:
+        if agent_id is not None:
+            pulse.disconnect(agent_id, websocket)
 
 
 @router.get(

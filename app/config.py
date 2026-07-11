@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     pulse_cooldown_seconds: int = 300
     pulse_max_pushes_per_minute: int = 10
     pulse_max_contributions_per_session: int = 5
+    pulse_auth_timeout_seconds: float = 10.0
+    pulse_max_message_bytes: int = 256 * 1024
+    pulse_max_messages_per_minute: int = 60
 
     @property
     def is_development(self) -> bool:

@@ -25,14 +25,30 @@ class PulseService:
 
         self.settings = get_settings()
 
-    async def connect(self, websocket: WebSocket, agent_id: str) -> None:
+    async def connect(
+        self,
+        websocket: WebSocket,
+        agent_id: str,
+        *,
+        accept: bool = True,
+    ) -> None:
         """Register an agent's WebSocket connection."""
-        await websocket.accept()
+        previous = self.active_connections.get(agent_id)
+        if previous is not None and previous is not websocket:
+            try:
+                await previous.close(code=4000)
+            except Exception:
+                pass
+
+        if accept:
+            await websocket.accept()
         self.active_connections[agent_id] = websocket
 
-    def disconnect(self, agent_id: str) -> None:
+    def disconnect(self, agent_id: str, websocket: WebSocket | None = None) -> None:
         """Remove an agent's WebSocket connection."""
-        self.active_connections.pop(agent_id, None)
+        current = self.active_connections.get(agent_id)
+        if websocket is None or current is websocket:
+            self.active_connections.pop(agent_id, None)
 
     def is_connected(self, agent_id: str) -> bool:
         """Check if an agent is connected."""
@@ -51,7 +67,7 @@ class PulseService:
             await ws.send_json(message)
             return True
         except Exception:
-            self.disconnect(agent_id)
+            self.disconnect(agent_id, ws)
             return False
 
     async def broadcast_session_opened(
@@ -87,7 +103,7 @@ class PulseService:
                 self._record_push(agent_id, domain)
                 notified += 1
             except Exception:
-                self.disconnect(agent_id)
+                self.disconnect(agent_id, ws)
 
         return notified
 
@@ -122,7 +138,7 @@ class PulseService:
                 await ws.send_json(message)
                 notified += 1
             except Exception:
-                self.disconnect(agent_id)
+                self.disconnect(agent_id, ws)
 
         return notified
 
