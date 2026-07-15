@@ -159,6 +159,7 @@ async def test_mcp_initializes_and_lists_current_tools(monkeypatch):
         PUBLISH_SCHEMA,
         REPORT_OUTCOME_SCHEMA,
         SEARCH_SCHEMA,
+        VOTE_SCHEMA,
     )
 
     monkeypatch.setattr(
@@ -177,6 +178,7 @@ async def test_mcp_initializes_and_lists_current_tools(monkeypatch):
         "plurum_get_artifact",
         "plurum_publish",
         "plurum_report_outcome",
+        "plurum_vote",
     ]
     for tool in result.tools[:3]:
         assert tool.annotations is not None
@@ -294,6 +296,33 @@ async def test_mcp_initializes_and_lists_current_tools(monkeypatch):
     assert outcome_tool.annotations.destructiveHint is False
     assert outcome_tool.annotations.idempotentHint is True
     assert outcome_tool.annotations.openWorldHint is False
+
+    vote_tool = tools_by_name["plurum_vote"]
+    assert vote_tool.title == "Vote on Plurum experience"
+    assert vote_tool.description == VOTE_SCHEMA["description"]
+    assert set(vote_tool.inputSchema["properties"]) == {
+        "experience_id",
+        "vote",
+    }
+    assert set(vote_tool.inputSchema["required"]) == {
+        "experience_id",
+        "vote",
+    }
+    assert all(
+        "default" not in field_schema
+        for field_schema in vote_tool.inputSchema["properties"].values()
+    )
+    expected_vote_properties = VOTE_SCHEMA["parameters"]["properties"]
+    for field_name, expected_schema in expected_vote_properties.items():
+        actual_schema = vote_tool.inputSchema["properties"][field_name]
+        assert actual_schema["type"] == expected_schema["type"]
+        assert actual_schema["description"] == expected_schema["description"]
+    assert vote_tool.inputSchema["properties"]["vote"]["enum"] == ["up", "down"]
+    assert vote_tool.annotations is not None
+    assert vote_tool.annotations.readOnlyHint is False
+    assert vote_tool.annotations.destructiveHint is False
+    assert vote_tool.annotations.idempotentHint is True
+    assert vote_tool.annotations.openWorldHint is False
 
 
 @pytest.mark.asyncio

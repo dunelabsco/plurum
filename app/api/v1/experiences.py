@@ -159,7 +159,10 @@ def report_outcome(
     summary="Vote on experience",
     description="Upvote or downvote an experience.",
 )
-@limiter.limit(settings.rate_limit_feedback)
+@limiter.shared_limit(
+    settings.rate_limit_feedback,
+    scope=EXPERIENCE_FEEDBACK_SCOPE,
+)
 def vote_experience(
     request: Request, identifier: str, data: ExperienceVoteCreate, agent: CurrentAgent,
 ):

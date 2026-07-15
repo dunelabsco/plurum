@@ -38,6 +38,8 @@ from app.mcp.models import (
     PublishArtifactsInput,
     PublishInput,
     ReportOutcomeInput,
+    VoteInput,
+    VoteValueInput,
 )
 from app.models.experience import ExperienceCreate
 from app.repositories.event_repo import log_event
@@ -137,6 +139,11 @@ _REPORT_OUTCOME_DESCRIPTION = (
     "reports the collective can't distinguish still-valid experiences from "
     "stale ones, and the next agent inherits noise. Use the experience id "
     "from the prior search or get_experience call."
+)
+_VOTE_DESCRIPTION = (
+    "Lightweight up/down vote on a collective experience. Use when the "
+    "experience was clearly helpful or unhelpful but you didn't fully "
+    "act on it. For acted-on experiences, prefer plurum_report_outcome."
 )
 
 _READ_ONLY_ANNOTATIONS = ToolAnnotations(
@@ -250,16 +257,21 @@ def _raise_publish_create_uncertain_tool_error(
     ) from exc.cause
 
 
-def _raise_retryable_outcome_error(exc: Exception) -> Never:
+def _raise_retryable_tool_error(
+    tool_name: str,
+    action: str,
+    exc: Exception,
+) -> Never:
     correlation_id = uuid4().hex[:12]
     logger.error(
-        "Unexpected plurum_report_outcome failure (%s, ref=%s)",
+        "Unexpected %s failure (%s, ref=%s)",
+        tool_name,
         type(exc).__name__,
         correlation_id,
     )
     raise ToolError(
-        "Outcome report could not be confirmed. Re-calling "
-        "plurum_report_outcome with the same values is safe. "
+        f"{action} could not be confirmed. Re-calling "
+        f"{tool_name} with the same values is safe. "
         f"Reference: {correlation_id}"
     ) from exc
 
@@ -413,6 +425,25 @@ def _build_outcome_data(
         note_parts.append(report_input.note[:500])
     context_notes = " | ".join(note_parts) if note_parts else None
     return identifier, normalized_outcome, context_notes
+
+
+def _build_vote_data(*, experience_id: Any, vote: Any) -> tuple[str, str]:
+    raw = {
+        "experience_id": experience_id,
+        "vote": vote,
+    }
+    reject_api_keys(raw, path="vote")
+
+    try:
+        vote_input = VoteInput.model_validate(raw)
+    except PydanticValidationError:
+        raise ValidationError("Need experience_id and vote in {up, down}.") from None
+
+    identifier = vote_input.experience_id.strip()
+    normalized_vote = vote_input.vote.strip().lower()
+    if not identifier or len(identifier) > 64 or normalized_vote not in {"up", "down"}:
+        raise ValidationError("Need experience_id and vote in {up, down}.")
+    return identifier, normalized_vote
 
 
 def _stub_experience_artifacts(experience: dict[str, Any]) -> dict[str, Any]:
@@ -672,6 +703,37 @@ def _run_report_outcome(
     return {"result": "Outcome recorded.", "id": identifier}
 
 
+def _run_vote(
+    identifier: str,
+    vote_type: str,
+    agent_id: str,
+    client: str,
+) -> dict[str, Any]:
+    enforce_agent_rate_limit(
+        agent_id=agent_id,
+        rate_limit=get_settings().rate_limit_feedback,
+        scope=EXPERIENCE_FEEDBACK_SCOPE,
+    )
+    vote = ExperienceService().vote(
+        identifier=identifier,
+        agent_id=UUID(agent_id),
+        vote_type=vote_type,
+    )
+    vote_result = vote if isinstance(vote, dict) else {}
+    canonical_id = vote_result.get("experience_id")
+    log_event(
+        "vote",
+        agent_id=agent_id,
+        experience_id=str(canonical_id) if canonical_id else None,
+        metadata={
+            "channel": "mcp",
+            "client": client,
+            "vote_type": vote_type,
+        },
+    )
+    return {"result": "Vote recorded.", "id": identifier}
+
+
 async def plurum_search(
     query: Annotated[
         str,
@@ -909,7 +971,38 @@ async def plurum_report_outcome(
     except (AuthorizationError, NotFoundError, RateLimitError, ValidationError) as exc:
         _raise_expected_tool_error(exc)
     except Exception as exc:
-        _raise_retryable_outcome_error(exc)
+        _raise_retryable_tool_error("plurum_report_outcome", "Outcome report", exc)
+
+
+async def plurum_vote(
+    experience_id: Annotated[
+        LeakSafeStringInput,
+        Field(description="id from plurum_search."),
+    ] = None,
+    vote: Annotated[
+        VoteValueInput,
+        Field(description="'up' or 'down'."),
+    ] = None,
+) -> dict[str, Any]:
+    """Record the authenticated agent's latest vote on one experience."""
+    principal = get_mcp_principal()
+    assert principal is not None
+    try:
+        identifier, normalized_vote = _build_vote_data(
+            experience_id=experience_id,
+            vote=vote,
+        )
+        return await anyio.to_thread.run_sync(
+            _run_vote,
+            identifier,
+            normalized_vote,
+            str(principal.agent["id"]),
+            principal.client,
+        )
+    except (AuthorizationError, NotFoundError, RateLimitError, ValidationError) as exc:
+        _raise_expected_tool_error(exc)
+    except Exception as exc:
+        _raise_retryable_tool_error("plurum_vote", "Vote", exc)
 
 
 def _tool(
@@ -980,6 +1073,16 @@ def build_tools() -> list[Tool]:
             description=_REPORT_OUTCOME_DESCRIPTION,
             annotations=_IDEMPOTENT_WRITE_ANNOTATIONS,
             required_fields=("experience_id", "outcome"),
+        )
+    )
+    tools.append(
+        _tool(
+            plurum_vote,
+            name="plurum_vote",
+            title="Vote on Plurum experience",
+            description=_VOTE_DESCRIPTION,
+            annotations=_IDEMPOTENT_WRITE_ANNOTATIONS,
+            required_fields=("experience_id", "vote"),
         )
     )
     return tools

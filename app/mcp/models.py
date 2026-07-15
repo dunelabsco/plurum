@@ -42,6 +42,15 @@ class ReportOutcomeInput(BaseModel):
     note: str | None = None
 
 
+class VoteInput(BaseModel):
+    """Internal strict validation after raw vote data has been scanned."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True, strict=True)
+
+    experience_id: str
+    vote: str
+
+
 # FastMCP validates function arguments before invoking the handler. Runtime `Any`
 # keeps malformed, potentially secret-bearing values inside Plurum's sanitizing
 # boundary, while WithJsonSchema preserves the precise schema clients should use.
@@ -56,6 +65,15 @@ OutcomeValueInput = Annotated[
         {
             "type": "string",
             "enum": ["success", "partial", "failure"],
+        }
+    ),
+]
+VoteValueInput = Annotated[
+    Any,
+    WithJsonSchema(
+        {
+            "type": "string",
+            "enum": ["up", "down"],
         }
     ),
 ]

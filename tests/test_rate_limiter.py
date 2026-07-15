@@ -214,13 +214,13 @@ def test_rest_create_and_publish_share_their_hosted_operation_scopes(
             )
 
 
-def test_rest_outcome_shares_feedback_scope_with_hosted_transport(
+def test_rest_feedback_actions_share_scope_with_hosted_transport(
     client,
     mock_agent,
     auth_headers,
 ):
     feedback_limit = get_settings().rate_limit_feedback
-    for _ in range(parse(feedback_limit).amount - 1):
+    for _ in range(parse(feedback_limit).amount - 2):
         enforce_agent_rate_limit(
             agent_id=mock_agent["id"],
             rate_limit=feedback_limit,
@@ -232,20 +232,35 @@ def test_rest_outcome_shares_feedback_scope_with_hosted_transport(
         "experience_id": "10000000-0000-0000-0000-000000000001",
         "success": True,
     }
+    vote = {
+        "id": "30000000-0000-0000-0000-000000000001",
+        "experience_id": "10000000-0000-0000-0000-000000000001",
+        "vote_type": "up",
+    }
     with (
         patch("app.core.security.validate_api_key", return_value=mock_agent),
         patch(
             "app.services.experience_service.ExperienceService.report_outcome",
             return_value=report,
         ),
+        patch(
+            "app.services.experience_service.ExperienceService.vote",
+            return_value=vote,
+        ),
     ):
-        response = client.post(
+        outcome_response = client.post(
             "/api/v1/experiences/outcome01/outcome",
             headers=auth_headers,
             json={"success": True},
         )
+        vote_response = client.post(
+            "/api/v1/experiences/outcome01/vote",
+            headers=auth_headers,
+            json={"vote_type": "up"},
+        )
 
-    assert response.status_code == 201
+    assert outcome_response.status_code == 201
+    assert vote_response.status_code == 200
     with pytest.raises(RateLimitError):
         enforce_agent_rate_limit(
             agent_id=mock_agent["id"],
