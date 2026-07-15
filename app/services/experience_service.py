@@ -186,15 +186,13 @@ class ExperienceService:
             "experience_id": experience["id"],
             "agent_id": str(agent_id),
             "success": success,
+            # Upsert is the agent's latest verdict. Explicit nulls clear fields
+            # from an earlier report instead of leaving stale failure context.
+            "execution_time_ms": execution_time_ms,
+            "error_message": error_message or None,
+            "context_notes": context_notes or None,
+            "env_fingerprint": env_fingerprint or None,
         }
-        if execution_time_ms is not None:
-            report_data["execution_time_ms"] = execution_time_ms
-        if error_message:
-            report_data["error_message"] = error_message
-        if context_notes:
-            report_data["context_notes"] = context_notes
-        if env_fingerprint:
-            report_data["env_fingerprint"] = env_fingerprint
 
         reject_api_keys(report_data, path="outcome_report")
         report = self.repo.upsert_outcome_report(report_data)

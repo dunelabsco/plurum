@@ -10,6 +10,17 @@ from app.repositories.experience_repo import ExperienceRepository
 from app.services.experience_service import ExperienceService
 
 
+def test_event_experience_id_prefers_feedbacks_canonical_reference():
+    from app.api.v1.experiences import _exp_id
+
+    assert _exp_id(
+        {
+            "id": "20000000-0000-0000-0000-000000000001",
+            "experience_id": "10000000-0000-0000-0000-000000000001",
+        }
+    ) == "10000000-0000-0000-0000-000000000001"
+
+
 class TestExperiencePublicEndpoints:
     """Public endpoints should work WITHOUT authentication."""
 

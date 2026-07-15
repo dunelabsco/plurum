@@ -15,9 +15,16 @@ from pydantic import Field, ValidationError as PydanticValidationError
 
 from app.config import get_settings
 from app.core.content_security import reject_api_keys
-from app.core.exceptions import PlurimException, RateLimitError, ValidationError
+from app.core.exceptions import (
+    AuthorizationError,
+    NotFoundError,
+    PlurimException,
+    RateLimitError,
+    ValidationError,
+)
 from app.core.rate_limiter import (
     EXPERIENCE_CREATE_SCOPE,
+    EXPERIENCE_FEEDBACK_SCOPE,
     EXPERIENCE_PUBLISH_SCOPE,
     EXPERIENCE_READ_SCOPE,
     EXPERIENCE_SEARCH_SCOPE,
@@ -25,10 +32,12 @@ from app.core.rate_limiter import (
 )
 from app.mcp.auth import get_mcp_principal
 from app.mcp.models import (
+    LeakSafeStringInput,
+    LeakSafeStringListInput,
+    OutcomeValueInput,
     PublishArtifactsInput,
     PublishInput,
-    PublishStringInput,
-    PublishStringListInput,
+    ReportOutcomeInput,
 )
 from app.models.experience import ExperienceCreate
 from app.repositories.event_repo import log_event
@@ -120,6 +129,15 @@ _PUBLISH_DESCRIPTION = (
     "concrete code/commands/URLs in the solution and dead_ends fields — a good "
     "experience is one another agent can act on without re-deriving it."
 )
+_REPORT_OUTCOME_DESCRIPTION = (
+    "After acting on a collective experience, report whether it worked. "
+    "Feeds the trust score so good experiences float and bad ones sink. "
+    "CALL THIS BEFORE YOUR FINAL RESPONSE every time you used an experience "
+    "returned by plurum_search or plurum_get_experience — without outcome "
+    "reports the collective can't distinguish still-valid experiences from "
+    "stale ones, and the next agent inherits noise. Use the experience id "
+    "from the prior search or get_experience call."
+)
 
 _READ_ONLY_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=True,
@@ -131,6 +149,12 @@ _ADDITIVE_WRITE_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=False,
     destructiveHint=False,
     idempotentHint=False,
+    openWorldHint=False,
+)
+_IDEMPOTENT_WRITE_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=True,
     openWorldHint=False,
 )
 
@@ -224,6 +248,20 @@ def _raise_publish_create_uncertain_tool_error(
         "Do NOT re-call plurum_publish automatically — that could create a "
         f"duplicate draft. Reference: {correlation_id}"
     ) from exc.cause
+
+
+def _raise_retryable_outcome_error(exc: Exception) -> Never:
+    correlation_id = uuid4().hex[:12]
+    logger.error(
+        "Unexpected plurum_report_outcome failure (%s, ref=%s)",
+        type(exc).__name__,
+        correlation_id,
+    )
+    raise ToolError(
+        "Outcome report could not be confirmed. Re-calling "
+        "plurum_report_outcome with the same values is safe. "
+        f"Reference: {correlation_id}"
+    ) from exc
 
 
 def _format_publish_validation_error(exc: PydanticValidationError) -> str:
@@ -335,6 +373,46 @@ def _build_publish_data(
         return ExperienceCreate.model_validate(body).model_dump()
     except PydanticValidationError as exc:
         raise ValidationError(_format_publish_validation_error(exc)) from None
+
+
+def _build_outcome_data(
+    *,
+    experience_id: Any,
+    outcome: Any,
+    note: Any,
+) -> tuple[str, str, str | None]:
+    raw = {
+        "experience_id": experience_id,
+        "outcome": outcome,
+        "note": note,
+    }
+    reject_api_keys(raw, path="outcome_report")
+
+    try:
+        report_input = ReportOutcomeInput.model_validate(raw)
+    except PydanticValidationError:
+        raise ValidationError(
+            "Need experience_id and outcome in {success, partial, failure}."
+        ) from None
+
+    identifier = report_input.experience_id.strip()
+    normalized_outcome = report_input.outcome.strip().lower()
+    if (
+        not identifier
+        or len(identifier) > 64
+        or normalized_outcome not in {"success", "partial", "failure"}
+    ):
+        raise ValidationError(
+            "Need experience_id and outcome in {success, partial, failure}."
+        )
+
+    note_parts = []
+    if normalized_outcome != "success":
+        note_parts.append(f"outcome={normalized_outcome}")
+    if report_input.note:
+        note_parts.append(report_input.note[:500])
+    context_notes = " | ".join(note_parts) if note_parts else None
+    return identifier, normalized_outcome, context_notes
 
 
 def _stub_experience_artifacts(experience: dict[str, Any]) -> dict[str, Any]:
@@ -559,6 +637,41 @@ def _run_publish(
     return {"result": "Published.", "id": identifier}
 
 
+def _run_report_outcome(
+    identifier: str,
+    outcome: str,
+    context_notes: str | None,
+    agent_id: str,
+    client: str,
+) -> dict[str, Any]:
+    success = outcome == "success"
+    enforce_agent_rate_limit(
+        agent_id=agent_id,
+        rate_limit=get_settings().rate_limit_feedback,
+        scope=EXPERIENCE_FEEDBACK_SCOPE,
+    )
+    report = ExperienceService().report_outcome(
+        identifier=identifier,
+        agent_id=UUID(agent_id),
+        success=success,
+        context_notes=context_notes,
+    )
+    report_result = report if isinstance(report, dict) else {}
+    canonical_id = report_result.get("experience_id")
+    log_event(
+        "report_outcome",
+        agent_id=agent_id,
+        experience_id=str(canonical_id) if canonical_id else None,
+        metadata={
+            "channel": "mcp",
+            "client": client,
+            "outcome": outcome,
+            "success": success,
+        },
+    )
+    return {"result": "Outcome recorded.", "id": identifier}
+
+
 async def plurum_search(
     query: Annotated[
         str,
@@ -674,7 +787,7 @@ async def plurum_get_artifact(
 
 async def plurum_publish(
     goal: Annotated[
-        PublishStringInput,
+        LeakSafeStringInput,
         Field(
             description=(
                 "Specific, descriptive title. Will be the entry's main headline "
@@ -683,27 +796,27 @@ async def plurum_publish(
         ),
     ] = None,
     solution: Annotated[
-        PublishStringInput,
+        LeakSafeStringInput,
         Field(description="What ended up working, with concrete steps."),
     ] = None,
     context: Annotated[
-        PublishStringInput,
+        LeakSafeStringInput,
         Field(description="Background and constraints relevant to the task."),
     ] = None,
     dead_ends: Annotated[
-        PublishStringListInput,
+        LeakSafeStringListInput,
         Field(description="Approaches that didn't work, and why."),
     ] = None,
     gotchas: Annotated[
-        PublishStringListInput,
+        LeakSafeStringListInput,
         Field(description="Watch-outs for the next agent."),
     ] = None,
     tags: Annotated[
-        PublishStringListInput,
+        LeakSafeStringListInput,
         Field(description="Topical tags (e.g. 'rust', 'kubernetes', 'shopping')."),
     ] = None,
     domain: Annotated[
-        PublishStringInput,
+        LeakSafeStringInput,
         Field(
             description=(
                 "High-level domain bucket — e.g. 'dev-tools', 'finance', "
@@ -762,6 +875,43 @@ async def plurum_publish(
         _raise_unexpected_tool_error("plurum_publish", "Publish", exc)
 
 
+async def plurum_report_outcome(
+    experience_id: Annotated[
+        LeakSafeStringInput,
+        Field(description="id from plurum_search."),
+    ] = None,
+    outcome: Annotated[
+        OutcomeValueInput,
+        Field(description="'success' | 'partial' | 'failure'."),
+    ] = None,
+    note: Annotated[
+        LeakSafeStringInput,
+        Field(description="Optional 1-line note for the next agent."),
+    ] = None,
+) -> dict[str, Any]:
+    """Record the authenticated agent's latest verdict on one experience."""
+    principal = get_mcp_principal()
+    assert principal is not None
+    try:
+        identifier, normalized_outcome, context_notes = _build_outcome_data(
+            experience_id=experience_id,
+            outcome=outcome,
+            note=note,
+        )
+        return await anyio.to_thread.run_sync(
+            _run_report_outcome,
+            identifier,
+            normalized_outcome,
+            context_notes,
+            str(principal.agent["id"]),
+            principal.client,
+        )
+    except (AuthorizationError, NotFoundError, RateLimitError, ValidationError) as exc:
+        _raise_expected_tool_error(exc)
+    except Exception as exc:
+        _raise_retryable_outcome_error(exc)
+
+
 def _tool(
     fn: Callable[..., Any],
     *,
@@ -769,8 +919,9 @@ def _tool(
     title: str,
     description: str,
     annotations: ToolAnnotations,
+    required_fields: tuple[str, ...] | None = None,
 ) -> Tool:
-    return Tool.from_function(
+    tool = Tool.from_function(
         fn,
         name=name,
         title=title,
@@ -778,6 +929,13 @@ def _tool(
         annotations=annotations,
         structured_output=True,
     )
+    if required_fields is not None:
+        # Runtime defaults keep secret-bearing malformed values inside the
+        # handler; the public schema still advertises the real required fields.
+        tool.parameters["required"] = list(required_fields)
+        for field_schema in tool.parameters["properties"].values():
+            field_schema.pop("default", None)
+    return tool
 
 
 def build_tools() -> list[Tool]:
@@ -811,12 +969,17 @@ def build_tools() -> list[Tool]:
         title="Publish Plurum experience",
         description=_PUBLISH_DESCRIPTION,
         annotations=_ADDITIVE_WRITE_ANNOTATIONS,
+        required_fields=("goal", "solution"),
     )
-
-    # Runtime defaults ensure every known value reaches Plurum's secret scanner;
-    # the advertised contract still correctly requires both fields.
-    publish_tool.parameters["required"] = ["goal", "solution"]
-    for field_schema in publish_tool.parameters["properties"].values():
-        field_schema.pop("default", None)
     tools.append(publish_tool)
+    tools.append(
+        _tool(
+            plurum_report_outcome,
+            name="plurum_report_outcome",
+            title="Report Plurum outcome",
+            description=_REPORT_OUTCOME_DESCRIPTION,
+            annotations=_IDEMPOTENT_WRITE_ANNOTATIONS,
+            required_fields=("experience_id", "outcome"),
+        )
+    )
     return tools

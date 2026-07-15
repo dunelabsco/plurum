@@ -32,13 +32,32 @@ class PublishInput(BaseModel):
     artifacts: list[PublishArtifactInput] | None = None
 
 
+class ReportOutcomeInput(BaseModel):
+    """Internal strict validation after raw feedback has been scanned for secrets."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True, strict=True)
+
+    experience_id: str
+    outcome: str
+    note: str | None = None
+
+
 # FastMCP validates function arguments before invoking the handler. Runtime `Any`
 # keeps malformed, potentially secret-bearing values inside Plurum's sanitizing
 # boundary, while WithJsonSchema preserves the precise schema clients should use.
-PublishStringInput = Annotated[Any, WithJsonSchema({"type": "string"})]
-PublishStringListInput = Annotated[
+LeakSafeStringInput = Annotated[Any, WithJsonSchema({"type": "string"})]
+LeakSafeStringListInput = Annotated[
     Any,
     WithJsonSchema({"type": "array", "items": {"type": "string"}}),
+]
+OutcomeValueInput = Annotated[
+    Any,
+    WithJsonSchema(
+        {
+            "type": "string",
+            "enum": ["success", "partial", "failure"],
+        }
+    ),
 ]
 PublishArtifactsInput = Annotated[
     Any,

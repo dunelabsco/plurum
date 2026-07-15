@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.core.exceptions import RateLimitError
 from app.core.rate_limiter import (
     EXPERIENCE_CREATE_SCOPE,
+    EXPERIENCE_FEEDBACK_SCOPE,
     EXPERIENCE_PUBLISH_SCOPE,
     EXPERIENCE_READ_SCOPE,
     EXPERIENCE_SEARCH_SCOPE,
@@ -211,3 +212,43 @@ def test_rest_create_and_publish_share_their_hosted_operation_scopes(
                 rate_limit=write_limit,
                 scope=scope,
             )
+
+
+def test_rest_outcome_shares_feedback_scope_with_hosted_transport(
+    client,
+    mock_agent,
+    auth_headers,
+):
+    feedback_limit = get_settings().rate_limit_feedback
+    for _ in range(parse(feedback_limit).amount - 1):
+        enforce_agent_rate_limit(
+            agent_id=mock_agent["id"],
+            rate_limit=feedback_limit,
+            scope=EXPERIENCE_FEEDBACK_SCOPE,
+        )
+
+    report = {
+        "id": "20000000-0000-0000-0000-000000000001",
+        "experience_id": "10000000-0000-0000-0000-000000000001",
+        "success": True,
+    }
+    with (
+        patch("app.core.security.validate_api_key", return_value=mock_agent),
+        patch(
+            "app.services.experience_service.ExperienceService.report_outcome",
+            return_value=report,
+        ),
+    ):
+        response = client.post(
+            "/api/v1/experiences/outcome01/outcome",
+            headers=auth_headers,
+            json={"success": True},
+        )
+
+    assert response.status_code == 201
+    with pytest.raises(RateLimitError):
+        enforce_agent_rate_limit(
+            agent_id=mock_agent["id"],
+            rate_limit=feedback_limit,
+            scope=EXPERIENCE_FEEDBACK_SCOPE,
+        )

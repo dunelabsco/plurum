@@ -157,6 +157,7 @@ async def test_mcp_initializes_and_lists_current_tools(monkeypatch):
         GET_ARTIFACT_SCHEMA,
         GET_EXPERIENCE_SCHEMA,
         PUBLISH_SCHEMA,
+        REPORT_OUTCOME_SCHEMA,
         SEARCH_SCHEMA,
     )
 
@@ -175,6 +176,7 @@ async def test_mcp_initializes_and_lists_current_tools(monkeypatch):
         "plurum_get_experience",
         "plurum_get_artifact",
         "plurum_publish",
+        "plurum_report_outcome",
     ]
     for tool in result.tools[:3]:
         assert tool.annotations is not None
@@ -260,6 +262,38 @@ async def test_mcp_initializes_and_lists_current_tools(monkeypatch):
     assert publish_tool.annotations.destructiveHint is False
     assert publish_tool.annotations.idempotentHint is False
     assert publish_tool.annotations.openWorldHint is False
+
+    outcome_tool = tools_by_name["plurum_report_outcome"]
+    assert outcome_tool.title == "Report Plurum outcome"
+    assert outcome_tool.description == REPORT_OUTCOME_SCHEMA["description"]
+    assert set(outcome_tool.inputSchema["properties"]) == {
+        "experience_id",
+        "outcome",
+        "note",
+    }
+    assert set(outcome_tool.inputSchema["required"]) == {
+        "experience_id",
+        "outcome",
+    }
+    assert all(
+        "default" not in field_schema
+        for field_schema in outcome_tool.inputSchema["properties"].values()
+    )
+    expected_outcome_properties = REPORT_OUTCOME_SCHEMA["parameters"]["properties"]
+    for field_name, expected_schema in expected_outcome_properties.items():
+        actual_schema = outcome_tool.inputSchema["properties"][field_name]
+        for property_name in ("type", "description"):
+            assert actual_schema[property_name] == expected_schema[property_name]
+    assert outcome_tool.inputSchema["properties"]["outcome"]["enum"] == [
+        "success",
+        "partial",
+        "failure",
+    ]
+    assert outcome_tool.annotations is not None
+    assert outcome_tool.annotations.readOnlyHint is False
+    assert outcome_tool.annotations.destructiveHint is False
+    assert outcome_tool.annotations.idempotentHint is True
+    assert outcome_tool.annotations.openWorldHint is False
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Query, Request, status
 from app.config import get_settings
 from app.core.rate_limiter import (
     EXPERIENCE_CREATE_SCOPE,
+    EXPERIENCE_FEEDBACK_SCOPE,
     EXPERIENCE_PUBLISH_SCOPE,
     EXPERIENCE_READ_SCOPE,
     EXPERIENCE_SEARCH_SCOPE,
@@ -32,7 +33,8 @@ def _exp_id(result) -> Optional[str]:
     """Pull a real experience UUID out of a service result for the events
     log — the route's `identifier` may be a short_id, which isn't a uuid."""
     if isinstance(result, dict):
-        return result.get("id") or result.get("experience_id")
+        # Feedback results have their own row id plus the canonical experience id.
+        return result.get("experience_id") or result.get("id")
     return None
 
 
@@ -130,7 +132,10 @@ def archive_experience(request: Request, identifier: str, agent: CurrentAgent):
     summary="Report outcome",
     description="Report whether an experience worked for you. This feeds the quality score.",
 )
-@limiter.limit(settings.rate_limit_feedback)
+@limiter.shared_limit(
+    settings.rate_limit_feedback,
+    scope=EXPERIENCE_FEEDBACK_SCOPE,
+)
 def report_outcome(
     request: Request, identifier: str, data: OutcomeReportCreate, agent: CurrentAgent,
 ):
