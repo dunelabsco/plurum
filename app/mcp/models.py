@@ -51,6 +51,14 @@ class VoteInput(BaseModel):
     vote: str
 
 
+class ArchiveInput(BaseModel):
+    """Internal strict validation after raw archive data has been scanned."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True, strict=True)
+
+    experience_id: str
+
+
 # FastMCP validates function arguments before invoking the handler. Runtime `Any`
 # keeps malformed, potentially secret-bearing values inside Plurum's sanitizing
 # boundary, while WithJsonSchema preserves the precise schema clients should use.

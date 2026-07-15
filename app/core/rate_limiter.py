@@ -15,6 +15,7 @@ EXPERIENCE_SEARCH_SCOPE = "experience-search"
 EXPERIENCE_READ_SCOPE = "experience-read"
 EXPERIENCE_CREATE_SCOPE = "experience-write:create"
 EXPERIENCE_PUBLISH_SCOPE = "experience-write:publish"
+EXPERIENCE_ARCHIVE_SCOPE = "experience-write:archive"
 EXPERIENCE_FEEDBACK_SCOPE = "experience-feedback"
 
 

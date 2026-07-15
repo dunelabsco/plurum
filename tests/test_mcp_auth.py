@@ -154,6 +154,7 @@ async def test_mcp_initializes_and_lists_current_tools(monkeypatch):
     from app.main import create_app
     from app.mcp import auth
     from plugins.hermes.tools import (
+        ARCHIVE_SCHEMA,
         GET_ARTIFACT_SCHEMA,
         GET_EXPERIENCE_SCHEMA,
         PUBLISH_SCHEMA,
@@ -178,6 +179,7 @@ async def test_mcp_initializes_and_lists_current_tools(monkeypatch):
         "plurum_get_artifact",
         "plurum_publish",
         "plurum_report_outcome",
+        "plurum_archive",
         "plurum_vote",
     ]
     for tool in result.tools[:3]:
@@ -296,6 +298,24 @@ async def test_mcp_initializes_and_lists_current_tools(monkeypatch):
     assert outcome_tool.annotations.destructiveHint is False
     assert outcome_tool.annotations.idempotentHint is True
     assert outcome_tool.annotations.openWorldHint is False
+
+    archive_tool = tools_by_name["plurum_archive"]
+    assert archive_tool.title == "Archive Plurum experience"
+    assert archive_tool.description == ARCHIVE_SCHEMA["description"]
+    assert set(archive_tool.inputSchema["properties"]) == {"experience_id"}
+    assert archive_tool.inputSchema["required"] == ["experience_id"]
+    archive_id_schema = archive_tool.inputSchema["properties"]["experience_id"]
+    expected_archive_id_schema = ARCHIVE_SCHEMA["parameters"]["properties"][
+        "experience_id"
+    ]
+    assert archive_id_schema["type"] == expected_archive_id_schema["type"]
+    assert archive_id_schema["description"] == expected_archive_id_schema["description"]
+    assert "default" not in archive_id_schema
+    assert archive_tool.annotations is not None
+    assert archive_tool.annotations.readOnlyHint is False
+    assert archive_tool.annotations.destructiveHint is True
+    assert archive_tool.annotations.idempotentHint is True
+    assert archive_tool.annotations.openWorldHint is False
 
     vote_tool = tools_by_name["plurum_vote"]
     assert vote_tool.title == "Vote on Plurum experience"

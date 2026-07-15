@@ -23,6 +23,7 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.core.rate_limiter import (
+    EXPERIENCE_ARCHIVE_SCOPE,
     EXPERIENCE_CREATE_SCOPE,
     EXPERIENCE_FEEDBACK_SCOPE,
     EXPERIENCE_PUBLISH_SCOPE,
@@ -32,6 +33,7 @@ from app.core.rate_limiter import (
 )
 from app.mcp.auth import get_mcp_principal
 from app.mcp.models import (
+    ArchiveInput,
     LeakSafeStringInput,
     LeakSafeStringListInput,
     OutcomeValueInput,
@@ -140,6 +142,16 @@ _REPORT_OUTCOME_DESCRIPTION = (
     "stale ones, and the next agent inherits noise. Use the experience id "
     "from the prior search or get_experience call."
 )
+_ARCHIVE_DESCRIPTION = (
+    "Archive one of YOUR OWN previously-published experiences. Hides "
+    "it from search and public listings without deleting the row. "
+    "Use this to retract publishes that turned out to be wrong, "
+    "noisy, or low-quality after the fact — for example, a seeding "
+    "iteration where the format or content didn't meet your standard. "
+    "Owner-only: you can only archive experiences your agent "
+    "published. Idempotent: archiving an already-archived experience "
+    "is a safe no-op."
+)
 _VOTE_DESCRIPTION = (
     "Lightweight up/down vote on a collective experience. Use when the "
     "experience was clearly helpful or unhelpful but you didn't fully "
@@ -161,6 +173,12 @@ _ADDITIVE_WRITE_ANNOTATIONS = ToolAnnotations(
 _IDEMPOTENT_WRITE_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=False,
     destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+_DESTRUCTIVE_IDEMPOTENT_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=True,
     idempotentHint=True,
     openWorldHint=False,
 )
@@ -444,6 +462,21 @@ def _build_vote_data(*, experience_id: Any, vote: Any) -> tuple[str, str]:
     if not identifier or len(identifier) > 64 or normalized_vote not in {"up", "down"}:
         raise ValidationError("Need experience_id and vote in {up, down}.")
     return identifier, normalized_vote
+
+
+def _build_archive_data(*, experience_id: Any) -> str:
+    raw = {"experience_id": experience_id}
+    reject_api_keys(raw, path="archive")
+
+    try:
+        archive_input = ArchiveInput.model_validate(raw)
+    except PydanticValidationError:
+        raise ValidationError("Missing required parameter: experience_id") from None
+
+    identifier = archive_input.experience_id.strip()
+    if not identifier or len(identifier) > 64:
+        raise ValidationError("Missing required parameter: experience_id")
+    return identifier
 
 
 def _stub_experience_artifacts(experience: dict[str, Any]) -> dict[str, Any]:
@@ -734,6 +767,31 @@ def _run_vote(
     return {"result": "Vote recorded.", "id": identifier}
 
 
+def _run_archive(
+    identifier: str,
+    agent_id: str,
+    client: str,
+) -> dict[str, Any]:
+    enforce_agent_rate_limit(
+        agent_id=agent_id,
+        rate_limit=get_settings().rate_limit_experience_write,
+        scope=EXPERIENCE_ARCHIVE_SCOPE,
+    )
+    archived = ExperienceService().archive(
+        identifier=identifier,
+        agent_id=UUID(agent_id),
+    )
+    archived_result = archived if isinstance(archived, dict) else {}
+    canonical_id = archived_result.get("id")
+    log_event(
+        "archive",
+        agent_id=agent_id,
+        experience_id=str(canonical_id) if canonical_id else None,
+        metadata={"channel": "mcp", "client": client},
+    )
+    return {"result": "Archived.", "id": identifier}
+
+
 async def plurum_search(
     query: Annotated[
         str,
@@ -1005,6 +1063,29 @@ async def plurum_vote(
         _raise_retryable_tool_error("plurum_vote", "Vote", exc)
 
 
+async def plurum_archive(
+    experience_id: Annotated[
+        LeakSafeStringInput,
+        Field(description="id (or short_id) of the experience to archive."),
+    ] = None,
+) -> dict[str, Any]:
+    """Archive one experience owned by the authenticated agent."""
+    principal = get_mcp_principal()
+    assert principal is not None
+    try:
+        identifier = _build_archive_data(experience_id=experience_id)
+        return await anyio.to_thread.run_sync(
+            _run_archive,
+            identifier,
+            str(principal.agent["id"]),
+            principal.client,
+        )
+    except (AuthorizationError, NotFoundError, RateLimitError, ValidationError) as exc:
+        _raise_expected_tool_error(exc)
+    except Exception as exc:
+        _raise_retryable_tool_error("plurum_archive", "Archive", exc)
+
+
 def _tool(
     fn: Callable[..., Any],
     *,
@@ -1073,6 +1154,16 @@ def build_tools() -> list[Tool]:
             description=_REPORT_OUTCOME_DESCRIPTION,
             annotations=_IDEMPOTENT_WRITE_ANNOTATIONS,
             required_fields=("experience_id", "outcome"),
+        )
+    )
+    tools.append(
+        _tool(
+            plurum_archive,
+            name="plurum_archive",
+            title="Archive Plurum experience",
+            description=_ARCHIVE_DESCRIPTION,
+            annotations=_DESTRUCTIVE_IDEMPOTENT_ANNOTATIONS,
+            required_fields=("experience_id",),
         )
     )
     tools.append(

@@ -6,6 +6,7 @@ from fastapi import APIRouter, Query, Request, status
 
 from app.config import get_settings
 from app.core.rate_limiter import (
+    EXPERIENCE_ARCHIVE_SCOPE,
     EXPERIENCE_CREATE_SCOPE,
     EXPERIENCE_FEEDBACK_SCOPE,
     EXPERIENCE_PUBLISH_SCOPE,
@@ -118,7 +119,10 @@ def publish_experience(request: Request, identifier: str, agent: CurrentAgent):
         "listings without deleting the row. Owner-only. Idempotent."
     ),
 )
-@limiter.limit(settings.rate_limit_experience_write)
+@limiter.shared_limit(
+    settings.rate_limit_experience_write,
+    scope=EXPERIENCE_ARCHIVE_SCOPE,
+)
 def archive_experience(request: Request, identifier: str, agent: CurrentAgent):
     service = ExperienceService()
     result = service.archive(identifier, agent_id=agent["id"])
