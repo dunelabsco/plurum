@@ -1,4 +1,4 @@
-"""Phase 0 tests for the hosted MCP transport and API-key boundary."""
+"""Tests for the hosted MCP transport and API-key boundary."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from starlette.responses import JSONResponse
 
-from app.core.exceptions import AuthenticationError
+from app.core.exceptions import AuthenticationError, RateLimitError
 
 
 def _agent(agent_id: str, name: str = "test-agent") -> dict:
@@ -150,9 +150,14 @@ async def test_mcp_auth_store_failure_is_sanitized(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_mcp_initializes_and_lists_search_tool(monkeypatch):
+async def test_mcp_initializes_and_lists_read_tools(monkeypatch):
     from app.main import create_app
     from app.mcp import auth
+    from plugins.hermes.tools import (
+        GET_ARTIFACT_SCHEMA,
+        GET_EXPERIENCE_SCHEMA,
+        SEARCH_SCHEMA,
+    )
 
     monkeypatch.setattr(
         auth,
@@ -164,20 +169,58 @@ async def test_mcp_initializes_and_lists_search_tool(monkeypatch):
     async with _mcp_session(app) as session:
         result = await session.list_tools()
 
-    assert [tool.name for tool in result.tools] == ["plurum_search"]
-    tool = result.tools[0]
-    assert tool.title == "Search Plurum experiences"
-    assert tool.annotations is not None
-    assert tool.annotations.readOnlyHint is True
-    assert tool.annotations.destructiveHint is False
-    assert tool.annotations.idempotentHint is True
-    assert tool.annotations.openWorldHint is True
+    assert [tool.name for tool in result.tools] == [
+        "plurum_search",
+        "plurum_get_experience",
+        "plurum_get_artifact",
+    ]
+    for tool in result.tools:
+        assert tool.annotations is not None
+        assert tool.annotations.readOnlyHint is True
+        assert tool.annotations.destructiveHint is False
+        assert tool.annotations.idempotentHint is True
+        assert tool.annotations.openWorldHint is False
+
+    tools_by_name = {tool.name: tool for tool in result.tools}
+    search_tool = tools_by_name["plurum_search"]
+    assert search_tool.title == "Search Plurum experiences"
+    assert search_tool.description == SEARCH_SCHEMA["description"].replace(
+        "Hermes' own memory",
+        "the host's own memory",
+    )
+    search_schema = search_tool.inputSchema
+    assert search_schema["properties"]["query"]["minLength"] == 2
+    assert search_schema["properties"]["query"]["maxLength"] == 1000
+
+    experience_tool = tools_by_name["plurum_get_experience"]
+    assert experience_tool.title == "Get Plurum experience"
+    assert experience_tool.description == GET_EXPERIENCE_SCHEMA["description"]
+    assert set(experience_tool.inputSchema["properties"]) == {"experience_id"}
+    assert experience_tool.inputSchema["required"] == ["experience_id"]
+    assert experience_tool.inputSchema["properties"]["experience_id"]["type"] == "string"
+    assert experience_tool.inputSchema["properties"]["experience_id"]["maxLength"] == 64
+
+    artifact_tool = tools_by_name["plurum_get_artifact"]
+    assert artifact_tool.title == "Get Plurum artifact"
+    assert artifact_tool.description == GET_ARTIFACT_SCHEMA["description"]
+    assert set(artifact_tool.inputSchema["properties"]) == {
+        "experience_id",
+        "artifact_index",
+    }
+    assert set(artifact_tool.inputSchema["required"]) == {
+        "experience_id",
+        "artifact_index",
+    }
+    assert artifact_tool.inputSchema["properties"]["artifact_index"]["type"] == "integer"
+    assert artifact_tool.inputSchema["properties"]["artifact_index"]["minimum"] == 0
+    assert artifact_tool.inputSchema["properties"]["experience_id"]["maxLength"] == 64
 
 
 @pytest.mark.asyncio
 async def test_mcp_search_returns_trimmed_structured_results(monkeypatch):
     from app.main import create_app
     from app.mcp import auth, tools
+    from plugins.hermes.tools import _SEARCH_REMINDER
 
     monkeypatch.setattr(
         auth,
@@ -218,6 +261,7 @@ async def test_mcp_search_returns_trimmed_structured_results(monkeypatch):
 
     assert result.isError is False
     assert result.structuredContent is not None
+    assert result.structuredContent["reminder"] == _SEARCH_REMINDER
     assert result.structuredContent["count"] == 1
     assert result.structuredContent["results"] == [
         {
@@ -241,6 +285,88 @@ async def test_mcp_search_returns_trimmed_structured_results(monkeypatch):
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_mcp_search_preserves_no_result_publish_reminder(monkeypatch):
+    from app.main import create_app
+    from app.mcp import auth, tools
+
+    monkeypatch.setattr(
+        auth,
+        "validate_api_key",
+        lambda _api_key: _agent("00000000-0000-0000-0000-000000000001"),
+    )
+
+    class StubExperienceService:
+        def search(self, **_kwargs):
+            return {
+                "total_found": 1,
+                "results": [{"id": "irrelevant", "similarity": 0.39}],
+            }
+
+    monkeypatch.setattr(tools, "ExperienceService", StubExperienceService)
+    monkeypatch.setattr(tools, "log_event", lambda *_args, **_kwargs: None)
+    app = create_app()
+
+    async with _mcp_session(app) as session:
+        result = await session.call_tool(
+            "plurum_search",
+            {"query": "unseen deployment issue"},
+        )
+
+    assert result.isError is False
+    assert result.structuredContent == {
+        "reminder": (
+            "No prior experiences for this query. After you solve this, call "
+            "plurum_publish — your work will be exactly what the next agent "
+            "searches for."
+        ),
+        "query": "unseen deployment issue",
+        "results": [],
+        "top_similarity": 0.39,
+        "count": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_mcp_search_rejects_normalized_short_and_oversized_queries(monkeypatch):
+    from app.main import create_app
+    from app.mcp import auth, tools
+
+    monkeypatch.setattr(
+        auth,
+        "validate_api_key",
+        lambda _api_key: _agent("00000000-0000-0000-0000-000000000001"),
+    )
+
+    class UnexpectedExperienceService:
+        def search(self, **_kwargs):
+            raise AssertionError("invalid queries must not run embeddings")
+
+    monkeypatch.setattr(tools, "ExperienceService", UnexpectedExperienceService)
+    app = create_app()
+
+    async with _mcp_session(app) as session:
+        normalized_short = await session.call_tool(
+            "plurum_search",
+            {"query": "a "},
+        )
+        oversized = await session.call_tool(
+            "plurum_search",
+            {"query": "x" * 1001},
+        )
+
+    short_text = " ".join(
+        block.text for block in normalized_short.content if hasattr(block, "text")
+    )
+    oversized_text = " ".join(
+        block.text for block in oversized.content if hasattr(block, "text")
+    )
+    assert normalized_short.isError is True
+    assert "at least 2 non-whitespace characters" in short_text
+    assert oversized.isError is True
+    assert "at most 1000 characters" in oversized_text
 
 
 @pytest.mark.asyncio
@@ -271,6 +397,39 @@ async def test_mcp_search_redacts_unexpected_service_errors(monkeypatch, caplog)
     assert "Search failed. Reference:" in rendered
     assert secret not in rendered
     assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_search_rate_limit_stops_before_service_call(monkeypatch):
+    from app.main import create_app
+    from app.mcp import auth, tools
+
+    monkeypatch.setattr(
+        auth,
+        "validate_api_key",
+        lambda _api_key: _agent("00000000-0000-0000-0000-000000000001"),
+    )
+
+    def reject_search(**_kwargs):
+        raise RateLimitError(retry_after=17)
+
+    class UnexpectedExperienceService:
+        def search(self, **_kwargs):
+            raise AssertionError("rate-limited searches must not run embeddings")
+
+    monkeypatch.setattr(tools, "enforce_agent_rate_limit", reject_search)
+    monkeypatch.setattr(tools, "ExperienceService", UnexpectedExperienceService)
+    app = create_app()
+
+    async with _mcp_session(app) as session:
+        result = await session.call_tool(
+            "plurum_search",
+            {"query": "must be limited"},
+        )
+
+    rendered = " ".join(block.text for block in result.content if hasattr(block, "text"))
+    assert result.isError is True
+    assert "Rate limit exceeded; retry after 17 seconds." in rendered
 
 
 @pytest.mark.asyncio

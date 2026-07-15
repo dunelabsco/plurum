@@ -1,9 +1,26 @@
 """Rate limiting utilities."""
 
+import math
+import time
+
+from limits import parse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from app.config import get_settings
+from app.core.exceptions import RateLimitError
+
+
+EXPERIENCE_SEARCH_SCOPE = "experience-search"
+EXPERIENCE_READ_SCOPE = "experience-read"
+
+
+def get_agent_rate_limit_key(agent_id: object) -> str:
+    """Return the limiter key shared by HTTP and non-HTTP agent calls."""
+    identifier = str(agent_id).strip()
+    if not identifier:
+        raise ValueError("agent_id must not be empty")
+    return f"agent:{identifier}"
 
 
 def get_agent_identifier(request) -> str:
@@ -14,7 +31,7 @@ def get_agent_identifier(request) -> str:
     # Try to get agent from request state (set by auth middleware)
     agent = getattr(request.state, "agent", None)
     if agent:
-        return f"agent:{agent['id']}"
+        return get_agent_rate_limit_key(agent["id"])
 
     # Fall back to IP address for unauthenticated requests
     return get_remote_address(request)
@@ -35,6 +52,18 @@ def get_rate_limit_for_tier(tier: str) -> str:
 
 # Create the limiter instance
 limiter = Limiter(key_func=get_agent_identifier)
+
+
+def enforce_agent_rate_limit(*, agent_id: object, rate_limit: str, scope: str) -> None:
+    """Consume one shared limiter hit for an authenticated non-HTTP call."""
+    item = parse(rate_limit)
+    identifiers = (get_agent_rate_limit_key(agent_id), scope)
+    if limiter.limiter.hit(item, *identifiers):
+        return
+
+    window = limiter.limiter.get_window_stats(item, *identifiers)
+    retry_after = max(1, math.ceil(window.reset_time - time.time()))
+    raise RateLimitError(retry_after=retry_after)
 
 
 def rate_limit_by_tier(request):

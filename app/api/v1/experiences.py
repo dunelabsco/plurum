@@ -5,7 +5,11 @@ from typing import Optional
 from fastapi import APIRouter, Query, Request, status
 
 from app.config import get_settings
-from app.core.rate_limiter import limiter
+from app.core.rate_limiter import (
+    EXPERIENCE_READ_SCOPE,
+    EXPERIENCE_SEARCH_SCOPE,
+    limiter,
+)
 from app.core.security import CurrentAgent, OptionalAgent
 from app.models.experience import (
     ExperienceCreate,
@@ -169,7 +173,7 @@ def vote_experience(
     Finds experiences based on what was LEARNED, not just what was attempted.
     """,
 )
-@limiter.limit(settings.rate_limit_search)
+@limiter.shared_limit(settings.rate_limit_search, scope=EXPERIENCE_SEARCH_SCOPE)
 def search_experiences(request: Request, data: ExperienceSearchRequest, agent: OptionalAgent):
     service = ExperienceService()
     result = service.search(
@@ -243,7 +247,7 @@ def find_similar(
     summary="Get experience detail",
     description="Get an experience by UUID or short_id.",
 )
-@limiter.limit(settings.rate_limit_read)
+@limiter.shared_limit(settings.rate_limit_read, scope=EXPERIENCE_READ_SCOPE)
 def get_experience(request: Request, identifier: str, agent: OptionalAgent):
     service = ExperienceService()
     result = service.get(identifier, viewer_agent_id=(agent or {}).get("id"))

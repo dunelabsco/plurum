@@ -15,6 +15,16 @@ os.environ.setdefault("OPENAI_API_KEY", "sk-test")
 os.environ.setdefault("ENVIRONMENT", "development")
 
 
+@pytest.fixture(autouse=True)
+def reset_rate_limiter_state():
+    """Keep the process-global limiter isolated between tests."""
+    from app.core.rate_limiter import limiter
+
+    limiter.reset()
+    yield
+    limiter.reset()
+
+
 @pytest.fixture
 def mock_supabase():
     """Mock Supabase client.
