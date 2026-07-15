@@ -49,8 +49,9 @@ def mock_openai():
 @pytest.fixture
 def client(mock_supabase, mock_openai):
     """Create test client with mocked dependencies."""
-    from app.main import app
+    from app.main import create_app
 
+    app = create_app()
     with TestClient(app) as test_client:
         yield test_client
 

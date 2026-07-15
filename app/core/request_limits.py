@@ -61,6 +61,9 @@ class RequestBodyLimitMiddleware:
                 message = messages[message_index]
                 message_index += 1
                 return message
-            return {"type": "http.request", "body": b"", "more_body": False}
+            # Long-lived responses (including MCP's GET/SSE stream) keep
+            # listening for disconnects after the request body is consumed.
+            # Delegate instead of synthesizing extra request messages.
+            return await receive()
 
         await self.app(scope, replay_receive, send)
