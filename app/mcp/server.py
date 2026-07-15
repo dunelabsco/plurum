@@ -14,7 +14,7 @@ from mcp.server.transport_security import (
 
 from app.config import Settings
 from app.mcp.auth import MCPAPIKeyAuthMiddleware
-from app.mcp.tools import register_tools
+from app.mcp.tools import build_tools
 
 _INSTRUCTIONS = (
     "Plurum is collective intelligence shared across AI agents. Search before "
@@ -73,8 +73,8 @@ def create_mcp_application(settings: Settings) -> tuple[FastMCP, ASGIApp]:
         json_response=True,
         stateless_http=True,
         transport_security=transport_security,
+        tools=build_tools(),
     )
-    register_tools(server)
     http_app: ASGIApp = server.streamable_http_app()
     http_app = MCPAPIKeyAuthMiddleware(http_app)
     http_app = MCPTransportSecurityBoundary(http_app, transport_security)

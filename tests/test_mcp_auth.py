@@ -150,12 +150,13 @@ async def test_mcp_auth_store_failure_is_sanitized(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_mcp_initializes_and_lists_read_tools(monkeypatch):
+async def test_mcp_initializes_and_lists_current_tools(monkeypatch):
     from app.main import create_app
     from app.mcp import auth
     from plugins.hermes.tools import (
         GET_ARTIFACT_SCHEMA,
         GET_EXPERIENCE_SCHEMA,
+        PUBLISH_SCHEMA,
         SEARCH_SCHEMA,
     )
 
@@ -173,8 +174,9 @@ async def test_mcp_initializes_and_lists_read_tools(monkeypatch):
         "plurum_search",
         "plurum_get_experience",
         "plurum_get_artifact",
+        "plurum_publish",
     ]
-    for tool in result.tools:
+    for tool in result.tools[:3]:
         assert tool.annotations is not None
         assert tool.annotations.readOnlyHint is True
         assert tool.annotations.destructiveHint is False
@@ -214,6 +216,50 @@ async def test_mcp_initializes_and_lists_read_tools(monkeypatch):
     assert artifact_tool.inputSchema["properties"]["artifact_index"]["type"] == "integer"
     assert artifact_tool.inputSchema["properties"]["artifact_index"]["minimum"] == 0
     assert artifact_tool.inputSchema["properties"]["experience_id"]["maxLength"] == 64
+
+    publish_tool = tools_by_name["plurum_publish"]
+    assert publish_tool.title == "Publish Plurum experience"
+    assert publish_tool.description == PUBLISH_SCHEMA["description"].replace(
+        "Save your local Hermes skill",
+        "Keep any local skill or memory",
+    )
+    assert set(publish_tool.inputSchema["properties"]) == {
+        "goal",
+        "context",
+        "solution",
+        "dead_ends",
+        "gotchas",
+        "tags",
+        "domain",
+        "artifacts",
+    }
+    assert set(publish_tool.inputSchema["required"]) == {"goal", "solution"}
+    assert all(
+        "default" not in field_schema
+        for field_schema in publish_tool.inputSchema["properties"].values()
+    )
+    expected_publish_properties = PUBLISH_SCHEMA["parameters"]["properties"]
+    for field_name, expected_schema in expected_publish_properties.items():
+        actual_schema = publish_tool.inputSchema["properties"][field_name]
+        assert actual_schema["type"] == expected_schema["type"]
+        assert actual_schema["description"] == expected_schema["description"]
+    artifact_schema = publish_tool.inputSchema["properties"]["artifacts"]["items"]
+    assert set(artifact_schema["properties"]) == {
+        "language",
+        "code",
+        "description",
+    }
+    assert set(artifact_schema["required"]) == {"language", "code"}
+    assert artifact_schema["additionalProperties"] is False
+    expected_artifact_schema = expected_publish_properties["artifacts"]["items"]
+    for field_name, expected_schema in expected_artifact_schema["properties"].items():
+        actual_schema = artifact_schema["properties"][field_name]
+        assert actual_schema == expected_schema
+    assert publish_tool.annotations is not None
+    assert publish_tool.annotations.readOnlyHint is False
+    assert publish_tool.annotations.destructiveHint is False
+    assert publish_tool.annotations.idempotentHint is False
+    assert publish_tool.annotations.openWorldHint is False
 
 
 @pytest.mark.asyncio

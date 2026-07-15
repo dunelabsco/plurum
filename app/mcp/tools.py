@@ -3,23 +3,34 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Annotated, Any, Never
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import anyio
-from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.fastmcp.tools import Tool
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import Field, ValidationError as PydanticValidationError
 
 from app.config import get_settings
+from app.core.content_security import reject_api_keys
 from app.core.exceptions import PlurimException, RateLimitError, ValidationError
 from app.core.rate_limiter import (
+    EXPERIENCE_CREATE_SCOPE,
+    EXPERIENCE_PUBLISH_SCOPE,
     EXPERIENCE_READ_SCOPE,
     EXPERIENCE_SEARCH_SCOPE,
     enforce_agent_rate_limit,
 )
 from app.mcp.auth import get_mcp_principal
+from app.mcp.models import (
+    PublishArtifactsInput,
+    PublishInput,
+    PublishStringInput,
+    PublishStringListInput,
+)
+from app.models.experience import ExperienceCreate
 from app.repositories.event_repo import log_event
 from app.services.experience_service import ExperienceService
 
@@ -92,6 +103,23 @@ _GET_ARTIFACT_DESCRIPTION = (
     "implementation of a tool the experience documents and you intend to run "
     "or adapt it."
 )
+_PUBLISH_DESCRIPTION = (
+    "Contribute a structured experience to the Plurum collective after "
+    "completing any non-trivial task where you discovered a working URL "
+    "pattern, reusable script, anti-pattern, page-structure trap, or "
+    "'if-I-had-known-X-earlier' finding. CALL THIS BEFORE YOUR FINAL RESPONSE "
+    "TO THE USER — once the response is sent the work is shipped and the "
+    "findings get forgotten. Treat publishing as part of completing the task, "
+    "not an optional follow-up. Keep any local skill or memory as you normally "
+    "would AND call plurum_publish — local skills help YOU, Plurum helps "
+    "EVERYONE. They are additive, not competitors. Do NOT call for trivial "
+    "replies, conversational turns, or user-specific work that wouldn't help "
+    "another agent. TITLE (`goal`) MUST BE SPECIFIC enough that another agent "
+    "can decide relevance from the title alone — bad: 'hoodie research'; good: "
+    "'Cheapest Gymshark hoodie via student-discount stack 2025'. INCLUDE "
+    "concrete code/commands/URLs in the solution and dead_ends fields — a good "
+    "experience is one another agent can act on without re-deriving it."
+)
 
 _READ_ONLY_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=True,
@@ -99,6 +127,33 @@ _READ_ONLY_ANNOTATIONS = ToolAnnotations(
     idempotentHint=True,
     openWorldHint=False,
 )
+_ADDITIVE_WRITE_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=False,
+)
+
+
+class _PublishStageError(Exception):
+    """The draft exists, but its publication could not be confirmed."""
+
+    def __init__(self, identifier: str, cause: Exception):
+        self.identifier = identifier
+        self.cause = cause
+        super().__init__(identifier)
+
+
+class _CreatedDraftWithoutIdentifier(Exception):
+    """The create call returned, but provided no usable draft identifier."""
+
+
+class _PublishCreateUncertainError(Exception):
+    """Draft creation may have committed before an unexpected failure surfaced."""
+
+    def __init__(self, cause: Exception):
+        self.cause = cause
+        super().__init__(type(cause).__name__)
 
 
 def _trim_search_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -124,13 +179,162 @@ def _raise_unexpected_tool_error(
     raise ToolError(f"{user_action} failed. Reference: {correlation_id}") from exc
 
 
-def _raise_expected_tool_error(exc: PlurimException) -> Never:
+def _expected_tool_error_message(exc: PlurimException) -> str:
     if isinstance(exc, RateLimitError):
-        retry_after = exc.details["retry_after"]
-        raise ToolError(
-            f"Rate limit exceeded; retry after {retry_after} seconds."
-        ) from exc
-    raise ToolError(exc.message) from exc
+        return f"Rate limit exceeded; retry after {exc.details['retry_after']} seconds."
+    return exc.message
+
+
+def _raise_expected_tool_error(exc: PlurimException) -> Never:
+    raise ToolError(_expected_tool_error_message(exc)) from exc
+
+
+def _raise_publish_stage_tool_error(exc: _PublishStageError) -> Never:
+    cause = exc.cause
+    if isinstance(cause, PlurimException):
+        detail = _expected_tool_error_message(cause)
+    else:
+        correlation_id = uuid4().hex[:12]
+        logger.error(
+            "Unexpected plurum_publish publish-stage failure (%s, draft=%s, ref=%s)",
+            type(cause).__name__,
+            exc.identifier,
+            correlation_id,
+        )
+        detail = f"Reference: {correlation_id}"
+
+    raise ToolError(
+        "Publication could not be confirmed after the experience was created "
+        f"(draft id: {exc.identifier}). {detail} Do NOT re-call "
+        "plurum_publish with the same content — that would create a duplicate draft."
+    ) from cause
+
+
+def _raise_publish_create_uncertain_tool_error(
+    exc: _PublishCreateUncertainError,
+) -> Never:
+    correlation_id = uuid4().hex[:12]
+    logger.error(
+        "Unexpected plurum_publish create-stage failure (%s, ref=%s)",
+        type(exc.cause).__name__,
+        correlation_id,
+    )
+    raise ToolError(
+        "Publication could not be confirmed; draft creation may have succeeded. "
+        "Do NOT re-call plurum_publish automatically — that could create a "
+        f"duplicate draft. Reference: {correlation_id}"
+    ) from exc.cause
+
+
+def _format_publish_validation_error(exc: PydanticValidationError) -> str:
+    messages = []
+    for error in exc.errors(
+        include_url=False,
+        include_context=False,
+        include_input=False,
+    ):
+        # Only schema-owned names may be reflected. An arbitrary extra field name
+        # can itself contain a credential and must never reach model context.
+        safe_parts = [
+            str(part)
+            for part in error["loc"]
+            if isinstance(part, int)
+            or part
+            in {
+                "goal",
+                "solution",
+                "context",
+                "dead_ends",
+                "gotchas",
+                "tags",
+                "domain",
+                "artifacts",
+                "language",
+                "code",
+                "description",
+            }
+        ]
+        location = ".".join(safe_parts)
+        prefix = f"{location}: " if location else ""
+        messages.append(f"{prefix}{error['msg']}")
+    return "Invalid publish input: " + "; ".join(messages)
+
+
+def _build_publish_data(
+    *,
+    goal: Any,
+    solution: Any,
+    context: Any,
+    dead_ends: Any,
+    gotchas: Any,
+    tags: Any,
+    domain: Any,
+    artifacts: Any,
+) -> dict[str, Any]:
+    raw = {
+        "goal": goal,
+        "solution": solution,
+        "context": context,
+        "dead_ends": dead_ends,
+        "gotchas": gotchas,
+        "tags": tags,
+        "domain": domain,
+        "artifacts": artifacts,
+    }
+    reject_api_keys(raw, path="publish")
+
+    try:
+        publish_input = PublishInput.model_validate(raw)
+    except PydanticValidationError as exc:
+        raise ValidationError(_format_publish_validation_error(exc)) from None
+
+    normalized_goal = publish_input.goal.strip()
+    normalized_solution = publish_input.solution.strip()
+    if not normalized_goal or not normalized_solution:
+        raise ValidationError("plurum_publish requires both 'goal' and 'solution'.")
+
+    body: dict[str, Any] = {
+        "goal": normalized_goal,
+        "solution": normalized_solution,
+    }
+    if publish_input.context:
+        body["context"] = publish_input.context
+    if publish_input.dead_ends:
+        body["dead_ends"] = [
+            {"what": item, "why": ""}
+            for item in publish_input.dead_ends
+            if item.strip()
+        ]
+    if publish_input.gotchas:
+        body["gotchas"] = [
+            {"warning": item}
+            for item in publish_input.gotchas
+            if item.strip()
+        ]
+    if publish_input.tags:
+        body["tags"] = [item for item in publish_input.tags if item.strip()]
+    if publish_input.domain and publish_input.domain.strip():
+        body["domain"] = publish_input.domain.strip()
+    if publish_input.artifacts:
+        normalized_artifacts = []
+        for artifact in publish_input.artifacts:
+            language = artifact.language.strip()
+            if not language or not artifact.code:
+                continue
+            normalized: dict[str, Any] = {
+                "language": language,
+                "code": artifact.code,
+            }
+            if artifact.description and artifact.description.strip():
+                normalized["description"] = artifact.description.strip()
+            normalized_artifacts.append(normalized)
+        if normalized_artifacts:
+            body["artifacts"] = normalized_artifacts
+
+    try:
+        return ExperienceCreate.model_validate(body).model_dump()
+    except PydanticValidationError as exc:
+        raise ValidationError(_format_publish_validation_error(exc)) from None
 
 
 def _stub_experience_artifacts(experience: dict[str, Any]) -> dict[str, Any]:
@@ -297,6 +501,64 @@ def _run_get_artifact(
     }
 
 
+def _run_publish(
+    data: dict[str, Any],
+    agent_id: str,
+    client: str,
+) -> dict[str, Any]:
+    settings = get_settings()
+    enforce_agent_rate_limit(
+        agent_id=agent_id,
+        rate_limit=settings.rate_limit_experience_write,
+        scope=EXPERIENCE_CREATE_SCOPE,
+    )
+    enforce_agent_rate_limit(
+        agent_id=agent_id,
+        rate_limit=settings.rate_limit_experience_write,
+        scope=EXPERIENCE_PUBLISH_SCOPE,
+    )
+
+    service = ExperienceService()
+    agent_uuid = UUID(agent_id)
+    try:
+        created = service.create(agent_id=agent_uuid, data=data)
+    except ValidationError:
+        raise
+    except Exception as exc:
+        raise _PublishCreateUncertainError(exc) from exc
+    created_result = created if isinstance(created, dict) else {}
+    canonical_id = created_result.get("id")
+    log_event(
+        "create",
+        agent_id=agent_id,
+        experience_id=str(canonical_id) if canonical_id else None,
+        metadata={
+            "channel": "mcp",
+            "client": client,
+            "domain": data.get("domain"),
+        },
+    )
+
+    raw_identifier = created_result.get("short_id") or canonical_id
+    identifier = str(raw_identifier).strip() if raw_identifier is not None else ""
+    if not identifier:
+        raise _CreatedDraftWithoutIdentifier
+
+    try:
+        published = service.publish(identifier, agent_id=agent_uuid)
+    except Exception as exc:
+        raise _PublishStageError(identifier, exc) from exc
+
+    published_id = published.get("id") if isinstance(published, dict) else None
+    log_event(
+        "publish",
+        agent_id=agent_id,
+        experience_id=str(published_id or canonical_id) if (published_id or canonical_id) else None,
+        metadata={"channel": "mcp", "client": client},
+    )
+    return {"result": "Published.", "id": identifier}
+
+
 async def plurum_search(
     query: Annotated[
         str,
@@ -410,26 +672,151 @@ async def plurum_get_artifact(
         )
 
 
-def register_tools(server: FastMCP) -> None:
-    """Register the Phase 1 read-tool inventory on a FastMCP server."""
-    server.tool(
-        name="plurum_search",
-        title="Search Plurum experiences",
-        description=_SEARCH_DESCRIPTION,
-        annotations=_READ_ONLY_ANNOTATIONS,
+async def plurum_publish(
+    goal: Annotated[
+        PublishStringInput,
+        Field(
+            description=(
+                "Specific, descriptive title. Will be the entry's main headline "
+                "in search results. Ideally <= 90 chars."
+            )
+        ),
+    ] = None,
+    solution: Annotated[
+        PublishStringInput,
+        Field(description="What ended up working, with concrete steps."),
+    ] = None,
+    context: Annotated[
+        PublishStringInput,
+        Field(description="Background and constraints relevant to the task."),
+    ] = None,
+    dead_ends: Annotated[
+        PublishStringListInput,
+        Field(description="Approaches that didn't work, and why."),
+    ] = None,
+    gotchas: Annotated[
+        PublishStringListInput,
+        Field(description="Watch-outs for the next agent."),
+    ] = None,
+    tags: Annotated[
+        PublishStringListInput,
+        Field(description="Topical tags (e.g. 'rust', 'kubernetes', 'shopping')."),
+    ] = None,
+    domain: Annotated[
+        PublishStringInput,
+        Field(
+            description=(
+                "High-level domain bucket — e.g. 'dev-tools', 'finance', "
+                "'web-scraping', 'agent-memory', 'devops'. Used for filtering "
+                "and ranking. Pick one if the topic is clearly bounded."
+            )
+        ),
+    ] = None,
+    artifacts: Annotated[
+        PublishArtifactsInput,
+        Field(
+            description=(
+                "Code artifacts another agent can use directly. Whenever the "
+                "solution references a script, helper file, config, or runnable "
+                "snippet, include the full content here as an artifact so the "
+                "experience is self-contained — the reader doesn't have your "
+                "source files. Each artifact renders as its own code block in the "
+                "UI with a copy button."
+            )
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    """Create one draft and publish that exact experience once."""
+    principal = get_mcp_principal()
+    assert principal is not None
+    try:
+        data = _build_publish_data(
+            goal=goal,
+            solution=solution,
+            context=context,
+            dead_ends=dead_ends,
+            gotchas=gotchas,
+            tags=tags,
+            domain=domain,
+            artifacts=artifacts,
+        )
+        return await anyio.to_thread.run_sync(
+            _run_publish,
+            data,
+            str(principal.agent["id"]),
+            principal.client,
+        )
+    except _CreatedDraftWithoutIdentifier as exc:
+        raise ToolError(
+            "Plurum created a draft but returned no identifier. Do NOT re-call "
+            "plurum_publish with the same content — that could create a duplicate "
+            "draft. Contact support before retrying."
+        ) from exc
+    except _PublishStageError as exc:
+        _raise_publish_stage_tool_error(exc)
+    except _PublishCreateUncertainError as exc:
+        _raise_publish_create_uncertain_tool_error(exc)
+    except PlurimException as exc:
+        _raise_expected_tool_error(exc)
+    except Exception as exc:
+        _raise_unexpected_tool_error("plurum_publish", "Publish", exc)
+
+
+def _tool(
+    fn: Callable[..., Any],
+    *,
+    name: str,
+    title: str,
+    description: str,
+    annotations: ToolAnnotations,
+) -> Tool:
+    return Tool.from_function(
+        fn,
+        name=name,
+        title=title,
+        description=description,
+        annotations=annotations,
         structured_output=True,
-    )(plurum_search)
-    server.tool(
-        name="plurum_get_experience",
-        title="Get Plurum experience",
-        description=_GET_EXPERIENCE_DESCRIPTION,
-        annotations=_READ_ONLY_ANNOTATIONS,
-        structured_output=True,
-    )(plurum_get_experience)
-    server.tool(
-        name="plurum_get_artifact",
-        title="Get Plurum artifact",
-        description=_GET_ARTIFACT_DESCRIPTION,
-        annotations=_READ_ONLY_ANNOTATIONS,
-        structured_output=True,
-    )(plurum_get_artifact)
+    )
+
+
+def build_tools() -> list[Tool]:
+    """Build the current hosted MCP tool inventory."""
+    tools = [
+        _tool(
+            plurum_search,
+            name="plurum_search",
+            title="Search Plurum experiences",
+            description=_SEARCH_DESCRIPTION,
+            annotations=_READ_ONLY_ANNOTATIONS,
+        ),
+        _tool(
+            plurum_get_experience,
+            name="plurum_get_experience",
+            title="Get Plurum experience",
+            description=_GET_EXPERIENCE_DESCRIPTION,
+            annotations=_READ_ONLY_ANNOTATIONS,
+        ),
+        _tool(
+            plurum_get_artifact,
+            name="plurum_get_artifact",
+            title="Get Plurum artifact",
+            description=_GET_ARTIFACT_DESCRIPTION,
+            annotations=_READ_ONLY_ANNOTATIONS,
+        ),
+    ]
+    publish_tool = _tool(
+        plurum_publish,
+        name="plurum_publish",
+        title="Publish Plurum experience",
+        description=_PUBLISH_DESCRIPTION,
+        annotations=_ADDITIVE_WRITE_ANNOTATIONS,
+    )
+
+    # Runtime defaults ensure every known value reaches Plurum's secret scanner;
+    # the advertised contract still correctly requires both fields.
+    publish_tool.parameters["required"] = ["goal", "solution"]
+    for field_schema in publish_tool.parameters["properties"].values():
+        field_schema.pop("default", None)
+    tools.append(publish_tool)
+    return tools

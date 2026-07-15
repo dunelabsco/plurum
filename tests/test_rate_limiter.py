@@ -8,6 +8,8 @@ from limits import parse
 from app.config import get_settings
 from app.core.exceptions import RateLimitError
 from app.core.rate_limiter import (
+    EXPERIENCE_CREATE_SCOPE,
+    EXPERIENCE_PUBLISH_SCOPE,
     EXPERIENCE_READ_SCOPE,
     EXPERIENCE_SEARCH_SCOPE,
     enforce_agent_rate_limit,
@@ -55,6 +57,23 @@ def test_agent_rate_limits_are_independent_by_agent_and_scope():
             rate_limit="1/minute",
             scope=EXPERIENCE_SEARCH_SCOPE,
         )
+
+
+def test_create_and_publish_write_scopes_remain_independent():
+    for scope in (EXPERIENCE_CREATE_SCOPE, EXPERIENCE_PUBLISH_SCOPE):
+        enforce_agent_rate_limit(
+            agent_id="writer",
+            rate_limit="1/hour",
+            scope=scope,
+        )
+
+    for scope in (EXPERIENCE_CREATE_SCOPE, EXPERIENCE_PUBLISH_SCOPE):
+        with pytest.raises(RateLimitError):
+            enforce_agent_rate_limit(
+                agent_id="writer",
+                rate_limit="1/hour",
+                scope=scope,
+            )
 
 
 def test_rest_search_shares_agent_limit_while_anonymous_keeps_ip_key(
@@ -137,3 +156,58 @@ def test_rest_experience_get_shares_read_limit_with_hosted_transports(
             scope=EXPERIENCE_READ_SCOPE,
         )
     assert anonymous.status_code == 200
+
+
+def test_rest_create_and_publish_share_their_hosted_operation_scopes(
+    client,
+    mock_agent,
+    auth_headers,
+):
+    write_limit = get_settings().rate_limit_experience_write
+    for scope in (EXPERIENCE_CREATE_SCOPE, EXPERIENCE_PUBLISH_SCOPE):
+        for _ in range(parse(write_limit).amount - 1):
+            enforce_agent_rate_limit(
+                agent_id=mock_agent["id"],
+                rate_limit=write_limit,
+                scope=scope,
+            )
+
+    experience = {
+        "id": "10000000-0000-0000-0000-000000000001",
+        "short_id": "write001",
+        "goal": "Share one verified rate-limit behavior",
+        "status": "draft",
+    }
+    with (
+        patch("app.core.security.validate_api_key", return_value=mock_agent),
+        patch(
+            "app.services.experience_service.ExperienceService.create",
+            return_value=experience,
+        ),
+        patch(
+            "app.services.experience_service.ExperienceService.publish",
+            return_value={**experience, "status": "published"},
+        ),
+    ):
+        created = client.post(
+            "/api/v1/experiences",
+            headers=auth_headers,
+            json={
+                "goal": "Share one verified rate-limit behavior",
+                "solution": "Use one scope for each write operation.",
+            },
+        )
+        published = client.post(
+            "/api/v1/experiences/write001/publish",
+            headers=auth_headers,
+        )
+
+    assert created.status_code == 201
+    assert published.status_code == 200
+    for scope in (EXPERIENCE_CREATE_SCOPE, EXPERIENCE_PUBLISH_SCOPE):
+        with pytest.raises(RateLimitError):
+            enforce_agent_rate_limit(
+                agent_id=mock_agent["id"],
+                rate_limit=write_limit,
+                scope=scope,
+            )

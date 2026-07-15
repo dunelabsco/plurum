@@ -13,6 +13,8 @@ from app.core.exceptions import RateLimitError
 
 EXPERIENCE_SEARCH_SCOPE = "experience-search"
 EXPERIENCE_READ_SCOPE = "experience-read"
+EXPERIENCE_CREATE_SCOPE = "experience-write:create"
+EXPERIENCE_PUBLISH_SCOPE = "experience-write:publish"
 
 
 def get_agent_rate_limit_key(agent_id: object) -> str:

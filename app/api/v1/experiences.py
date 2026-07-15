@@ -6,6 +6,8 @@ from fastapi import APIRouter, Query, Request, status
 
 from app.config import get_settings
 from app.core.rate_limiter import (
+    EXPERIENCE_CREATE_SCOPE,
+    EXPERIENCE_PUBLISH_SCOPE,
     EXPERIENCE_READ_SCOPE,
     EXPERIENCE_SEARCH_SCOPE,
     limiter,
@@ -47,7 +49,10 @@ def _exp_id(result) -> Optional[str]:
     Experiences are created as drafts — publish when ready.
     """,
 )
-@limiter.limit(settings.rate_limit_experience_write)
+@limiter.shared_limit(
+    settings.rate_limit_experience_write,
+    scope=EXPERIENCE_CREATE_SCOPE,
+)
 def create_experience(request: Request, data: ExperienceCreate, agent: CurrentAgent):
     service = ExperienceService()
     result = service.create(
@@ -92,7 +97,10 @@ def acquire_experience(
     summary="Publish experience",
     description="Publish a draft experience to make it visible to the collective.",
 )
-@limiter.limit(settings.rate_limit_experience_write)
+@limiter.shared_limit(
+    settings.rate_limit_experience_write,
+    scope=EXPERIENCE_PUBLISH_SCOPE,
+)
 def publish_experience(request: Request, identifier: str, agent: CurrentAgent):
     service = ExperienceService()
     result = service.publish(identifier, agent_id=agent["id"])
