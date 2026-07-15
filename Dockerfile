@@ -3,8 +3,9 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Install poetry
-RUN pip install poetry==1.7.1
+# Keep the builder aligned with the Poetry version that generated poetry.lock.
+# Poetry 2 ships export as a separate plugin.
+RUN pip install poetry==2.4.1 poetry-plugin-export==1.10.0
 
 # Copy dependency files
 COPY pyproject.toml poetry.lock* ./

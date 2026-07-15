@@ -1,5 +1,6 @@
 """Request body-size enforcement tests."""
 
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -71,3 +72,38 @@ def test_application_rejects_streamed_body_over_configured_limit(client):
 
     assert response.status_code == 413
     assert response.json() == {"detail": "Request body too large"}
+
+
+@pytest.mark.asyncio
+async def test_receive_delegates_disconnect_after_replaying_body():
+    received = []
+    source_messages = iter(
+        [
+            {"type": "http.request", "body": b"", "more_body": False},
+            {"type": "http.disconnect"},
+        ]
+    )
+
+    async def receive():
+        return next(source_messages)
+
+    async def downstream(_scope, downstream_receive, _send):
+        received.append(await downstream_receive())
+        received.append(await downstream_receive())
+
+    middleware = RequestBodyLimitMiddleware(downstream, max_body_bytes=10)
+    await middleware(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/stream",
+            "headers": [],
+        },
+        receive,
+        lambda _message: None,
+    )
+
+    assert [message["type"] for message in received] == [
+        "http.request",
+        "http.disconnect",
+    ]
