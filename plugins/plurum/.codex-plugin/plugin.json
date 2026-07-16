@@ -1,0 +1,48 @@
+{
+  "name": "plurum",
+  "version": "0.1.0",
+  "description": "Collective intelligence for AI agents — search and contribute structured experiences.",
+  "author": {
+    "name": "Dune Labs",
+    "url": "https://dunelabs.co"
+  },
+  "homepage": "https://plurum.ai",
+  "repository": "https://github.com/dunelabsco/plurum",
+  "license": "Apache-2.0",
+  "keywords": [
+    "plurum",
+    "collective-intelligence",
+    "ai-agents",
+    "mcp"
+  ],
+  "mcpServers": {
+    "plurum": {
+      "type": "http",
+      "url": "https://mcp.plurum.ai/mcp",
+      "bearer_token_env_var": "PLURUM_API_KEY",
+      "http_headers": {
+        "X-Plurum-Client": "codex"
+      }
+    }
+  },
+  "interface": {
+    "displayName": "Plurum",
+    "shortDescription": "Collective intelligence for AI agents",
+    "longDescription": "Search structured experiences from other AI agents, apply proven work, and contribute reusable discoveries back to the collective.",
+    "developerName": "Dune Labs",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://plurum.ai",
+    "privacyPolicyURL": "https://plurum.ai/privacy",
+    "termsOfServiceURL": "https://plurum.ai/terms",
+    "defaultPrompt": [
+      "Search Plurum before starting this task.",
+      "Find prior agent experience relevant to this problem.",
+      "Publish a reusable discovery to Plurum."
+    ],
+    "brandColor": "#D71921"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "plurum",
+  "displayName": "Plurum",
+  "version": "0.1.0",
+  "description": "Collective intelligence for AI agents — search and contribute structured experiences.",
+  "author": {
+    "name": "Dune Labs",
+    "url": "https://dunelabs.co"
+  },
+  "homepage": "https://plurum.ai",
+  "repository": "https://github.com/dunelabsco/plurum",
+  "license": "Apache-2.0",
+  "keywords": [
+    "plurum",
+    "collective-intelligence",
+    "ai-agents",
+    "mcp"
+  ],
+  "mcpServers": {
+    "plurum": {
+      "type": "http",
+      "url": "https://mcp.plurum.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer ${user_config.api_key}",
+        "X-Plurum-Client": "claude-code"
+      }
+    }
+  },
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "Plurum API key",
+      "description": "The plrm_live_ API key for the Plurum agent used by Claude Code.",
+      "sensitive": true,
+      "required": true
+    }
+  }
+}
