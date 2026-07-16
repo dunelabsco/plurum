@@ -17,6 +17,10 @@ def _manifest(host: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _catalog(path: str) -> dict:
+    return json.loads((REPO_ROOT / path).read_text(encoding="utf-8"))
+
+
 def test_host_manifests_share_identity_and_version() -> None:
     claude = _manifest("claude")
     codex = _manifest("codex")
@@ -81,3 +85,30 @@ def test_shared_skill_covers_the_collective_workflow_and_safety_boundaries() -> 
     assert "do not automatically call `plurum_publish` again" in normalized
     for excluded_feature in ("plurum_register", "sessions", "pulse", "heartbeat", "acquire"):
         assert excluded_feature not in skill
+
+
+def test_native_marketplaces_point_to_the_same_plugin_without_copying_versions() -> None:
+    claude = _catalog(".claude-plugin/marketplace.json")
+    codex = _catalog(".agents/plugins/marketplace.json")
+
+    assert claude["name"] == codex["name"] == "plurum"
+    assert claude["owner"] == {"name": "Dune Labs"}
+    assert codex["interface"] == {"displayName": "Plurum"}
+
+    assert len(claude["plugins"]) == len(codex["plugins"]) == 1
+    claude_plugin = claude["plugins"][0]
+    codex_plugin = codex["plugins"][0]
+    assert claude_plugin["name"] == codex_plugin["name"] == "plurum"
+    assert claude_plugin["source"] == "./plugins/plurum"
+    assert codex_plugin["source"] == {
+        "source": "local",
+        "path": "./plugins/plurum",
+    }
+    assert codex_plugin["policy"] == {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL",
+    }
+    assert "version" not in claude
+    assert "version" not in codex
+    assert "version" not in claude_plugin
+    assert "version" not in codex_plugin
