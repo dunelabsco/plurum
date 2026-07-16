@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import asynccontextmanager
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -383,3 +384,78 @@ async def test_read_tools_reject_whitespace_identifier_and_negative_index(monkey
     assert "greater than or equal to 0" in _render_tool_text(negative)
     assert oversized.isError is True
     assert "at most 64 characters" in _render_tool_text(oversized)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        (
+            "plurum_get_experience",
+            {"experience_id": "plrm_live_read_secret_123456789"},
+        ),
+        (
+            "plurum_get_experience",
+            {"experience_id": {"plrm_live_read_secret_123456789": "value"}},
+        ),
+        (
+            "plurum_get_artifact",
+            {
+                "experience_id": "plrm_live_read_secret_123456789",
+                "artifact_index": 0,
+            },
+        ),
+        (
+            "plurum_get_artifact",
+            {
+                "experience_id": {"value": "plrm_live_read_secret_123456789"},
+                "artifact_index": 0,
+            },
+        ),
+        (
+            "plurum_get_artifact",
+            {
+                "experience_id": "read01",
+                "artifact_index": "plrm_live_read_secret_123456789",
+            },
+        ),
+        (
+            "plurum_get_artifact",
+            {
+                "experience_id": "read01",
+                "artifact_index": {"plrm_live_read_secret_123456789": "value"},
+            },
+        ),
+    ],
+)
+async def test_read_tools_scan_raw_arguments_before_validation(
+    monkeypatch,
+    caplog,
+    tool_name,
+    arguments,
+):
+    from app.main import create_app
+    from app.mcp import auth, tools
+
+    secret = "plrm_live_read_secret_123456789"
+    service_factory = MagicMock()
+    limiter = MagicMock()
+    event_logger = MagicMock()
+    monkeypatch.setattr(auth, "validate_api_key", lambda _api_key: _agent())
+    monkeypatch.setattr(tools, "ExperienceService", service_factory)
+    monkeypatch.setattr(tools, "enforce_agent_rate_limit", limiter)
+    monkeypatch.setattr(tools, "log_event", event_logger)
+    caplog.set_level(logging.ERROR)
+    app = create_app()
+
+    async with _mcp_session(app) as session:
+        result = await session.call_tool(tool_name, arguments)
+
+    rendered = _render_tool_text(result)
+    assert result.isError is True
+    assert "Potential API key detected" in rendered
+    assert secret not in rendered
+    assert secret not in caplog.text
+    service_factory.assert_not_called()
+    limiter.assert_not_called()
+    event_logger.assert_not_called()

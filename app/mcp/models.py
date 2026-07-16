@@ -4,7 +4,33 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, WithJsonSchema
+from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
+
+
+class SearchInput(BaseModel):
+    """Strict search validation after raw arguments have been scanned."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True, strict=True)
+
+    query: str = Field(min_length=2, max_length=1000)
+    limit: int = Field(default=10, ge=1, le=30)
+
+
+class GetExperienceInput(BaseModel):
+    """Strict experience-read validation after raw arguments have been scanned."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True, strict=True)
+
+    experience_id: str = Field(max_length=64)
+
+
+class GetArtifactInput(BaseModel):
+    """Strict artifact-read validation after raw arguments have been scanned."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True, strict=True)
+
+    experience_id: str = Field(max_length=64)
+    artifact_index: int = Field(ge=0)
 
 
 class PublishArtifactInput(BaseModel):
@@ -62,6 +88,44 @@ class ArchiveInput(BaseModel):
 # FastMCP validates function arguments before invoking the handler. Runtime `Any`
 # keeps malformed, potentially secret-bearing values inside Plurum's sanitizing
 # boundary, while WithJsonSchema preserves the precise schema clients should use.
+SearchQueryInput = Annotated[
+    Any,
+    WithJsonSchema(
+        {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 1000,
+        }
+    ),
+]
+SearchLimitInput = Annotated[
+    Any,
+    WithJsonSchema(
+        {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30,
+        }
+    ),
+]
+ExperienceIdentifierInput = Annotated[
+    Any,
+    WithJsonSchema(
+        {
+            "type": "string",
+            "maxLength": 64,
+        }
+    ),
+]
+ArtifactIndexInput = Annotated[
+    Any,
+    WithJsonSchema(
+        {
+            "type": "integer",
+            "minimum": 0,
+        }
+    ),
+]
 LeakSafeStringInput = Annotated[Any, WithJsonSchema({"type": "string"})]
 LeakSafeStringListInput = Annotated[
     Any,

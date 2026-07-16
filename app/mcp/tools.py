@@ -34,12 +34,19 @@ from app.core.rate_limiter import (
 from app.mcp.auth import get_mcp_principal
 from app.mcp.models import (
     ArchiveInput,
+    ArtifactIndexInput,
+    ExperienceIdentifierInput,
+    GetArtifactInput,
+    GetExperienceInput,
     LeakSafeStringInput,
     LeakSafeStringListInput,
     OutcomeValueInput,
     PublishArtifactsInput,
     PublishInput,
     ReportOutcomeInput,
+    SearchInput,
+    SearchLimitInput,
+    SearchQueryInput,
     VoteInput,
     VoteValueInput,
 )
@@ -331,6 +338,72 @@ def _format_publish_validation_error(exc: PydanticValidationError) -> str:
         prefix = f"{location}: " if location else ""
         messages.append(f"{prefix}{error['msg']}")
     return "Invalid publish input: " + "; ".join(messages)
+
+
+def _build_search_data(*, query: Any, limit: Any) -> tuple[str, int]:
+    raw = {"query": query, "limit": limit}
+    reject_api_keys(raw, path="search")
+
+    try:
+        search_input = SearchInput.model_validate(raw)
+    except PydanticValidationError:
+        raise ValidationError(
+            "query must be a string with at least 2 and at most 1000 characters; "
+            "limit must be an integer from 1 to 30."
+        ) from None
+
+    normalized_query = search_input.query.strip()
+    if len(normalized_query) < 2:
+        raise ValidationError(
+            "query must contain at least 2 non-whitespace characters"
+        )
+    return normalized_query, search_input.limit
+
+
+def _build_get_experience_data(*, experience_id: Any) -> str:
+    raw = {"experience_id": experience_id}
+    reject_api_keys(raw, path="get_experience")
+
+    try:
+        read_input = GetExperienceInput.model_validate(raw)
+    except PydanticValidationError:
+        raise ValidationError(
+            "experience_id must be a string with at most 64 characters."
+        ) from None
+
+    identifier = read_input.experience_id.strip()
+    if not identifier:
+        raise ValidationError(
+            "experience_id must contain non-whitespace characters"
+        )
+    return identifier
+
+
+def _build_get_artifact_data(
+    *,
+    experience_id: Any,
+    artifact_index: Any,
+) -> tuple[str, int]:
+    raw = {
+        "experience_id": experience_id,
+        "artifact_index": artifact_index,
+    }
+    reject_api_keys(raw, path="get_artifact")
+
+    try:
+        read_input = GetArtifactInput.model_validate(raw)
+    except PydanticValidationError:
+        raise ValidationError(
+            "experience_id must be a string with at most 64 characters; "
+            "artifact_index must be an integer greater than or equal to 0."
+        ) from None
+
+    identifier = read_input.experience_id.strip()
+    if not identifier:
+        raise ValidationError(
+            "experience_id must contain non-whitespace characters"
+        )
+    return identifier, read_input.artifact_index
 
 
 def _build_publish_data(
@@ -786,30 +859,28 @@ def _run_archive(
 
 async def plurum_search(
     query: Annotated[
-        str,
+        SearchQueryInput,
         Field(
-            min_length=2,
-            max_length=1000,
             description="What you're trying to figure out, in plain text.",
         ),
-    ],
+    ] = None,
     limit: Annotated[
-        int,
-        Field(ge=1, le=30, description="Max results (default 10, max 30)."),
+        SearchLimitInput,
+        Field(description="Max results (default 10, max 30)."),
     ] = 10,
 ) -> dict[str, Any]:
     """Search Plurum and return token-efficient experience cards."""
-    normalized_query = query.strip()
-    if len(normalized_query) < 2:
-        raise ToolError("query must contain at least 2 non-whitespace characters")
-
     principal = get_mcp_principal()
     assert principal is not None
     try:
+        normalized_query, normalized_limit = _build_search_data(
+            query=query,
+            limit=limit,
+        )
         return await anyio.to_thread.run_sync(
             _run_search,
             normalized_query,
-            limit,
+            normalized_limit,
             str(principal.agent["id"]),
             principal.client,
         )
@@ -821,21 +892,17 @@ async def plurum_search(
 
 async def plurum_get_experience(
     experience_id: Annotated[
-        str,
+        ExperienceIdentifierInput,
         Field(
-            max_length=64,
             description="The id (or short_id) returned by plurum_search.",
         ),
-    ],
+    ] = None,
 ) -> dict[str, Any]:
     """Fetch a readable experience while keeping artifact bodies out of context."""
-    identifier = experience_id.strip()
-    if not identifier:
-        raise ToolError("experience_id must contain non-whitespace characters")
-
     principal = get_mcp_principal()
     assert principal is not None
     try:
+        identifier = _build_get_experience_data(experience_id=experience_id)
         return await anyio.to_thread.run_sync(
             _run_get_experience,
             identifier,
@@ -854,36 +921,34 @@ async def plurum_get_experience(
 
 async def plurum_get_artifact(
     experience_id: Annotated[
-        str,
+        ExperienceIdentifierInput,
         Field(
-            max_length=64,
             description="The id (or short_id) of the experience.",
         ),
-    ],
+    ] = None,
     artifact_index: Annotated[
-        int,
+        ArtifactIndexInput,
         Field(
-            ge=0,
             description=(
                 "Zero-based index of the artifact in the experience's artifacts "
                 "list (matches the `index` field returned by "
                 "plurum_get_experience)."
             ),
         ),
-    ],
+    ] = None,
 ) -> dict[str, Any]:
     """Fetch one full artifact from a readable experience."""
-    identifier = experience_id.strip()
-    if not identifier:
-        raise ToolError("experience_id must contain non-whitespace characters")
-
     principal = get_mcp_principal()
     assert principal is not None
     try:
+        identifier, normalized_index = _build_get_artifact_data(
+            experience_id=experience_id,
+            artifact_index=artifact_index,
+        )
         return await anyio.to_thread.run_sync(
             _run_get_artifact,
             identifier,
-            artifact_index,
+            normalized_index,
             str(principal.agent["id"]),
             principal.client,
         )
@@ -1086,6 +1151,7 @@ def _tool(
     description: str,
     annotations: ToolAnnotations,
     required_fields: tuple[str, ...] | None = None,
+    preserve_optional_defaults: bool = False,
 ) -> Tool:
     tool = Tool.from_function(
         fn,
@@ -1099,8 +1165,9 @@ def _tool(
         # Runtime defaults keep secret-bearing malformed values inside the
         # handler; the public schema still advertises the real required fields.
         tool.parameters["required"] = list(required_fields)
-        for field_schema in tool.parameters["properties"].values():
-            field_schema.pop("default", None)
+        for field_name, field_schema in tool.parameters["properties"].items():
+            if field_name in required_fields or not preserve_optional_defaults:
+                field_schema.pop("default", None)
     return tool
 
 
@@ -1113,6 +1180,8 @@ def build_tools() -> list[Tool]:
             title="Search Plurum experiences",
             description=_SEARCH_DESCRIPTION,
             annotations=_READ_ONLY_ANNOTATIONS,
+            required_fields=("query",),
+            preserve_optional_defaults=True,
         ),
         _tool(
             plurum_get_experience,
@@ -1120,6 +1189,7 @@ def build_tools() -> list[Tool]:
             title="Get Plurum experience",
             description=_GET_EXPERIENCE_DESCRIPTION,
             annotations=_READ_ONLY_ANNOTATIONS,
+            required_fields=("experience_id",),
         ),
         _tool(
             plurum_get_artifact,
@@ -1127,6 +1197,7 @@ def build_tools() -> list[Tool]:
             title="Get Plurum artifact",
             description=_GET_ARTIFACT_DESCRIPTION,
             annotations=_READ_ONLY_ANNOTATIONS,
+            required_fields=("experience_id", "artifact_index"),
         ),
     ]
     publish_tool = _tool(

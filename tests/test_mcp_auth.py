@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from unittest.mock import MagicMock
 
 import anyio
 import httpx
@@ -49,6 +50,10 @@ async def _mcp_session(
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
                     yield session
+
+
+def _render_tool_text(result) -> str:
+    return " ".join(block.text for block in result.content if hasattr(block, "text"))
 
 
 @pytest.mark.asyncio
@@ -200,16 +205,34 @@ async def test_mcp_initializes_and_lists_current_tools(monkeypatch):
         "the host's own memory",
     )
     search_schema = search_tool.inputSchema
+    assert set(search_schema["properties"]) == {"query", "limit"}
+    assert search_schema["required"] == ["query"]
+    expected_search_properties = SEARCH_SCHEMA["parameters"]["properties"]
+    for field_name, expected_schema in expected_search_properties.items():
+        actual_schema = search_schema["properties"][field_name]
+        assert actual_schema["type"] == expected_schema["type"]
+        assert actual_schema["description"] == expected_schema["description"]
     assert search_schema["properties"]["query"]["minLength"] == 2
     assert search_schema["properties"]["query"]["maxLength"] == 1000
+    assert search_schema["properties"]["limit"]["minimum"] == 1
+    assert search_schema["properties"]["limit"]["maximum"] == 30
+    assert search_schema["properties"]["limit"]["default"] == 10
 
     experience_tool = tools_by_name["plurum_get_experience"]
     assert experience_tool.title == "Get Plurum experience"
     assert experience_tool.description == GET_EXPERIENCE_SCHEMA["description"]
     assert set(experience_tool.inputSchema["properties"]) == {"experience_id"}
     assert experience_tool.inputSchema["required"] == ["experience_id"]
-    assert experience_tool.inputSchema["properties"]["experience_id"]["type"] == "string"
-    assert experience_tool.inputSchema["properties"]["experience_id"]["maxLength"] == 64
+    experience_id_schema = experience_tool.inputSchema["properties"]["experience_id"]
+    expected_experience_id_schema = GET_EXPERIENCE_SCHEMA["parameters"]["properties"][
+        "experience_id"
+    ]
+    assert experience_id_schema["type"] == expected_experience_id_schema["type"]
+    assert (
+        experience_id_schema["description"]
+        == expected_experience_id_schema["description"]
+    )
+    assert experience_id_schema["maxLength"] == 64
 
     artifact_tool = tools_by_name["plurum_get_artifact"]
     assert artifact_tool.title == "Get Plurum artifact"
@@ -222,7 +245,11 @@ async def test_mcp_initializes_and_lists_current_tools(monkeypatch):
         "experience_id",
         "artifact_index",
     }
-    assert artifact_tool.inputSchema["properties"]["artifact_index"]["type"] == "integer"
+    expected_artifact_properties = GET_ARTIFACT_SCHEMA["parameters"]["properties"]
+    for field_name, expected_schema in expected_artifact_properties.items():
+        actual_schema = artifact_tool.inputSchema["properties"][field_name]
+        assert actual_schema["type"] == expected_schema["type"]
+        assert actual_schema["description"] == expected_schema["description"]
     assert artifact_tool.inputSchema["properties"]["artifact_index"]["minimum"] == 0
     assert artifact_tool.inputSchema["properties"]["experience_id"]["maxLength"] == 64
 
@@ -252,6 +279,8 @@ async def test_mcp_initializes_and_lists_current_tools(monkeypatch):
         actual_schema = publish_tool.inputSchema["properties"][field_name]
         assert actual_schema["type"] == expected_schema["type"]
         assert actual_schema["description"] == expected_schema["description"]
+        if field_name in {"dead_ends", "gotchas", "tags"}:
+            assert actual_schema["items"] == expected_schema["items"]
     artifact_schema = publish_tool.inputSchema["properties"]["artifacts"]["items"]
     assert set(artifact_schema["properties"]) == {
         "language",
@@ -360,8 +389,11 @@ async def test_mcp_search_returns_trimmed_structured_results(monkeypatch):
         lambda _api_key: _agent("00000000-0000-0000-0000-000000000001"),
     )
 
+    search_calls: list[dict] = []
+
     class StubExperienceService:
-        def search(self, **_kwargs):
+        def search(self, **kwargs):
+            search_calls.append(kwargs)
             return {
                 "total_found": 1,
                 "results": [
@@ -404,6 +436,7 @@ async def test_mcp_search_returns_trimmed_structured_results(monkeypatch):
             "similarity": 0.91,
         }
     ]
+    assert search_calls == [{"query": "deploy fastapi", "limit": 5}]
     assert events == [
         {
             "event_type": "search",
@@ -585,14 +618,16 @@ async def test_mcp_search_rejects_normalized_short_and_oversized_queries(monkeyp
         lambda _api_key: _agent("00000000-0000-0000-0000-000000000001"),
     )
 
-    class UnexpectedExperienceService:
-        def search(self, **_kwargs):
-            raise AssertionError("invalid queries must not run embeddings")
-
-    monkeypatch.setattr(tools, "ExperienceService", UnexpectedExperienceService)
+    service_factory = MagicMock()
+    limiter = MagicMock()
+    event_logger = MagicMock()
+    monkeypatch.setattr(tools, "ExperienceService", service_factory)
+    monkeypatch.setattr(tools, "enforce_agent_rate_limit", limiter)
+    monkeypatch.setattr(tools, "log_event", event_logger)
     app = create_app()
 
     async with _mcp_session(app) as session:
+        missing = await session.call_tool("plurum_search", {})
         normalized_short = await session.call_tool(
             "plurum_search",
             {"query": "a "},
@@ -601,17 +636,80 @@ async def test_mcp_search_rejects_normalized_short_and_oversized_queries(monkeyp
             "plurum_search",
             {"query": "x" * 1001},
         )
+        zero_limit = await session.call_tool(
+            "plurum_search",
+            {"query": "valid query", "limit": 0},
+        )
+        oversized_limit = await session.call_tool(
+            "plurum_search",
+            {"query": "valid query", "limit": 31},
+        )
+        wrong_type_limit = await session.call_tool(
+            "plurum_search",
+            {"query": "valid query", "limit": "5"},
+        )
 
-    short_text = " ".join(
-        block.text for block in normalized_short.content if hasattr(block, "text")
-    )
-    oversized_text = " ".join(
-        block.text for block in oversized.content if hasattr(block, "text")
-    )
+    assert missing.isError is True
+    assert "query must be a string" in _render_tool_text(missing)
     assert normalized_short.isError is True
-    assert "at least 2 non-whitespace characters" in short_text
+    assert "at least 2 non-whitespace characters" in _render_tool_text(normalized_short)
     assert oversized.isError is True
-    assert "at most 1000 characters" in oversized_text
+    assert "at most 1000 characters" in _render_tool_text(oversized)
+    for result in (zero_limit, oversized_limit, wrong_type_limit):
+        assert result.isError is True
+        assert "limit must be an integer from 1 to 30" in _render_tool_text(result)
+    service_factory.assert_not_called()
+    limiter.assert_not_called()
+    event_logger.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"query": "plrm_live_read_secret_123456789"},
+        {"query": {"plrm_live_read_secret_123456789": "value"}},
+        {
+            "query": "safe query",
+            "limit": {"value": "plrm_live_read_secret_123456789"},
+        },
+        {"query": "safe query", "limit": "plrm_live_read_secret_123456789"},
+    ],
+)
+async def test_mcp_search_scans_raw_arguments_before_validation(
+    monkeypatch,
+    caplog,
+    arguments,
+):
+    from app.main import create_app
+    from app.mcp import auth, tools
+
+    secret = "plrm_live_read_secret_123456789"
+    service_factory = MagicMock()
+    limiter = MagicMock()
+    event_logger = MagicMock()
+    monkeypatch.setattr(
+        auth,
+        "validate_api_key",
+        lambda _api_key: _agent("00000000-0000-0000-0000-000000000001"),
+    )
+    monkeypatch.setattr(tools, "ExperienceService", service_factory)
+    monkeypatch.setattr(tools, "enforce_agent_rate_limit", limiter)
+    monkeypatch.setattr(tools, "log_event", event_logger)
+    caplog.set_level(logging.ERROR)
+    app = create_app()
+
+    async with _mcp_session(app) as session:
+        result = await session.call_tool("plurum_search", arguments)
+
+    rendered = _render_tool_text(result)
+    assert result.isError is True
+    assert "Potential API key detected" in rendered
+    assert secret not in rendered
+    assert secret not in caplog.text
+    service_factory.assert_not_called()
+    limiter.assert_not_called()
+    event_logger.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -737,6 +835,37 @@ async def test_mcp_canonical_path_request_limit_and_transport_security(monkeypat
     assert oversized.json() == {"detail": "Request body too large"}
     assert untrusted_host.status_code == 421
     assert len(validated_keys) == 2
+
+
+@pytest.mark.asyncio
+async def test_mcp_rejects_streamed_oversized_body_before_authentication(monkeypatch):
+    from app.main import create_app
+    from app.mcp import auth
+
+    validate_api_key = MagicMock()
+    monkeypatch.setattr(auth, "validate_api_key", validate_api_key)
+    app = create_app()
+
+    async def oversized_chunks():
+        chunk = b"x" * (1024 * 1024)
+        for _ in range(6):
+            yield chunk
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+            headers={
+                "Authorization": "Bearer plrm_live_valid",
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            },
+        ) as client:
+            response = await client.post("/mcp", content=oversized_chunks())
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Request body too large"}
+    validate_api_key.assert_not_called()
 
 
 @pytest.mark.asyncio
