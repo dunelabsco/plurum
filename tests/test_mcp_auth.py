@@ -27,11 +27,14 @@ def _agent(agent_id: str, name: str = "test-agent") -> dict:
 
 
 @asynccontextmanager
-async def _mcp_session(app, api_key: str = "plrm_live_valid"):
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "X-Plurum-Client": "codex",
-    }
+async def _mcp_session(
+    app,
+    api_key: str = "plrm_live_valid",
+    client_name: str | None = "codex",
+):
+    headers = {"Authorization": f"Bearer {api_key}"}
+    if client_name is not None:
+        headers["X-Plurum-Client"] = client_name
     transport = httpx.ASGITransport(app=app)
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
@@ -434,8 +437,13 @@ async def test_mcp_search_preserves_no_result_publish_reminder(monkeypatch):
                 "results": [{"id": "irrelevant", "similarity": 0.39}],
             }
 
+    events: list[dict] = []
     monkeypatch.setattr(tools, "ExperienceService", StubExperienceService)
-    monkeypatch.setattr(tools, "log_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        tools,
+        "log_event",
+        lambda event_type, **kwargs: events.append({"event_type": event_type, **kwargs}),
+    )
     app = create_app()
 
     async with _mcp_session(app) as session:
@@ -456,6 +464,114 @@ async def test_mcp_search_preserves_no_result_publish_reminder(monkeypatch):
         "top_similarity": 0.39,
         "count": 0,
     }
+    assert events == [
+        {
+            "event_type": "search",
+            "agent_id": "00000000-0000-0000-0000-000000000001",
+            "query": "unseen deployment issue",
+            "metadata": {
+                "channel": "mcp",
+                "client": "codex",
+                "result_count": 0,
+                "top_similarity": 0.39,
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("client_name", "expected_client"),
+    [
+        (None, "unknown"),
+        ("   ", "unknown"),
+        (" CoDeX ", "codex"),
+        ("CLAUDE-CODE", "claude-code"),
+        ("00000000-0000-0000-0000-000000000099", "unknown"),
+    ],
+)
+async def test_mcp_client_attribution_is_normalized_and_non_authoritative(
+    monkeypatch,
+    client_name,
+    expected_client,
+):
+    from app.main import create_app
+    from app.mcp import auth, tools
+
+    authenticated_agent_id = "00000000-0000-0000-0000-000000000001"
+    rate_calls: list[dict] = []
+    events: list[dict] = []
+
+    class StubExperienceService:
+        def search(self, **_kwargs):
+            return {"total_found": 0, "results": []}
+
+    monkeypatch.setattr(
+        auth,
+        "validate_api_key",
+        lambda _api_key: _agent(authenticated_agent_id),
+    )
+    monkeypatch.setattr(tools, "ExperienceService", StubExperienceService)
+    monkeypatch.setattr(
+        tools,
+        "enforce_agent_rate_limit",
+        lambda **kwargs: rate_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        tools,
+        "log_event",
+        lambda event_type, **kwargs: events.append({"event_type": event_type, **kwargs}),
+    )
+    app = create_app()
+
+    async with _mcp_session(app, client_name=client_name) as session:
+        result = await session.call_tool("plurum_search", {"query": "client attribution"})
+
+    assert result.isError is False
+    assert [call["agent_id"] for call in rate_calls] == [authenticated_agent_id]
+    assert len(events) == 1
+    assert events[0]["agent_id"] == authenticated_agent_id
+    assert events[0]["metadata"]["channel"] == "mcp"
+    assert events[0]["metadata"]["client"] == expected_client
+
+
+@pytest.mark.asyncio
+async def test_mcp_success_is_not_changed_by_event_insert_failure(monkeypatch, caplog):
+    from app.main import create_app
+    from app.mcp import auth, tools
+    from app.repositories import event_repo
+
+    secret = "plrm_live_event_provider_secret_123456789"
+
+    class StubExperienceService:
+        def search(self, **_kwargs):
+            return {"total_found": 0, "results": []}
+
+    monkeypatch.setattr(
+        auth,
+        "validate_api_key",
+        lambda _api_key: _agent("00000000-0000-0000-0000-000000000001"),
+    )
+    monkeypatch.setattr(tools, "ExperienceService", StubExperienceService)
+    monkeypatch.setattr(
+        event_repo,
+        "get_supabase_client",
+        lambda: (_ for _ in ()).throw(RuntimeError(f"provider included {secret}")),
+    )
+    caplog.set_level(logging.DEBUG, logger=event_repo.__name__)
+    app = create_app()
+
+    async with _mcp_session(app) as session:
+        result = await session.call_tool(
+            "plurum_search",
+            {"query": "event isolation"},
+        )
+
+    assert result.isError is False
+    assert result.structuredContent is not None
+    assert result.structuredContent["query"] == "event isolation"
+    assert "RuntimeError" in caplog.text
+    assert secret not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -514,7 +630,13 @@ async def test_mcp_search_redacts_unexpected_service_errors(monkeypatch, caplog)
         def search(self, **_kwargs):
             raise RuntimeError(f"upstream accidentally included {secret}")
 
+    events: list[dict] = []
     monkeypatch.setattr(tools, "ExperienceService", FailingExperienceService)
+    monkeypatch.setattr(
+        tools,
+        "log_event",
+        lambda event_type, **kwargs: events.append({"event_type": event_type, **kwargs}),
+    )
     caplog.set_level(logging.ERROR)
     app = create_app()
 
@@ -526,6 +648,7 @@ async def test_mcp_search_redacts_unexpected_service_errors(monkeypatch, caplog)
     assert "Search failed. Reference:" in rendered
     assert secret not in rendered
     assert secret not in caplog.text
+    assert events == []
 
 
 @pytest.mark.asyncio

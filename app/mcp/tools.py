@@ -205,6 +205,11 @@ class _PublishCreateUncertainError(Exception):
         super().__init__(type(cause).__name__)
 
 
+def _mcp_event_metadata(client: str, **values: Any) -> dict[str, Any]:
+    """Build consistent hosted-transport attribution for every tool event."""
+    return {**values, "channel": "mcp", "client": client}
+
+
 def _trim_search_result(result: dict[str, Any]) -> dict[str, Any]:
     return {
         field: result[field]
@@ -534,16 +539,20 @@ def _run_search(query: str, limit: int, agent_id: str, client: str) -> dict[str,
         ),
         default=0.0,
     )
+    visible_result_count = (
+        sum(isinstance(result, dict) for result in results)
+        if top_similarity >= _SIMILARITY_FLOOR
+        else 0
+    )
     log_event(
         "search",
         agent_id=agent_id,
         query=query,
-        metadata={
-            "channel": "mcp",
-            "client": client,
-            "result_count": len(results),
-            "top_similarity": round(top_similarity, 4),
-        },
+        metadata=_mcp_event_metadata(
+            client,
+            result_count=visible_result_count,
+            top_similarity=round(top_similarity, 4),
+        ),
     )
 
     if not results or top_similarity < _SIMILARITY_FLOOR:
@@ -592,11 +601,7 @@ def _run_get_experience(
         "get_experience",
         agent_id=agent_id,
         experience_id=str(experience_id) if experience_id else None,
-        metadata={
-            "channel": "mcp",
-            "client": client,
-            "domain": experience.get("domain"),
-        },
+        metadata=_mcp_event_metadata(client, domain=experience.get("domain")),
     )
     return {"reminder": _GET_EXPERIENCE_REMINDER, "experience": result}
 
@@ -630,11 +635,7 @@ def _run_get_artifact(
         "get_artifact",
         agent_id=agent_id,
         experience_id=str(experience_id) if experience_id else None,
-        metadata={
-            "channel": "mcp",
-            "client": client,
-            "artifact_index": artifact_index,
-        },
+        metadata=_mcp_event_metadata(client, artifact_index=artifact_index),
     )
     return {
         "experience_id": identifier,
@@ -674,11 +675,7 @@ def _run_publish(
         "create",
         agent_id=agent_id,
         experience_id=str(canonical_id) if canonical_id else None,
-        metadata={
-            "channel": "mcp",
-            "client": client,
-            "domain": data.get("domain"),
-        },
+        metadata=_mcp_event_metadata(client, domain=data.get("domain")),
     )
 
     raw_identifier = created_result.get("short_id") or canonical_id
@@ -696,7 +693,7 @@ def _run_publish(
         "publish",
         agent_id=agent_id,
         experience_id=str(published_id or canonical_id) if (published_id or canonical_id) else None,
-        metadata={"channel": "mcp", "client": client},
+        metadata=_mcp_event_metadata(client),
     )
     return {"result": "Published.", "id": identifier}
 
@@ -726,12 +723,11 @@ def _run_report_outcome(
         "report_outcome",
         agent_id=agent_id,
         experience_id=str(canonical_id) if canonical_id else None,
-        metadata={
-            "channel": "mcp",
-            "client": client,
-            "outcome": outcome,
-            "success": success,
-        },
+        metadata=_mcp_event_metadata(
+            client,
+            outcome=outcome,
+            success=success,
+        ),
     )
     return {"result": "Outcome recorded.", "id": identifier}
 
@@ -758,11 +754,7 @@ def _run_vote(
         "vote",
         agent_id=agent_id,
         experience_id=str(canonical_id) if canonical_id else None,
-        metadata={
-            "channel": "mcp",
-            "client": client,
-            "vote_type": vote_type,
-        },
+        metadata=_mcp_event_metadata(client, vote_type=vote_type),
     )
     return {"result": "Vote recorded.", "id": identifier}
 
@@ -787,7 +779,7 @@ def _run_archive(
         "archive",
         agent_id=agent_id,
         experience_id=str(canonical_id) if canonical_id else None,
-        metadata={"channel": "mcp", "client": client},
+        metadata=_mcp_event_metadata(client),
     )
     return {"result": "Archived.", "id": identifier}
 
