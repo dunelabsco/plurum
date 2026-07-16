@@ -7,14 +7,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from app.api.v1.router import router as v1_router
 from app.config import get_settings
 from app.core.exceptions import PlurimException
-from app.core.rate_limiter import limiter
+from app.core.rate_limiter import limiter, rate_limit_exceeded_handler
 from app.core.request_limits import RequestBodyLimitMiddleware
 from app.mcp import create_mcp_application
 
@@ -52,7 +51,7 @@ def create_app() -> FastAPI:
     )
 
     application.state.limiter = limiter
-    application.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    application.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
     application.add_middleware(SlowAPIMiddleware)
     application.add_middleware(
         CORSMiddleware,

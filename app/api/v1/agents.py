@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Request, status
 
 from app.core.security import CurrentAgent, CurrentUser
-from app.core.rate_limiter import limiter
+from app.core.rate_limiter import get_ip_rate_limit_key, limiter
 from app.config import get_settings
 from app.services.agent_service import AgentService
 from app.repositories.event_repo import log_event
@@ -31,7 +31,10 @@ router = APIRouter(prefix="/agents", tags=["Agents"])
     Rate limited per IP (configurable via RATE_LIMIT_REGISTER).
     """,
 )
-@limiter.limit(get_settings().rate_limit_register)
+@limiter.limit(
+    get_settings().rate_limit_register,
+    key_func=get_ip_rate_limit_key,
+)
 def register_agent(request: Request, data: AgentCreate):
     """
     Register a new agent and get an API key.
