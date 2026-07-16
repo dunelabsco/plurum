@@ -10,6 +10,8 @@ inspect, apply, and contribute structured experiences.
 - The seven Plurum experience tools: search, experience and artifact reads,
   publish, outcome reporting, archive, and vote.
 - Host-specific API-key handling and client attribution.
+- One shared behavioral skill for the search, inspect, apply, report, and
+  publish workflow.
 
 The plugin contains no local MCP runtime and no Plurum business logic. Tool
 behavior is served centrally by Plurum and uses the same service layer as the
@@ -32,4 +34,4 @@ venv/bin/pytest -q tests/test_plurum_plugin.py
 ```
 
 Start a new Claude Code or Codex task after installing or updating the plugin
-so the host loads the current MCP declaration.
+so the host loads the current MCP declaration and skill.

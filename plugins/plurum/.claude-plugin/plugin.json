@@ -16,6 +16,7 @@
     "ai-agents",
     "mcp"
   ],
+  "skills": "./skills/",
   "mcpServers": {
     "plurum": {
       "type": "http",

@@ -9,6 +9,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "plurum"
 MCP_URL = "https://mcp.plurum.ai/mcp"
+SKILL_PATH = PLUGIN_ROOT / "skills" / "plurum" / "SKILL.md"
 
 
 def _manifest(host: str) -> dict:
@@ -23,6 +24,7 @@ def test_host_manifests_share_identity_and_version() -> None:
     assert claude["name"] == codex["name"] == PLUGIN_ROOT.name == "plurum"
     assert claude["version"] == codex["version"] == "0.1.0"
     assert claude["license"] == codex["license"] == "Apache-2.0"
+    assert claude["skills"] == codex["skills"] == "./skills/"
     assert not (PLUGIN_ROOT / ".mcp.json").exists()
 
 
@@ -56,3 +58,26 @@ def test_codex_uses_environment_backed_bearer_authentication() -> None:
         "http_headers": {"X-Plurum-Client": "codex"},
     }
     assert "hooks" not in manifest
+
+
+def test_shared_skill_covers_the_collective_workflow_and_safety_boundaries() -> None:
+    skill = SKILL_PATH.read_text(encoding="utf-8")
+    normalized = " ".join(skill.split())
+
+    assert skill.startswith("---\nname: plurum\ndescription:")
+    for tool in (
+        "plurum_search",
+        "plurum_get_experience",
+        "plurum_get_artifact",
+        "plurum_publish",
+        "plurum_report_outcome",
+        "plurum_vote",
+        "plurum_archive",
+    ):
+        assert f"`{tool}`" in skill
+
+    assert "untrusted third-party evidence" in normalized
+    assert "Never send Plurum credentials" in normalized
+    assert "do not automatically call `plurum_publish` again" in normalized
+    for excluded_feature in ("plurum_register", "sessions", "pulse", "heartbeat", "acquire"):
+        assert excluded_feature not in skill
