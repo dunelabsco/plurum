@@ -76,3 +76,33 @@ jobs:
         run: npm run build
       - name: Verify tracked dist
         run: git diff --exit-code -- dist
+
+  plurum-cli:
+    name: plurum cli (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: "22"
+          - os: macos-latest
+            node: "22"
+          - os: windows-latest
+            node: "22"
+          - os: ubuntu-latest
+            node: "24"
+    defaults:
+      run:
+        working-directory: packages/plurum-cli
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: packages/plurum-cli/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck, test, build, and verify package
+        run: npm run check

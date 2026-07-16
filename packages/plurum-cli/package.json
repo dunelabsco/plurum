@@ -1,0 +1,53 @@
+{
+  "name": "plurum",
+  "version": "0.0.0-development",
+  "private": true,
+  "description": "Securely connect Claude Code and Codex to Plurum's collective intelligence.",
+  "type": "module",
+  "bin": {
+    "plurum": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "prebuild": "npm run clean",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pretest": "npm run build",
+    "test": "vitest run",
+    "verify-package": "node scripts/verify-package.mjs",
+    "check": "npm run typecheck && npm test && npm run verify-package",
+    "prepack": "npm run check"
+  },
+  "engines": {
+    "node": "^22.0.0 || ^24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dunelabsco/plurum.git",
+    "directory": "packages/plurum-cli"
+  },
+  "homepage": "https://plurum.ai",
+  "bugs": {
+    "url": "https://github.com/dunelabsco/plurum/issues"
+  },
+  "keywords": [
+    "plurum",
+    "claude-code",
+    "codex",
+    "mcp",
+    "ai-agents",
+    "collective-intelligence"
+  ],
+  "author": "Dune Labs",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
