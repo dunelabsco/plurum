@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -19,6 +25,10 @@ assert.ok(npmCli, "package verification must run through npm");
 const expectedFiles = [
   "LICENSE",
   "README.md",
+  "dist/adapters/node/clock.js",
+  "dist/adapters/node/platform.js",
+  "dist/adapters/node/production.js",
+  "dist/adapters/node/random.js",
   "dist/cli.js",
   "dist/commands/doctor.js",
   "dist/commands/setup.js",
@@ -29,11 +39,27 @@ const expectedFiles = [
   "dist/index.js",
   "dist/json-output.js",
   "dist/runtime.js",
+  "dist/system/contracts.js",
+  "dist/system/denied.js",
+  "dist/system/errors.js",
+  "dist/system/scopes.js",
   "dist/version.js",
   "package.json",
 ];
 
-const temporaryRoot = mkdtempSync(join(tmpdir(), "plurum-cli-package-"));
+const trustedTemporaryBase = realpathSync(tmpdir());
+const temporaryRoot = realpathSync(
+  mkdtempSync(join(trustedTemporaryBase, "plurum-cli-package-")),
+);
+const runId = randomUUID();
+const sentinelPath = join(temporaryRoot, ".plurum-test-root");
+if (process.platform !== "win32") {
+  chmodSync(temporaryRoot, 0o700);
+}
+writeFileSync(sentinelPath, runId, { encoding: "utf8", flag: "wx", mode: 0o600 });
+if (process.platform !== "win32") {
+  chmodSync(sentinelPath, 0o600);
+}
 
 try {
   const artifactDirectory = join(temporaryRoot, "artifact");
@@ -49,7 +75,7 @@ try {
     dirname(process.execPath),
     ...(process.platform === "win32"
       ? [join(process.env.SystemRoot ?? "C:\\Windows", "System32")]
-      : ["/usr/bin", "/bin"]),
+      : []),
   ].join(delimiter);
 
   mkdirSync(artifactDirectory, { recursive: true, mode: 0o700 });
@@ -77,6 +103,7 @@ try {
     CLAUDE_CONFIG_DIR: claudeDirectory,
     PLURUM_HOME: plurumDirectory,
     PLURUM_TEST_ROOT: temporaryRoot,
+    PLURUM_TEST_RUN_ID: runId,
     TMPDIR: temporaryRoot,
     TEMP: temporaryRoot,
     TMP: temporaryRoot,
@@ -87,10 +114,15 @@ try {
     npm_config_update_notifier: "false",
   };
 
-  function runNpm(arguments_, expectedStatus = 0, cwd = packageRoot) {
+  function runNpm(
+    arguments_,
+    expectedStatus = 0,
+    cwd = packageRoot,
+    environmentOverrides = {},
+  ) {
     const result = spawnSync(process.execPath, [npmCli, ...arguments_], {
       cwd,
-      env: childEnvironment,
+      env: { ...childEnvironment, ...environmentOverrides },
       encoding: "utf8",
       maxBuffer: 1024 * 1024,
       shell: false,
@@ -146,23 +178,38 @@ try {
     process.platform === "win32" ? "plurum.cmd" : "plurum",
   );
   assert.ok(existsSync(installedShim), "npm install must create the Plurum shim");
+  const installedEntrypoint = join(
+    installDirectory,
+    "node_modules",
+    "plurum",
+    "dist",
+    "index.js",
+  );
+  assert.ok(
+    existsSync(installedEntrypoint),
+    "npm install must include the Plurum entrypoint",
+  );
 
-  function runInstalled(arguments_, expectedStatus = 0) {
-    return runNpm(
-      [
-        "exec",
-        "--offline",
-        "--prefix",
-        installDirectory,
-        "--cache",
-        cacheDirectory,
-        "--",
-        "plurum",
-        ...arguments_,
-      ],
+  function runInstalled(
+    arguments_,
+    expectedStatus = 0,
+    environmentOverrides = {},
+  ) {
+    const result = spawnSync(installedShim, arguments_, {
+      cwd: neutralDirectory,
+      env: { ...childEnvironment, ...environmentOverrides },
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      shell: process.platform === "win32",
+      timeout: 120_000,
+    });
+    assert.equal(result.error, undefined, "installed CLI must start successfully");
+    assert.equal(
+      result.status,
       expectedStatus,
-      neutralDirectory,
+      `installed CLI failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
     );
+    return result;
   }
 
   const version = runInstalled(["--version"]);
@@ -178,24 +225,68 @@ try {
   assert.equal(invalid.stdout, "");
   assert.match(invalid.stderr, /Invalid arguments/);
 
-  for (const arguments_ of [["setup"], ["setup", "--dry-run"]]) {
-    const setup = runInstalled(arguments_, 3);
+  const groups = process.getgroups?.();
+  const standardExecution =
+    (process.platform === "darwin" || process.platform === "linux") &&
+    process.getuid?.() !== undefined &&
+    process.geteuid?.() !== undefined &&
+    process.getgid?.() !== undefined &&
+    process.getegid?.() !== undefined &&
+    groups !== undefined &&
+    process.getuid?.() !== 0 &&
+    process.geteuid?.() !== 0 &&
+    process.getgid?.() !== 0 &&
+    process.getegid?.() !== 0 &&
+    process.getuid?.() === process.geteuid?.() &&
+    process.getgid?.() === process.getegid?.() &&
+    !groups.includes(0);
+
+  if (standardExecution) {
+    for (const arguments_ of [["setup"], ["setup", "--dry-run"]]) {
+      const setup = runInstalled(arguments_, 3);
+      assert.equal(setup.stdout, "");
+      assert.match(setup.stderr, /private development build/);
+    }
+
+    for (const command of ["status", "doctor"]) {
+      const readOnly = runInstalled([command, "--json"], 3);
+      assert.deepEqual(JSON.parse(readOnly.stdout), {
+        schema_version: 1,
+        ok: false,
+        command,
+        error: {
+          code: "command_unavailable",
+          message: "This command is not available in the private development build.",
+        },
+      });
+    }
+  } else {
+    const setup = runInstalled(["setup"], 1);
     assert.equal(setup.stdout, "");
-    assert.match(setup.stderr, /private development build/);
+    assert.match(setup.stderr, /refuses|cannot verify/);
+
+    for (const command of ["status", "doctor"]) {
+      const readOnly = runInstalled([command, "--json"], 1);
+      assert.equal(JSON.parse(readOnly.stdout).error.code, "unsafe_execution_context");
+    }
   }
 
+  const elevatedSetup = runInstalled(["setup"], 1, { SUDO_UID: "0" });
+  assert.equal(elevatedSetup.stdout, "");
+  assert.match(elevatedSetup.stderr, /refuses to run with elevated privileges/);
   for (const command of ["status", "doctor"]) {
-    const readOnly = runInstalled([command, "--json"], 3);
-    assert.deepEqual(JSON.parse(readOnly.stdout), {
-      schema_version: 1,
-      ok: false,
-      command,
-      error: {
-        code: "command_unavailable",
-        message: "This command is not available in the private development build.",
-      },
-    });
+    const elevatedReadOnly = runInstalled(
+      [command, "--json"],
+      1,
+      { SUDO_UID: "0" },
+    );
+    assert.equal(
+      JSON.parse(elevatedReadOnly.stdout).error.code,
+      "unsafe_execution_context",
+    );
   }
+  assert.equal(runInstalled(["--help"], 0, { SUDO_UID: "0" }).stderr, "");
+  assert.equal(runInstalled(["--version"], 0, { SUDO_UID: "0" }).stderr, "");
 
   for (const path of [
     homeDirectory,
@@ -214,5 +305,21 @@ try {
 
   process.stdout.write("package artifact verified\n");
 } finally {
-  rmSync(temporaryRoot, { recursive: true, force: true });
+  assert.equal(realpathSync(temporaryRoot), temporaryRoot);
+  const rootMetadata = lstatSync(temporaryRoot);
+  const sentinelMetadata = lstatSync(sentinelPath);
+  assert.equal(rootMetadata.isDirectory(), true);
+  assert.equal(rootMetadata.isSymbolicLink(), false);
+  assert.equal(sentinelMetadata.isFile(), true);
+  assert.equal(sentinelMetadata.isSymbolicLink(), false);
+  assert.equal(sentinelMetadata.nlink, 1);
+  assert.equal(readFileSync(sentinelPath, "utf8"), runId);
+  if (process.platform !== "win32") {
+    assert.equal(rootMetadata.uid, process.getuid?.());
+    assert.equal(sentinelMetadata.uid, process.getuid?.());
+    assert.equal(rootMetadata.mode & 0o077, 0);
+    assert.equal(sentinelMetadata.mode & 0o077, 0);
+  }
+  rmSync(temporaryRoot, { recursive: true, force: false });
+  assert.equal(existsSync(temporaryRoot), false);
 }

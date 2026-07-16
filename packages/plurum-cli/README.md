@@ -23,10 +23,21 @@ plurum doctor
 
 ## Safety boundary
 
-The scaffold performs no filesystem mutation, network request, host detection,
-or child-process execution. Those capabilities will be introduced behind
-injected adapters and tested inside a fail-closed temporary root before they can
-be used by a command.
+Filesystem, network, process, clock, randomness, and platform access enter
+commands only through injected capabilities. Production filesystem, network,
+and process adapters remain deny-by-default until their implementation steps.
+Read-only commands cannot mutate local or product state or spawn. Status and
+doctor are restricted to GET requests; any later protocol-level MCP diagnostic
+will require its own narrowly defined capability. Dry-run setup cannot read file
+contents, stdin, or authenticated network state.
+
+The test harness refuses elevated or unverifiable execution, confines guarded
+fake operations to a unique private root, rejects lexical, canonical, ordinary
+symlink, and hard-link escapes, and never uses real credentials, host binaries,
+or production endpoints. An AST gate rejects direct capability imports or
+globals outside the small approved adapter boundary. Race-free native
+filesystem containment and elevation guarantees remain unclaimed on every
+platform until the later native suite passes.
 
 API keys are accepted only through protected interactive input or
 `--api-key-stdin`. A value-bearing `--api-key` option does not exist, and invalid
@@ -34,7 +45,7 @@ arguments are never reflected in diagnostics.
 
 ## Development
 
-Use Node.js 22 LTS or Node.js 24 LTS:
+Use Node.js 22.12 or newer in the Node 22 LTS line, or Node.js 24 LTS:
 
 ```bash
 npm ci

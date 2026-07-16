@@ -1,11 +1,10 @@
 import { writeUnavailableJson, writeUnavailableText } from "./unavailable.js";
 
 import type { ExitCode } from "../exit-codes.js";
-import type { DoctorOptions } from "./types.js";
-import type { CliRuntime } from "../runtime.js";
+import type { DoctorInvocation } from "./types.js";
 
-export function runDoctor(options: DoctorOptions, runtime: CliRuntime): ExitCode {
-  return options.json
-    ? writeUnavailableJson("doctor", runtime)
-    : writeUnavailableText("doctor", runtime);
+export function runDoctor(invocation: DoctorInvocation): ExitCode {
+  return invocation.options.json
+    ? writeUnavailableJson("doctor", invocation.runtime)
+    : writeUnavailableText("doctor", invocation.runtime);
 }

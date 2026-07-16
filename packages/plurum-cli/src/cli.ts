@@ -14,6 +14,13 @@ import {
 import { ExitCode } from "./exit-codes.js";
 import { writeCommandJsonError } from "./json-output.js";
 import type { CliRuntime } from "./runtime.js";
+import { scopeInteractiveRuntime, scopeRuntime } from "./runtime.js";
+import {
+  doctorScope,
+  planningScope,
+  setupScope,
+  statusScope,
+} from "./system/scopes.js";
 import { CLI_VERSION } from "./version.js";
 
 const ROOT_HELP = `plurum — connect Claude Code and Codex to Plurum
@@ -134,11 +141,10 @@ function parseSetup(args: readonly string[]): SetupOptions | "help" {
     if (apiKeyStdin && dryRun) {
       throw new CliUsageError("setup");
     }
-    return {
-      client: parseClient(parsed.values.client, "setup"),
-      apiKeyStdin,
-      dryRun,
-    };
+    const client = parseClient(parsed.values.client, "setup");
+    return dryRun
+      ? { client, apiKeyStdin: false, dryRun: true }
+      : { client, apiKeyStdin, dryRun: false };
   } catch {
     throw new CliUsageError("setup");
   }
@@ -215,6 +221,29 @@ function writeOperationalFailureJson(
   return ExitCode.OperationalFailure;
 }
 
+function writeUnsafeExecutionContext(
+  command: KnownCommand,
+  json: boolean,
+  runtime: CliRuntime,
+): ExitCode | undefined {
+  const elevation = runtime.system.platform.elevation;
+  if (elevation === "standard") {
+    return undefined;
+  }
+
+  const message =
+    elevation === "elevated"
+      ? "Plurum refuses to run with elevated privileges."
+      : "Plurum cannot verify a non-elevated execution context on this platform.";
+
+  if (json && command !== "setup") {
+    writeCommandJsonError(command, "unsafe_execution_context", message, runtime);
+  } else {
+    runtime.stderr.write(`plurum ${command}: ${message}\n`);
+  }
+  return ExitCode.OperationalFailure;
+}
+
 export async function runCli(
   args: readonly string[],
   runtime: CliRuntime,
@@ -241,7 +270,19 @@ export async function runCli(
           runtime.stdout.write(SETUP_HELP);
           return ExitCode.Success;
         }
-        return await handlers.setup(options, runtime);
+        const unsafe = writeUnsafeExecutionContext("setup", false, runtime);
+        if (unsafe !== undefined) {
+          return unsafe;
+        }
+        return options.dryRun
+          ? await handlers.setup({
+              options,
+              runtime: scopeRuntime(runtime, planningScope(runtime.system)),
+            })
+          : await handlers.setup({
+              options,
+              runtime: scopeInteractiveRuntime(runtime, setupScope(runtime.system)),
+            });
       }
       case "status": {
         const options = parseStatus(commandArgs);
@@ -252,7 +293,14 @@ export async function runCli(
         if (options.json) {
           jsonCommand = "status";
         }
-        return await handlers.status(options, runtime);
+        const unsafe = writeUnsafeExecutionContext("status", options.json, runtime);
+        if (unsafe !== undefined) {
+          return unsafe;
+        }
+        return await handlers.status({
+          options,
+          runtime: scopeRuntime(runtime, statusScope(runtime.system)),
+        });
       }
       case "doctor": {
         const options = parseDoctor(commandArgs);
@@ -263,7 +311,14 @@ export async function runCli(
         if (options.json) {
           jsonCommand = "doctor";
         }
-        return await handlers.doctor(options, runtime);
+        const unsafe = writeUnsafeExecutionContext("doctor", options.json, runtime);
+        if (unsafe !== undefined) {
+          return unsafe;
+        }
+        return await handlers.doctor({
+          options,
+          runtime: scopeRuntime(runtime, doctorScope(runtime.system)),
+        });
       }
       default:
         throw new CliUsageError();

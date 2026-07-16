@@ -1,6 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
@@ -31,7 +29,7 @@ describe("package safety invariants", () => {
     expect(packageJson.type).toBe("module");
     expect(packageJson.bin).toEqual({ plurum: "./dist/index.js" });
     expect(packageJson.license).toBe("Apache-2.0");
-    expect(packageJson.engines.node).toBe("^22.0.0 || ^24.0.0");
+    expect(packageJson.engines.node).toBe("^22.12.0 || ^24.0.0");
   });
 
   it("ships only the runtime build and required package documents", () => {
@@ -69,28 +67,16 @@ describe("package safety invariants", () => {
     expect(entrypoint.startsWith("#!/usr/bin/env node\n")).toBe(true);
   });
 
-  it("keeps the scaffold free of filesystem, network, and process capabilities", () => {
-    const sourceDirectoryUrl = new URL("../src/", import.meta.url);
-    const sourceDirectory = fileURLToPath(sourceDirectoryUrl);
-    const source = readdirSync(sourceDirectory, {
-      recursive: true,
-      encoding: "utf8",
-    })
-      .filter((path) => path.endsWith(".ts"))
-      .map((path) => readFileSync(join(sourceDirectory, path), "utf8"))
-      .join("\n");
-
-    for (const forbiddenModule of [
-      "node:fs",
-      "node:child_process",
-      "node:http",
-      "node:https",
-      "node:net",
-      "node:dns",
-      "undici",
-    ]) {
-      expect(source).not.toContain(forbiddenModule);
-    }
-    expect(source).not.toMatch(/\bfetch\s*\(/u);
+  it("runs the AST capability gate before builds, tests, and packaging", () => {
+    expect(packageJson.scripts["verify-capabilities"]).toBe(
+      "node scripts/verify-capability-boundary.mjs",
+    );
+    expect(packageJson.scripts.prebuild).toBe(
+      "npm run clean && npm run verify-capabilities",
+    );
+    expect(packageJson.scripts.check).toBe(
+      "npm run verify-capabilities && npm run typecheck && npm test && npm run verify-package",
+    );
+    expect(packageJson.scripts.prepack).toBe("npm run check");
   });
 });

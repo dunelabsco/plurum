@@ -1,11 +1,10 @@
 import { writeUnavailableJson, writeUnavailableText } from "./unavailable.js";
 
 import type { ExitCode } from "../exit-codes.js";
-import type { CliRuntime } from "../runtime.js";
-import type { StatusOptions } from "./types.js";
+import type { StatusInvocation } from "./types.js";
 
-export function runStatus(options: StatusOptions, runtime: CliRuntime): ExitCode {
-  return options.json
-    ? writeUnavailableJson("status", runtime)
-    : writeUnavailableText("status", runtime);
+export function runStatus(invocation: StatusInvocation): ExitCode {
+  return invocation.options.json
+    ? writeUnavailableJson("status", invocation.runtime)
+    : writeUnavailableText("status", invocation.runtime);
 }

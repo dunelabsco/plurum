@@ -6,12 +6,16 @@ import { runCli } from "../src/cli.js";
 import type {
   CommandHandlers,
   DoctorOptions,
+  DoctorInvocation,
   SetupOptions,
   StatusOptions,
+  StatusInvocation,
 } from "../src/commands/types.js";
 import { ExitCode } from "../src/exit-codes.js";
 import type { CliRuntime } from "../src/runtime.js";
+import type { SystemCapabilities } from "../src/system/contracts.js";
 import { CLI_VERSION } from "../src/version.js";
+import { createTestSystem } from "./support/system.js";
 
 const CANARY_KEY = "plrm_live_STEP_4_1_CANARY_DO_NOT_PRINT";
 
@@ -21,7 +25,10 @@ interface Harness {
   stderr(): string;
 }
 
-function createHarness(stdin: NodeJS.ReadableStream = Readable.from([])): Harness {
+function createHarness(
+  stdin: NodeJS.ReadableStream = Readable.from([]),
+  system: SystemCapabilities = createTestSystem(),
+): Harness {
   const stdout: string[] = [];
   const stderr: string[] = [];
   return {
@@ -29,12 +36,7 @@ function createHarness(stdin: NodeJS.ReadableStream = Readable.from([])): Harnes
       stdin,
       stdout: { write: (text) => stdout.push(text) },
       stderr: { write: (text) => stderr.push(text) },
-      env: Object.freeze({
-        PLURUM_HOME: "/isolated/plurum",
-        PLURUM_TEST_ROOT: "/isolated",
-      }),
-      platform: "linux",
-      cwd: "/isolated/empty-cwd",
+      system,
     },
     stdout: () => stdout.join(""),
     stderr: () => stderr.join(""),
@@ -91,7 +93,7 @@ describe("CLI surface", () => {
     const harness = createHarness();
     let captured: SetupOptions | undefined;
     const handlers = createHandlers({
-      setup(options) {
+      setup({ options }) {
         captured = options;
         return ExitCode.Success;
       },
@@ -117,7 +119,7 @@ describe("CLI surface", () => {
     const harness = createHarness();
     let captured: SetupOptions | undefined;
     const handlers = createHandlers({
-      setup(options) {
+      setup({ options }) {
         captured = options;
         return ExitCode.Success;
       },
@@ -133,6 +135,65 @@ describe("CLI surface", () => {
     });
   });
 
+  it("withholds stdin from dry-run and read-only command runtimes", async () => {
+    const receivedStdin: boolean[] = [];
+    const cases: ReadonlyArray<readonly [readonly string[], CommandHandlers]> = [
+      [
+        ["setup", "--dry-run"],
+        createHandlers({
+          setup({ runtime }) {
+            expect(Object.isFrozen(runtime)).toBe(true);
+            receivedStdin.push("stdin" in runtime);
+            return ExitCode.Success;
+          },
+        }),
+      ],
+      [
+        ["status"],
+        createHandlers({
+          status({ runtime }) {
+            expect(Object.isFrozen(runtime)).toBe(true);
+            receivedStdin.push("stdin" in runtime);
+            return ExitCode.Success;
+          },
+        }),
+      ],
+      [
+        ["doctor"],
+        createHandlers({
+          doctor({ runtime }) {
+            expect(Object.isFrozen(runtime)).toBe(true);
+            receivedStdin.push("stdin" in runtime);
+            return ExitCode.Success;
+          },
+        }),
+      ],
+    ];
+
+    for (const [args, handlers] of cases) {
+      const harness = createHarness();
+      expect(await runCli(args, harness.runtime, handlers)).toBe(ExitCode.Success);
+    }
+    expect(receivedStdin).toEqual([false, false, false]);
+  });
+
+  it("provides stdin only to setup apply", async () => {
+    const harness = createHarness();
+    let receivedStdin = false;
+    const handlers = createHandlers({
+      setup({ runtime }) {
+        expect(Object.isFrozen(runtime)).toBe(true);
+        receivedStdin = "stdin" in runtime;
+        return ExitCode.Success;
+      },
+    });
+
+    expect(await runCli(["setup"], harness.runtime, handlers)).toBe(
+      ExitCode.Success,
+    );
+    expect(receivedStdin).toBe(true);
+  });
+
   it.each([
     ["status", "claude-code", true],
     ["doctor", "all", true],
@@ -140,8 +201,8 @@ describe("CLI surface", () => {
     const harness = createHarness();
     let captured: StatusOptions | DoctorOptions | undefined;
     const handlers = createHandlers({
-      [command](options: StatusOptions & DoctorOptions) {
-        captured = options;
+      [command](invocation: StatusInvocation & DoctorInvocation) {
+        captured = invocation.options;
         return ExitCode.Success;
       },
     });
@@ -237,6 +298,69 @@ describe("CLI surface", () => {
     expect(harness.stdout()).toContain("--api-key-stdin");
     expect(harness.stdout()).toContain("--dry-run");
     expect(harness.stderr()).toBe("");
+  });
+
+  it("refuses elevated execution before invoking a command handler", async () => {
+    const harness = createHarness(
+      Readable.from([]),
+      createTestSystem("elevated"),
+    );
+    let invoked = false;
+    const handlers = createHandlers({
+      setup() {
+        invoked = true;
+        return ExitCode.Success;
+      },
+    });
+
+    expect(await runCli(["setup"], harness.runtime, handlers)).toBe(
+      ExitCode.OperationalFailure,
+    );
+    expect(invoked).toBe(false);
+    expect(harness.stdout()).toBe("");
+    expect(harness.stderr()).toBe(
+      "plurum setup: Plurum refuses to run with elevated privileges.\n",
+    );
+  });
+
+  it("fails closed when privilege state is unknown", async () => {
+    const harness = createHarness(Readable.from([]), createTestSystem("unknown"));
+    let invoked = false;
+    const handlers = createHandlers({
+      status() {
+        invoked = true;
+        return ExitCode.Success;
+      },
+    });
+
+    expect(
+      await runCli(["status", "--json"], harness.runtime, handlers),
+    ).toBe(ExitCode.OperationalFailure);
+    expect(invoked).toBe(false);
+    expect(JSON.parse(harness.stdout())).toEqual({
+      schema_version: 1,
+      ok: false,
+      command: "status",
+      error: {
+        code: "unsafe_execution_context",
+        message:
+          "Plurum cannot verify a non-elevated execution context on this platform.",
+      },
+    });
+    expect(harness.stderr()).toBe("");
+  });
+
+  it("allows help and version output when privilege state is unknown", async () => {
+    for (const args of [["--help"], ["--version"], ["setup", "--help"]]) {
+      const harness = createHarness(
+        Readable.from([]),
+        createTestSystem("unknown"),
+      );
+      expect(await runCli(args, harness.runtime, createHandlers())).toBe(
+        ExitCode.Success,
+      );
+      expect(harness.stderr()).toBe("");
+    }
   });
 });
 

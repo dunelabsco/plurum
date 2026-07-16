@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { selectRuntimeEnvironment } from "../src/runtime.js";
+import { selectRuntimeEnvironment } from "../src/adapters/node/platform.js";
 
 describe("runtime environment boundary", () => {
   it("retains only the configuration variables the CLI is allowed to inspect", () => {

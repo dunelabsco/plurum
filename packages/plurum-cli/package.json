@@ -14,17 +14,18 @@
   ],
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "prebuild": "npm run clean",
+    "verify-capabilities": "node scripts/verify-capability-boundary.mjs",
+    "prebuild": "npm run clean && npm run verify-capabilities",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pretest": "npm run build",
     "test": "vitest run",
     "verify-package": "node scripts/verify-package.mjs",
-    "check": "npm run typecheck && npm test && npm run verify-package",
+    "check": "npm run verify-capabilities && npm run typecheck && npm test && npm run verify-package",
     "prepack": "npm run check"
   },
   "engines": {
-    "node": "^22.0.0 || ^24.0.0"
+    "node": "^22.12.0 || ^24.0.0"
   },
   "repository": {
     "type": "git",
@@ -47,6 +48,7 @@
   "license": "Apache-2.0",
   "devDependencies": {
     "@types/node": "^22.20.1",
+    "rolldown": "^1.1.5",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }

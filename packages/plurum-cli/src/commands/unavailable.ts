@@ -1,4 +1,4 @@
-import type { CliRuntime } from "../runtime.js";
+import type { DiagnosticRuntime } from "../runtime.js";
 
 import { ExitCode } from "../exit-codes.js";
 import {
@@ -11,7 +11,7 @@ const UNAVAILABLE_MESSAGE =
 
 export function writeUnavailableText(
   command: "setup" | ReadOnlyCommand,
-  runtime: CliRuntime,
+  runtime: DiagnosticRuntime,
 ): ExitCode {
   runtime.stderr.write(`plurum ${command}: ${UNAVAILABLE_MESSAGE}\n`);
   return ExitCode.Unavailable;
@@ -19,7 +19,7 @@ export function writeUnavailableText(
 
 export function writeUnavailableJson(
   command: ReadOnlyCommand,
-  runtime: CliRuntime,
+  runtime: DiagnosticRuntime,
 ): ExitCode {
   writeCommandJsonError(
     command,

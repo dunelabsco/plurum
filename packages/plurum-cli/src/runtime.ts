@@ -1,49 +1,46 @@
+import { createProductionSystem } from "./adapters/node/production.js";
+import type { SystemCapabilities } from "./system/contracts.js";
+
 export interface TextSink {
   write(text: string): void;
 }
 
-export const RUNTIME_ENVIRONMENT_KEYS = [
-  "PATH",
-  "HOME",
-  "XDG_CONFIG_HOME",
-  "XDG_STATE_HOME",
-  "APPDATA",
-  "LOCALAPPDATA",
-  "USERPROFILE",
-  "CODEX_HOME",
-  "CLAUDE_CONFIG_DIR",
-  "PLURUM_HOME",
-  "PLURUM_TEST_ROOT",
-  "TMPDIR",
-  "TEMP",
-  "TMP",
-] as const;
-
-export type RuntimeEnvironmentKey = (typeof RUNTIME_ENVIRONMENT_KEYS)[number];
-export type RuntimeEnvironment = Readonly<
-  Partial<Record<RuntimeEnvironmentKey, string>>
->;
-
-export interface CliRuntime {
-  readonly stdin: NodeJS.ReadableStream;
+export interface DiagnosticRuntime {
   readonly stdout: TextSink;
   readonly stderr: TextSink;
-  readonly env: RuntimeEnvironment;
-  readonly platform: NodeJS.Platform;
-  readonly cwd: string;
 }
 
-export function selectRuntimeEnvironment(
-  source: Readonly<NodeJS.ProcessEnv>,
-): RuntimeEnvironment {
-  const selected: Partial<Record<RuntimeEnvironmentKey, string>> = {};
-  for (const key of RUNTIME_ENVIRONMENT_KEYS) {
-    const value = source[key];
-    if (value !== undefined) {
-      selected[key] = value;
-    }
-  }
-  return Object.freeze(selected);
+export interface CliRuntime extends DiagnosticRuntime {
+  readonly stdin: NodeJS.ReadableStream;
+  readonly system: SystemCapabilities;
+}
+
+export type CommandRuntime<Capabilities> = DiagnosticRuntime & {
+  readonly system: Capabilities;
+};
+
+export type InteractiveCommandRuntime<Capabilities> =
+  CommandRuntime<Capabilities> & Pick<CliRuntime, "stdin">;
+
+export function scopeRuntime<Capabilities>(
+  runtime: CliRuntime,
+  system: Capabilities,
+): CommandRuntime<Capabilities> {
+  return Object.freeze({
+    stdout: runtime.stdout,
+    stderr: runtime.stderr,
+    system,
+  });
+}
+
+export function scopeInteractiveRuntime<Capabilities>(
+  runtime: CliRuntime,
+  system: Capabilities,
+): InteractiveCommandRuntime<Capabilities> {
+  return Object.freeze({
+    ...scopeRuntime(runtime, system),
+    stdin: runtime.stdin,
+  });
 }
 
 export function createProcessRuntime(): CliRuntime {
@@ -59,8 +56,6 @@ export function createProcessRuntime(): CliRuntime {
         process.stderr.write(text);
       },
     },
-    env: selectRuntimeEnvironment(process.env),
-    platform: process.platform,
-    cwd: process.cwd(),
+    system: createProductionSystem(),
   };
 }
