@@ -13,7 +13,13 @@ const allowedExternalImports = new Map([
     "src/adapters/node/random.ts",
     new Map([["node:crypto", ["randomBytes", "randomUUID"]]]),
   ],
-  ["src/adapters/node/platform.ts", new Map([["node:process", ["default:process"]]])],
+  [
+    "src/adapters/node/platform.ts",
+    new Map([
+      ["node:path", ["posix", "win32"]],
+      ["node:process", ["default:process"]],
+    ]),
+  ],
 ]);
 
 const allowedProcessMembers = new Map([
@@ -538,6 +544,21 @@ const negativeFixtures = [
   ["src/example.ts", 'import { readFile } from "node:fs/promises";', "external-module"],
   ["src/example.ts", 'import fs from "fs";', "external-module"],
   ["src/example.ts", 'export * from "node:https";', "external-module"],
+  [
+    "src/credentials/paths.ts",
+    'import { posix } from "node:path";',
+    "external-module",
+  ],
+  [
+    "src/adapters/node/platform.ts",
+    'import path from "node:path";',
+    "external-module",
+  ],
+  [
+    "src/adapters/node/platform.ts",
+    'import * as path from "node:path";',
+    "external-module",
+  ],
   ["src/example.ts", 'void import("node:child_process");', "dynamic-import"],
   ["src/example.ts", "const name = './local.js'; void import(name);", "dynamic-import"],
   ["src/example.ts", 'require("node:fs");', "commonjs-require"],
@@ -607,6 +628,10 @@ const positiveFixtures = [
   [
     "src/adapters/node/platform.ts",
     'import process from "node:process"; process.platform; process.getuid?.();',
+  ],
+  [
+    "src/adapters/node/platform.ts",
+    'import { posix, win32 } from "node:path"; posix.join("/a", "b"); win32.join("C:\\\\a", "b");',
   ],
   ["src/adapters/node/clock.ts", "Date.now();"],
   ["src/example.ts", "new Date(0); Date.parse('2026-01-01'); Date.UTC(2026, 0);"],

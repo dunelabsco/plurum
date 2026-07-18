@@ -353,7 +353,7 @@ export async function createIsolatedTestRoot(): Promise<IsolatedTestRoot> {
       TEMP: temporary,
       TMP: temporary,
     });
-    const allowedOrigin = "http://127.0.0.1:0";
+    const allowedOrigin = "http://127.0.0.1:43197";
 
     const boundary = await TestAccessBoundary.create(
       {

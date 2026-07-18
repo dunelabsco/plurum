@@ -1,13 +1,39 @@
+import { posix, win32 } from "node:path";
 import process from "node:process";
 
 import {
   RUNTIME_ENVIRONMENT_KEYS,
   type ElevationState,
   type PlatformAdapter,
+  type PlatformPathAdapter,
   type RuntimeEnvironment,
   type RuntimeEnvironmentKey,
   type SupportedOs,
 } from "../../system/contracts.js";
+
+export function createPlatformPathAdapter(
+  os: SupportedOs,
+): PlatformPathAdapter {
+  const implementation = os === "win32" ? win32 : posix;
+  return Object.freeze({
+    separator: implementation.sep as "/" | "\\",
+    isAbsolute(path: string): boolean {
+      return implementation.isAbsolute(path);
+    },
+    normalize(path: string): string {
+      return implementation.normalize(path);
+    },
+    join(...parts: readonly string[]): string {
+      return implementation.join(...parts);
+    },
+    relative(from: string, to: string): string {
+      return implementation.relative(from, to);
+    },
+    root(path: string): string {
+      return implementation.parse(path).root;
+    },
+  });
+}
 
 export function selectRuntimeEnvironment(
   source: Readonly<NodeJS.ProcessEnv>,
@@ -88,5 +114,6 @@ export function createNodePlatform(): PlatformAdapter {
       sudoDetected:
         process.env.SUDO_UID !== undefined || process.env.SUDO_USER !== undefined,
     }),
+    paths: createPlatformPathAdapter(os),
   });
 }

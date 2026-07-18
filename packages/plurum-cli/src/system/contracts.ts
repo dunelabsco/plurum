@@ -149,12 +149,22 @@ export interface RandomAdapter {
   uuid(): string;
 }
 
+export interface PlatformPathAdapter {
+  readonly separator: "/" | "\\";
+  isAbsolute(path: string): boolean;
+  normalize(path: string): string;
+  join(...parts: readonly string[]): string;
+  relative(from: string, to: string): string;
+  root(path: string): string;
+}
+
 export interface PlatformAdapter {
   readonly os: SupportedOs;
   readonly arch: string;
   readonly cwd: string;
   readonly environment: RuntimeEnvironment;
   readonly elevation: ElevationState;
+  readonly paths: PlatformPathAdapter;
 }
 
 export interface SystemCapabilities {

@@ -39,9 +39,6 @@ Commands:
 
 Client targets:
   claude-code | codex | all (default: all)
-
-Environment:
-  PLURUM_HOME  override Plurum's configuration directory
 `;
 
 const SETUP_HELP = `Usage:

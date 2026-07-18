@@ -1,4 +1,5 @@
 import { createDenyByDefaultSystem } from "../../src/system/denied.js";
+import { createPlatformPathAdapter } from "../../src/adapters/node/platform.js";
 import type {
   ElevationState,
   SupportedOs,
@@ -30,6 +31,7 @@ export function createTestSystem(
         PLURUM_TEST_RUN_ID: "test-run-id",
       }),
       elevation,
+      paths: createPlatformPathAdapter(os),
     }),
   );
 }

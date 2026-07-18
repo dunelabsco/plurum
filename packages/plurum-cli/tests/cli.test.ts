@@ -76,7 +76,16 @@ describe("CLI surface", () => {
     expect(harness.stdout()).toContain("setup");
     expect(harness.stdout()).toContain("status");
     expect(harness.stdout()).toContain("doctor");
-    for (const excluded of ["register", "sessions", "pulse", "acquire", "auth login"]) {
+    for (const excluded of [
+      "register",
+      "sessions",
+      "pulse",
+      "acquire",
+      "auth login",
+      "PLURUM_HOME",
+      "PLURUM_TEST_ROOT",
+      "PLURUM_TEST_RUN_ID",
+    ]) {
       expect(harness.stdout()).not.toContain(excluded);
     }
     expect(harness.stderr()).toBe("");
