@@ -74,6 +74,7 @@ export function statusScope(system: SystemCapabilities): StatusCapabilities {
     filesystem: readOnlyFileSystem(system.filesystem),
     network: readOnlyNetwork(system.network),
     clock: system.clock,
+    hash: system.hash,
     platform: system.platform,
   });
 }
@@ -83,6 +84,7 @@ export function doctorScope(system: SystemCapabilities): DoctorCapabilities {
     filesystem: readOnlyFileSystem(system.filesystem),
     network: readOnlyNetwork(system.network),
     clock: system.clock,
+    hash: system.hash,
     platform: system.platform,
   });
 }

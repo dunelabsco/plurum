@@ -1,5 +1,6 @@
 import type {
   FileSystemAdapter,
+  HashAdapter,
   NetworkAdapter,
   NetworkRequest,
   ProcessAdapter,
@@ -105,6 +106,20 @@ function guardProcesses(
   });
 }
 
+function guardHash(delegate: HashAdapter): HashAdapter {
+  return Object.freeze<HashAdapter>({
+    sha256(data): Uint8Array {
+      const copiedInput = Uint8Array.prototype.slice.call(data) as Uint8Array;
+      try {
+        const output = delegate.sha256(copiedInput);
+        return Uint8Array.prototype.slice.call(output) as Uint8Array;
+      } finally {
+        copiedInput.fill(0);
+      }
+    },
+  });
+}
+
 export function createGuardedFakeSystem(
   boundary: TestAccessBoundary,
   delegate: SystemCapabilities,
@@ -115,6 +130,7 @@ export function createGuardedFakeSystem(
     processes: guardProcesses(boundary, delegate.processes),
     clock: delegate.clock,
     random: delegate.random,
+    hash: guardHash(delegate.hash),
     platform: delegate.platform,
   });
 }

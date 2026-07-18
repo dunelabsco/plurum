@@ -1,5 +1,6 @@
 import { createDenyByDefaultSystem } from "../../src/system/denied.js";
 import { createPlatformPathAdapter } from "../../src/adapters/node/platform.js";
+import { nodeHash } from "../../src/adapters/node/hash.js";
 import type {
   ElevationState,
   SupportedOs,
@@ -20,6 +21,7 @@ export function createTestSystem(
         return "00000000-0000-4000-8000-000000000001";
       },
     }),
+    nodeHash,
     Object.freeze({
       os,
       arch: "test-arch",

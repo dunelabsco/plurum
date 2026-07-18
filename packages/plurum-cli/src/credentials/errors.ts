@@ -1,16 +1,28 @@
 export type CredentialErrorCode =
+  | "credential_fingerprint_failed"
+  | "credential_document_too_large"
+  | "credential_store_unavailable"
   | "invalid_api_origin"
   | "invalid_credential_document"
   | "invalid_credential_origin"
   | "invalid_credential_path"
+  | "unsafe_credential_store"
   | "unsupported_credential_schema";
 
 const SAFE_MESSAGES: Readonly<Record<CredentialErrorCode, string>> = Object.freeze({
+  credential_fingerprint_failed:
+    "The Plurum credential fingerprint could not be created.",
+  credential_document_too_large:
+    "The Plurum credential file is too large.",
+  credential_store_unavailable:
+    "The Plurum credential store could not be accessed safely.",
   invalid_api_origin: "The Plurum API origin is invalid.",
   invalid_credential_document: "The Plurum credential file is invalid.",
   invalid_credential_origin:
     "The Plurum credential file contains an invalid API origin.",
   invalid_credential_path: "The Plurum credential location is invalid.",
+  unsafe_credential_store:
+    "The Plurum credential store does not meet the required protections.",
   unsupported_credential_schema:
     "The Plurum credential file uses an unsupported schema version.",
 });

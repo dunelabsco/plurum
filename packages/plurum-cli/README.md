@@ -23,9 +23,10 @@ plurum doctor
 
 ## Safety boundary
 
-Filesystem, network, process, clock, randomness, and platform access enter
-commands only through injected capabilities. Production filesystem, network,
-and process adapters remain deny-by-default until their implementation steps.
+Filesystem, network, process, clock, randomness, fixed cryptographic hashing,
+and platform access enter commands only through injected capabilities.
+Production filesystem, network, and process adapters remain deny-by-default
+until their implementation steps.
 Read-only commands cannot mutate local or product state or spawn. Status and
 doctor are restricted to GET requests; any later protocol-level MCP diagnostic
 will require its own narrowly defined capability. Dry-run setup cannot read file

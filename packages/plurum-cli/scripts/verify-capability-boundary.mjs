@@ -14,6 +14,10 @@ const allowedExternalImports = new Map([
     new Map([["node:crypto", ["randomBytes", "randomUUID"]]]),
   ],
   [
+    "src/adapters/node/hash.ts",
+    new Map([["node:crypto", ["createHash"]]]),
+  ],
+  [
     "src/adapters/node/platform.ts",
     new Map([
       ["node:path", ["posix", "win32"]],
@@ -559,6 +563,26 @@ const negativeFixtures = [
     'import * as path from "node:path";',
     "external-module",
   ],
+  [
+    "src/adapters/node/hash.ts",
+    'import { randomBytes } from "node:crypto";',
+    "external-module",
+  ],
+  [
+    "src/example.ts",
+    'import { createHash } from "node:crypto";',
+    "external-module",
+  ],
+  [
+    "src/adapters/node/hash.ts",
+    'import crypto from "node:crypto";',
+    "external-module",
+  ],
+  [
+    "src/adapters/node/hash.ts",
+    'import * as crypto from "node:crypto";',
+    "external-module",
+  ],
   ["src/example.ts", 'void import("node:child_process");', "dynamic-import"],
   ["src/example.ts", "const name = './local.js'; void import(name);", "dynamic-import"],
   ["src/example.ts", 'require("node:fs");', "commonjs-require"],
@@ -624,6 +648,10 @@ const positiveFixtures = [
   [
     "src/adapters/node/random.ts",
     'import { randomBytes, randomUUID } from "node:crypto"; randomBytes(1); randomUUID();',
+  ],
+  [
+    "src/adapters/node/hash.ts",
+    'import { createHash } from "node:crypto"; createHash("sha256");',
   ],
   [
     "src/adapters/node/platform.ts",

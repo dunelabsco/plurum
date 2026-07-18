@@ -149,6 +149,10 @@ export interface RandomAdapter {
   uuid(): string;
 }
 
+export interface HashAdapter {
+  sha256(data: Uint8Array): Uint8Array;
+}
+
 export interface PlatformPathAdapter {
   readonly separator: "/" | "\\";
   isAbsolute(path: string): boolean;
@@ -173,6 +177,7 @@ export interface SystemCapabilities {
   readonly network: NetworkAdapter;
   readonly clock: ClockAdapter;
   readonly random: RandomAdapter;
+  readonly hash: HashAdapter;
   readonly platform: PlatformAdapter;
 }
 
@@ -188,6 +193,7 @@ export interface StatusCapabilities {
   readonly filesystem: ReadOnlyFileSystemAdapter;
   readonly network: ReadOnlyNetworkAdapter;
   readonly clock: ClockAdapter;
+  readonly hash: HashAdapter;
   readonly platform: PlatformAdapter;
 }
 

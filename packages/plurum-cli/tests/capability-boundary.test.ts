@@ -17,6 +17,7 @@ import {
   classifyElevation,
   normalizeOs,
 } from "../src/adapters/node/platform.js";
+import { nodeHash } from "../src/adapters/node/hash.js";
 import { nodeRandom } from "../src/adapters/node/random.js";
 import {
   CapabilityPolicyError,
@@ -104,11 +105,15 @@ describe("deny-by-default production ports", () => {
     expect("openReadOnly" in planning.filesystem).toBe(false);
     expect("openReadOnly" in status.filesystem).toBe(true);
     expect("openReadOnly" in doctor.filesystem).toBe(true);
+    expect("hash" in planning).toBe(false);
+    expect("hash" in status).toBe(true);
+    expect("hash" in doctor).toBe(true);
     expect("network" in planning).toBe(false);
     expect("network" in status).toBe(true);
     expect("network" in doctor).toBe(true);
     expect("processes" in setup).toBe(true);
     expect("random" in setup).toBe(true);
+    expect("hash" in setup).toBe(true);
     expect("rename" in setup.filesystem).toBe(true);
   });
 
@@ -204,6 +209,20 @@ describe("platform and randomness adapters", () => {
     );
     expect(() => nodeRandom.bytes(0)).toThrow(RangeError);
   });
+
+  it("exposes only fixed SHA-256 through the injected hash adapter", () => {
+    const input = new TextEncoder().encode("abc");
+    const expectedInput = input.slice();
+    const digest = nodeHash.sha256(input);
+    expect(input).toEqual(expectedInput);
+    expect(
+      Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join(""),
+    ).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    expect(digest).toHaveLength(32);
+    expect(() =>
+      nodeHash.sha256("abc" as unknown as Uint8Array),
+    ).toThrowError("SHA-256 input must be bytes.");
+  });
 });
 
 describe.runIf(isIsolatedTestEnvironmentSafe())(
@@ -294,6 +313,41 @@ describe.runIf(isIsolatedTestEnvironmentSafe())(
         }),
       ).rejects.toMatchObject({ code: "process_rejected" });
       expect(delegated).toHaveLength(3);
+    } finally {
+      await isolated.cleanup();
+    }
+  });
+
+  it("defensively copies hash inputs and outputs at the guarded boundary", async () => {
+    const isolated = await createIsolatedTestRoot();
+    try {
+      const base = createTestSystem();
+      let delegatedInput: Uint8Array | undefined;
+      let delegatedOutput: Uint8Array | undefined;
+      const delegate: SystemCapabilities = Object.freeze({
+        ...base,
+        hash: Object.freeze({
+          sha256(data: Uint8Array): Uint8Array {
+            delegatedInput = data;
+            data.fill(0xa5);
+            delegatedOutput = new Uint8Array(32).fill(0x24);
+            return delegatedOutput;
+          },
+        }),
+      });
+      const guarded = createGuardedFakeSystem(isolated.boundary, delegate);
+      const callerInput = new Uint8Array([1, 2, 3, 4]);
+
+      const result = guarded.hash.sha256(callerInput);
+      expect(callerInput).toEqual(new Uint8Array([1, 2, 3, 4]));
+      expect(delegatedInput).not.toBe(callerInput);
+      expect(delegatedInput?.every((byte) => byte === 0)).toBe(true);
+      expect(result).not.toBe(delegatedOutput);
+      expect(result).toEqual(new Uint8Array(32).fill(0x24));
+
+      delegatedOutput?.fill(0xff);
+      expect(result).toEqual(new Uint8Array(32).fill(0x24));
+      expect(isolated.boundary.operations).toEqual([]);
     } finally {
       await isolated.cleanup();
     }

@@ -2,6 +2,7 @@ import type {
   ClockAdapter,
   DirectoryHandleAdapter,
   FileSystemAdapter,
+  HashAdapter,
   NetworkAdapter,
   NetworkResponse,
   PathMetadata,
@@ -64,6 +65,7 @@ export const deniedNetwork: NetworkAdapter = Object.freeze<NetworkAdapter>({
 export function createDenyByDefaultSystem(
   clock: ClockAdapter,
   random: RandomAdapter,
+  hash: HashAdapter,
   platform: PlatformAdapter,
 ): SystemCapabilities {
   return Object.freeze({
@@ -72,6 +74,7 @@ export function createDenyByDefaultSystem(
     network: deniedNetwork,
     clock,
     random,
+    hash,
     platform,
   });
 }
