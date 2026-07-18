@@ -27,6 +27,11 @@ Filesystem, network, process, clock, randomness, fixed cryptographic hashing,
 and platform access enter commands only through injected capabilities.
 Production filesystem, network, and process adapters remain deny-by-default
 until their implementation steps.
+The canonical credential schema, protected read port, and transactional
+write/recovery state machine are implemented as portable, injected cores. They
+remain deliberately unwired: no command can access a real credential path until
+the native POSIX and Windows ownership, permission/ACL, link, lease, atomic
+replacement, and durability adapters pass their isolated platform suites.
 Read-only commands cannot mutate local or product state or spawn. Status and
 doctor are restricted to GET requests; any later protocol-level MCP diagnostic
 will require its own narrowly defined capability. Dry-run setup cannot read file

@@ -53,6 +53,12 @@ export interface CredentialFileAttestation {
 }
 
 export interface BoundedCredentialRead {
+  /*
+   * The adapter retains ownership of this buffer. Portable code copies it
+   * synchronously before the next await and never mutates or claims to wipe the
+   * adapter's storage. Native handles may return a fresh buffer and wipe it on
+   * close, but callers cannot require that from an external implementation.
+   */
   readonly bytes: Uint8Array;
   readonly endOfFile: boolean;
 }
