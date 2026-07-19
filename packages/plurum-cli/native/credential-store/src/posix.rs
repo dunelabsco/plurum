@@ -1228,7 +1228,9 @@ impl LeaseCore {
         if let Some(mut directory) = runtime.directory.take() {
             directory.close();
         }
-        runtime.lock.take();
+        if let Some(lock) = runtime.lock.take() {
+            let _ = rustix_fs::flock(&lock, FlockOperation::Unlock);
+        }
     }
 }
 

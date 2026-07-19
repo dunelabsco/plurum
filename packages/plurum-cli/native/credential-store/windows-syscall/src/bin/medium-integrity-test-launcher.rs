@@ -52,6 +52,22 @@ fn canonical_file(path: &Path) -> Result<PathBuf, &'static str> {
     fs::canonicalize(path).map_err(|_| "file canonicalization failed")
 }
 
+fn node_main_script_path(path: &Path) -> Result<PathBuf, &'static str> {
+    let rendered = path.to_str().ok_or("ABI script path is invalid")?;
+    let compatible = if let Some(rest) = rendered.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = rendered.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    };
+    if compatible.is_absolute() {
+        Ok(compatible)
+    } else {
+        Err("ABI script path is invalid")
+    }
+}
+
 fn direct_child(parent: &Path, child: &Path) -> bool {
     child.parent() == Some(parent)
 }
@@ -143,6 +159,10 @@ fn validate_context() -> Result<LaunchContext, &'static str> {
             .join("tests")
             .join("abi-conformance.mjs"),
     )?;
+    // Node 24.0.0 cannot load a main script through the Win32 verbatim path
+    // returned by canonicalize. Remove only that namespace prefix while
+    // preserving the validated canonical target.
+    let script = node_main_script_path(&script)?;
 
     Ok(LaunchContext {
         isolation_root,
@@ -195,5 +215,30 @@ fn main() {
             eprintln!("native ABI launcher refused to run: {message}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_main_script_paths_remove_only_verbatim_namespaces() {
+        assert_eq!(
+            node_main_script_path(Path::new(r"\\?\D:\repo\abi-conformance.mjs"))
+                .expect("verbatim DOS path must convert"),
+            PathBuf::from(r"D:\repo\abi-conformance.mjs")
+        );
+        assert_eq!(
+            node_main_script_path(Path::new(r"\\?\UNC\server\share\abi-conformance.mjs"))
+                .expect("verbatim UNC path must convert"),
+            PathBuf::from(r"\\server\share\abi-conformance.mjs")
+        );
+        assert_eq!(
+            node_main_script_path(Path::new(r"D:\repo\abi-conformance.mjs"))
+                .expect("ordinary DOS path must remain valid"),
+            PathBuf::from(r"D:\repo\abi-conformance.mjs")
+        );
+        assert!(node_main_script_path(Path::new(r"\\?\GLOBALROOT\Device\file")).is_err());
     }
 }
