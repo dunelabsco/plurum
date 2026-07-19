@@ -45,6 +45,14 @@ globals outside the small approved adapter boundary. Race-free native
 filesystem containment and elevation guarantees remain unclaimed on every
 platform until the later native suite passes.
 
+A separate POSIX disk harness now runs the credential reader and transactional
+writer against real files inside that sentinel-backed root. It verifies private
+modes, ownership, no-follow and exclusive opens, replacement, cleanup, and
+ordinary file/directory flush ordering. The harness is excluded from `dist` and
+does not claim production locking, crash abandonment, directory-relative
+syscalls, macOS ACL/full-flush guarantees, or safety outside the controlled test
+root.
+
 API keys are accepted only through protected interactive input or
 `--api-key-stdin`. A value-bearing `--api-key` option does not exist, and invalid
 arguments are never reflected in diagnostics.
