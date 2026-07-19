@@ -65,13 +65,19 @@ boundary's Node-API 8 descriptor on native CI runners. Its adapter factory
 returns no value, so the TypeScript provider remains unavailable even when the
 test binary is loaded. The crate is excluded from the npm package, and no
 compiled native artifact is retained or published.
-The crate also contains private macOS/Linux directory, bounded-read, and
-kernel-lease primitives. Native tests exercise component-by-component
-no-follow traversal, retained identity binding, owner/mode/link checks,
-content-sensitive revisions, live contention, and process-death abandonment
-inside the sentinel-backed runner root. These primitives are not exported to
-JavaScript; POSIX mutation/durability, macOS ACL/full-flush, and Windows
-security remain activation blockers.
+The crate also contains private macOS/Linux directory, bounded-read,
+kernel-lease, and transactional-mutation primitives. Native tests exercise
+component-by-component no-follow traversal, retained identity binding,
+owner/mode/link checks, content-sensitive revisions, exclusive fixed-name
+candidates, exact write readback, conditional descriptor-relative
+rename/removal, file/directory flushes, bounded recovery enumeration,
+adversarial replacement, live contention, and process-death abandonment inside
+the sentinel-backed runner root. Abrupt-process tests establish visible
+filesystem states and kernel lock release after process exit; they do not claim
+physical power-loss persistence.
+These primitives are not exported to JavaScript. macOS ACL/full-flush policy,
+Windows security, bridge-level native fault injection, artifact
+resolution/packaging, and command wiring remain activation blockers.
 The foundation matrix executes current macOS arm64/x64, Linux glibc arm64/x64,
 and Windows x64 runners. Oldest-supported macOS and Linux kernel/glibc floors,
 Linux musl, and Windows arm64 remain unvalidated release blockers.

@@ -11,6 +11,8 @@ use rustix::io::Errno;
 use rustix::process;
 use sha2::{Digest, Sha256};
 
+mod mutation;
+
 const CREDENTIAL_ENTRY: &str = "credentials.json";
 const SETUP_LOCK_ENTRY: &str = "setup.lock";
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
@@ -37,6 +39,7 @@ pub(crate) enum PosixStoreError {
     Lost,
     Closed,
     Limit,
+    Unsupported,
     Io,
 }
 
@@ -219,6 +222,15 @@ impl NormalizedAbsolutePath {
     fn open_complete(&self) -> Result<File, PosixStoreError> {
         open_directory_components(&self.components)
     }
+}
+
+fn is_single_entry_name(name: &OsStr) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes != b"."
+        && bytes != b".."
+        && !bytes.contains(&0)
+        && !bytes.contains(&b'/')
 }
 
 fn directory_open_flags() -> OFlags {
@@ -420,16 +432,19 @@ impl DirectoryCore {
     }
 
     fn close_all(&self) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
         };
         state.parent.take();
         state.directory.take();
         for child in state.children.drain(..) {
             if let Some(child) = child.upgrade() {
-                if let Ok(mut slot) = child.lock() {
-                    slot.take();
-                }
+                let mut slot = match child.lock() {
+                    Ok(slot) => slot,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                slot.take();
             }
         }
     }
@@ -448,11 +463,21 @@ impl PosixPrivateDirectory {
     pub(crate) fn open_credential_read_only(
         &self,
     ) -> Result<CredentialReadOpenResult, PosixStoreError> {
+        self.open_managed_read_only(OsStr::new(CREDENTIAL_ENTRY))
+    }
+
+    fn open_managed_read_only(
+        &self,
+        entry_name: &OsStr,
+    ) -> Result<CredentialReadOpenResult, PosixStoreError> {
+        if !is_single_entry_name(entry_name) {
+            return Err(PosixStoreError::InvalidInput);
+        }
         let mut state = lock_unpoisoned(&self.core.state)?;
         let parent = self.core.require_secure_locked(&state)?;
         let directory = state.directory.as_ref().ok_or(PosixStoreError::Closed)?;
 
-        match rustix_fs::statat(directory, CREDENTIAL_ENTRY, AtFlags::SYMLINK_NOFOLLOW) {
+        match rustix_fs::statat(directory, entry_name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(_) => {}
             Err(error) if error == Errno::NOENT => {
                 return Ok(CredentialReadOpenResult::Missing);
@@ -460,33 +485,23 @@ impl PosixPrivateDirectory {
             Err(_) => return Err(PosixStoreError::Unsafe),
         }
 
-        let opened = secure_openat(
-            directory,
-            OsStr::new(CREDENTIAL_ENTRY),
-            read_open_flags(),
-            Mode::empty(),
-        )
-        .map_err(|error| {
-            if error == Errno::NOENT {
-                PosixStoreError::Lost
-            } else {
-                PosixStoreError::Unsafe
-            }
-        })?;
+        let opened = secure_openat(directory, entry_name, read_open_flags(), Mode::empty())
+            .map_err(|error| {
+                if error == Errno::NOENT {
+                    PosixStoreError::Lost
+                } else {
+                    PosixStoreError::Unsafe
+                }
+            })?;
         let file = File::from(opened);
         let facts = metadata(&file)?;
         if facts.kind != ObjectKind::RegularFile {
             return Err(PosixStoreError::Unsafe);
         }
 
-        let rebound = secure_openat(
-            directory,
-            OsStr::new(CREDENTIAL_ENTRY),
-            read_open_flags(),
-            Mode::empty(),
-        )
-        .map(File::from)
-        .map_err(|_| PosixStoreError::Lost)?;
+        let rebound = secure_openat(directory, entry_name, read_open_flags(), Mode::empty())
+            .map(File::from)
+            .map_err(|_| PosixStoreError::Lost)?;
         if metadata(&rebound)?.identity != facts.identity {
             return Err(PosixStoreError::Lost);
         }
@@ -498,6 +513,7 @@ impl PosixPrivateDirectory {
             PosixCredentialReadHandle {
                 directory: Arc::clone(&self.core),
                 parent_identity: parent.identity,
+                entry_name: entry_name.to_os_string(),
                 slot,
             },
         ))
@@ -664,6 +680,7 @@ pub(crate) enum CredentialReadOpenResult {
 pub(crate) struct PosixCredentialReadHandle {
     directory: Arc<DirectoryCore>,
     parent_identity: ObjectIdentity,
+    entry_name: OsString,
     slot: Arc<Mutex<Option<File>>>,
 }
 
@@ -686,7 +703,7 @@ impl PosixCredentialReadHandle {
         let canonical_current = parent.is_secure()
             && secure_openat(
                 directory,
-                OsStr::new(CREDENTIAL_ENTRY),
+                self.entry_name.as_os_str(),
                 read_open_flags(),
                 Mode::empty(),
             )
@@ -728,20 +745,23 @@ impl PosixCredentialReadHandle {
         if expected_size > MAX_ATTESTED_BYTES {
             return Err(PosixStoreError::Limit);
         }
-        let bytes = read_exact_at(file, expected_size)?;
+        let mut bytes = read_exact_at(file, expected_size)?;
         let (after_security, after) = self.security_locked(&directory_state, file)?;
         if before != after || before_security != after_security {
+            bytes.fill(0);
             return Err(PosixStoreError::Lost);
         }
+        let revision = digest_metadata(
+            b"plurum-posix-credential-revision-v1\0",
+            after,
+            after_security.canonical_current,
+            Some(after_security.parent_identity),
+            &bytes,
+        );
+        bytes.fill(0);
         Ok(CredentialFileAttestation {
             security: after_security,
-            revision: digest_metadata(
-                b"plurum-posix-credential-revision-v1\0",
-                after,
-                after_security.canonical_current,
-                Some(after_security.parent_identity),
-                &bytes,
-            ),
+            revision,
         })
     }
 
@@ -756,9 +776,16 @@ impl PosixCredentialReadHandle {
         if !before_security.is_secure() {
             return Err(PosixStoreError::Unsafe);
         }
-        let bytes = read_up_to_at(file, max_bytes)?;
-        let (after_security, after) = self.security_locked(&directory_state, file)?;
+        let mut bytes = read_up_to_at(file, max_bytes)?;
+        let (after_security, after) = match self.security_locked(&directory_state, file) {
+            Ok(value) => value,
+            Err(error) => {
+                bytes.fill(0);
+                return Err(error);
+            }
+        };
         if before != after || before_security != after_security {
+            bytes.fill(0);
             return Err(PosixStoreError::Lost);
         }
         Ok(BoundedRead {
@@ -768,9 +795,11 @@ impl PosixCredentialReadHandle {
     }
 
     pub(crate) fn close(&mut self) {
-        if let Ok(mut slot) = self.slot.lock() {
-            slot.take();
-        }
+        let mut slot = match self.slot.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        slot.take();
     }
 }
 
@@ -784,12 +813,20 @@ fn read_up_to_at(file: &File, max_bytes: usize) -> Result<Vec<u8>, PosixStoreErr
     let mut bytes = vec![0_u8; max_bytes];
     let mut offset = 0;
     while offset < max_bytes {
-        let read = file
-            .read_at(
-                &mut bytes[offset..],
-                u64::try_from(offset).map_err(|_| PosixStoreError::Limit)?,
-            )
-            .map_err(|_| PosixStoreError::Io)?;
+        let position = match u64::try_from(offset) {
+            Ok(position) => position,
+            Err(_) => {
+                bytes.fill(0);
+                return Err(PosixStoreError::Limit);
+            }
+        };
+        let read = match file.read_at(&mut bytes[offset..], position) {
+            Ok(read) => read,
+            Err(_) => {
+                bytes.fill(0);
+                return Err(PosixStoreError::Io);
+            }
+        };
         if read == 0 {
             break;
         }
@@ -800,10 +837,11 @@ fn read_up_to_at(file: &File, max_bytes: usize) -> Result<Vec<u8>, PosixStoreErr
 }
 
 fn read_exact_at(file: &File, expected: usize) -> Result<Vec<u8>, PosixStoreError> {
-    let bytes = read_up_to_at(file, expected)?;
+    let mut bytes = read_up_to_at(file, expected)?;
     if bytes.len() == expected {
         Ok(bytes)
     } else {
+        bytes.fill(0);
         Err(PosixStoreError::Lost)
     }
 }
@@ -847,9 +885,9 @@ pub(crate) enum SetupLeaseAcquireResult {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ValidatedNonce([u8; LOCK_NONCE_LENGTH]);
+struct ValidatedUuidV4([u8; LOCK_NONCE_LENGTH]);
 
-impl ValidatedNonce {
+impl ValidatedUuidV4 {
     fn parse(value: &str) -> Result<Self, PosixStoreError> {
         let bytes = value.as_bytes();
         if bytes.len() != LOCK_NONCE_LENGTH {
@@ -878,7 +916,7 @@ impl ValidatedNonce {
 enum LockRecordState {
     Uninitialized,
     Clean,
-    Held(ValidatedNonce),
+    Held(ValidatedUuidV4),
 }
 
 fn read_lock_record(file: &File) -> Result<LockRecordState, PosixStoreError> {
@@ -908,7 +946,7 @@ fn read_lock_record(file: &File) -> Result<LockRecordState, PosixStoreError> {
             if nonce.iter().all(|byte| *byte == 0)
                 || std::str::from_utf8(nonce)
                     .ok()
-                    .and_then(|value| ValidatedNonce::parse(value).ok())
+                    .and_then(|value| ValidatedUuidV4::parse(value).ok())
                     .is_some()
             {
                 Ok(LockRecordState::Clean)
@@ -919,7 +957,7 @@ fn read_lock_record(file: &File) -> Result<LockRecordState, PosixStoreError> {
         LOCK_STATE_HELD => {
             let nonce = std::str::from_utf8(&bytes[LOCK_NONCE_START..LOCK_NONCE_END])
                 .map_err(|_| PosixStoreError::Unsafe)
-                .and_then(ValidatedNonce::parse)?;
+                .and_then(ValidatedUuidV4::parse)?;
             Ok(LockRecordState::Held(nonce))
         }
         _ => Err(PosixStoreError::Unsafe),
@@ -949,7 +987,7 @@ fn initialize_clean_lock_record(file: &File) -> Result<(), PosixStoreError> {
     }
 }
 
-fn write_held_lock_record(file: &File, nonce: ValidatedNonce) -> Result<(), PosixStoreError> {
+fn write_held_lock_record(file: &File, nonce: ValidatedUuidV4) -> Result<(), PosixStoreError> {
     if read_lock_record(file)? != LockRecordState::Clean {
         return Err(PosixStoreError::Lost);
     }
@@ -1045,7 +1083,7 @@ pub(crate) fn acquire_setup_lease(
     path: &Path,
     nonce: &str,
 ) -> Result<SetupLeaseAcquireResult, PosixStoreError> {
-    let nonce = ValidatedNonce::parse(nonce)?;
+    let nonce = ValidatedUuidV4::parse(nonce)?;
     let ensured = ensure_private_directory(path)?;
     let directory_disposition = ensured.disposition;
     let directory = ensured.directory;
@@ -1089,10 +1127,15 @@ pub(crate) fn acquire_setup_lease(
     }
 
     let lease = PosixSetupLease {
-        directory: Some(directory),
-        lock: Some(lock),
-        nonce,
-        terminal: false,
+        core: Arc::new(LeaseCore {
+            nonce,
+            runtime: Mutex::new(LeaseRuntime {
+                status: LeaseStatus::Held,
+                generation: 0,
+                directory: Some(directory),
+                lock: Some(lock),
+            }),
+        }),
     };
     if lease.verify_held().is_err() {
         return Err(PosixStoreError::Lost);
@@ -1104,26 +1147,69 @@ pub(crate) fn acquire_setup_lease(
     })
 }
 
-pub(crate) struct PosixSetupLease {
-    directory: Option<PosixPrivateDirectory>,
-    lock: Option<File>,
-    nonce: ValidatedNonce,
-    terminal: bool,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LeaseStatus {
+    Held,
+    Lost,
+    Terminal,
 }
 
-impl PosixSetupLease {
-    fn verify_held(&self) -> Result<(), PosixStoreError> {
-        if self.terminal {
-            return Err(PosixStoreError::Closed);
+struct LeaseRuntime {
+    status: LeaseStatus,
+    generation: u64,
+    directory: Option<PosixPrivateDirectory>,
+    lock: Option<File>,
+}
+
+struct LeaseCore {
+    nonce: ValidatedUuidV4,
+    runtime: Mutex<LeaseRuntime>,
+}
+
+impl LeaseCore {
+    fn verify_held_locked(&self, runtime: &LeaseRuntime) -> Result<(), PosixStoreError> {
+        match runtime.status {
+            LeaseStatus::Held => {}
+            LeaseStatus::Lost => return Err(PosixStoreError::Lost),
+            LeaseStatus::Terminal => return Err(PosixStoreError::Closed),
         }
-        let directory = self.directory.as_ref().ok_or(PosixStoreError::Closed)?;
-        let lock = self.lock.as_ref().ok_or(PosixStoreError::Closed)?;
+        let directory = runtime.directory.as_ref().ok_or(PosixStoreError::Closed)?;
+        let lock = runtime.lock.as_ref().ok_or(PosixStoreError::Closed)?;
         if !exact_setup_lock(directory, lock)?
             || read_lock_record(lock)? != LockRecordState::Held(self.nonce)
         {
             return Err(PosixStoreError::Lost);
         }
         Ok(())
+    }
+
+    fn verify_or_latch_locked(&self, runtime: &mut LeaseRuntime) -> Result<(), PosixStoreError> {
+        if let Err(error) = self.verify_held_locked(runtime) {
+            if runtime.status != LeaseStatus::Terminal {
+                runtime.status = LeaseStatus::Lost;
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn finish_locked(runtime: &mut LeaseRuntime) {
+        runtime.status = LeaseStatus::Terminal;
+        if let Some(mut directory) = runtime.directory.take() {
+            directory.close();
+        }
+        runtime.lock.take();
+    }
+}
+
+pub(crate) struct PosixSetupLease {
+    core: Arc<LeaseCore>,
+}
+
+impl PosixSetupLease {
+    fn verify_held(&self) -> Result<(), PosixStoreError> {
+        let mut runtime = lock_unpoisoned(&self.core.runtime)?;
+        self.core.verify_or_latch_locked(&mut runtime)
     }
 
     pub(crate) fn renew(&self) -> LeaseRenewal {
@@ -1134,44 +1220,60 @@ impl PosixSetupLease {
         }
     }
 
-    fn finish(&mut self) {
-        self.terminal = true;
-        if let Some(mut directory) = self.directory.take() {
-            directory.close();
-        }
-        self.lock.take();
-    }
-
     pub(crate) fn release(&mut self) -> Result<(), PosixStoreError> {
-        if self.terminal {
+        let (mut runtime, poisoned) = match self.core.runtime.lock() {
+            Ok(runtime) => (runtime, false),
+            Err(poisoned) => (poisoned.into_inner(), true),
+        };
+        if runtime.status == LeaseStatus::Terminal {
             return Err(PosixStoreError::Closed);
         }
+        if poisoned {
+            runtime.status = LeaseStatus::Lost;
+            LeaseCore::finish_locked(&mut runtime);
+            return Err(PosixStoreError::Lost);
+        }
         let result = (|| {
-            self.verify_held()?;
-            let lock = self.lock.as_ref().ok_or(PosixStoreError::Closed)?;
+            self.core.verify_or_latch_locked(&mut runtime)?;
+            let lock = runtime.lock.as_ref().ok_or(PosixStoreError::Closed)?;
             write_lock_state(lock, LOCK_STATE_CLEAN)?;
             if read_lock_record(lock)? != LockRecordState::Clean {
                 return Err(PosixStoreError::Lost);
             }
             Ok(())
         })();
-        self.finish();
+        if result.is_err() {
+            runtime.status = LeaseStatus::Lost;
+        }
+        LeaseCore::finish_locked(&mut runtime);
         result
     }
 
     pub(crate) fn abandon(&mut self) -> Result<(), PosixStoreError> {
-        if self.terminal {
+        let (mut runtime, poisoned) = match self.core.runtime.lock() {
+            Ok(runtime) => (runtime, false),
+            Err(poisoned) => (poisoned.into_inner(), true),
+        };
+        if runtime.status == LeaseStatus::Terminal {
             return Err(PosixStoreError::Closed);
         }
-        self.finish();
-        Ok(())
+        LeaseCore::finish_locked(&mut runtime);
+        if poisoned {
+            Err(PosixStoreError::Lost)
+        } else {
+            Ok(())
+        }
     }
 }
 
 impl Drop for PosixSetupLease {
     fn drop(&mut self) {
-        if !self.terminal {
-            self.finish();
+        let mut runtime = match self.core.runtime.lock() {
+            Ok(runtime) => runtime,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if runtime.status != LeaseStatus::Terminal {
+            LeaseCore::finish_locked(&mut runtime);
         }
     }
 }
@@ -1192,21 +1294,21 @@ mod tests {
     const NONCE_1: &str = "b56c52f5-a090-41eb-a164-1c92e36db94f";
     const NONCE_2: &str = "4657f2a0-739f-4923-86e8-f25f1dc328f9";
     const NONCE_3: &str = "c5a8d21a-9679-43bd-93c7-2c476388d8aa";
-    const ISOLATION_MARKER: &str = "plurum-native-isolation-v1\n";
-    const TEST_MARKER: &str = "plurum-posix-native-test-v1\n";
+    pub(super) const ISOLATION_MARKER: &str = "plurum-native-isolation-v1\n";
+    pub(super) const TEST_MARKER: &str = "plurum-posix-native-test-v1\n";
     const CHILD_DIRECTORY_ENV: &str = "PLURUM_POSIX_LEASE_CHILD_DIRECTORY";
     const CHILD_READY_ENV: &str = "PLURUM_POSIX_LEASE_CHILD_READY";
     static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(1);
 
-    struct TestRoot {
-        root: PathBuf,
-        temporary: PathBuf,
-        store: PathBuf,
-        outside: PathBuf,
-        marker: PathBuf,
+    pub(super) struct TestRoot {
+        pub(super) root: PathBuf,
+        pub(super) temporary: PathBuf,
+        pub(super) store: PathBuf,
+        pub(super) outside: PathBuf,
+        pub(super) marker: PathBuf,
     }
 
-    fn verified_test_isolation() -> (ProcessIdentity, PathBuf, PathBuf) {
+    pub(super) fn verified_test_isolation() -> (ProcessIdentity, PathBuf, PathBuf) {
         let process = ProcessIdentity::capture().expect("test process identity must be safe");
         let configured = PathBuf::from(
             env::var("PLURUM_NATIVE_ISOLATION_ROOT")
@@ -1303,7 +1405,7 @@ mod tests {
     }
 
     impl TestRoot {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let (_, _, temporary) = verified_test_isolation();
 
             let sequence = NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed);
@@ -1403,7 +1505,7 @@ mod tests {
         }
     }
 
-    fn create_private_directory(path: &Path) {
+    pub(super) fn create_private_directory(path: &Path) {
         let mut builder = DirBuilder::new();
         builder.mode(PRIVATE_DIRECTORY_MODE);
         builder
@@ -1413,7 +1515,7 @@ mod tests {
             .expect("private test directory mode must be set");
     }
 
-    fn create_private_file(path: &Path, bytes: &[u8]) {
+    pub(super) fn create_private_file(path: &Path, bytes: &[u8]) {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1427,7 +1529,7 @@ mod tests {
         file.sync_all().expect("private test file must sync");
     }
 
-    fn overwrite_private_file(path: &Path, bytes: &[u8]) {
+    pub(super) fn overwrite_private_file(path: &Path, bytes: &[u8]) {
         let mut file = OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -1456,7 +1558,7 @@ mod tests {
         }
     }
 
-    fn acquired_lease(
+    pub(super) fn acquired_lease(
         path: &Path,
         nonce: &str,
     ) -> (PriorLease, DirectoryDisposition, PosixSetupLease) {
@@ -1973,7 +2075,7 @@ mod tests {
 
         initialize_clean_lock_record(&lock).expect("clean record must initialize");
         assert_eq!(read_lock_record(&lock), Ok(LockRecordState::Clean));
-        let nonce = ValidatedNonce::parse(NONCE_1).expect("nonce must validate");
+        let nonce = ValidatedUuidV4::parse(NONCE_1).expect("nonce must validate");
         write_all_at(&lock, &nonce.0, LOCK_NONCE_START as u64).expect("nonce payload must write");
         lock.sync_all().expect("nonce payload must sync");
         assert_eq!(

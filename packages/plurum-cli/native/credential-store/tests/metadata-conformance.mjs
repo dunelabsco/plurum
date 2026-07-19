@@ -14,6 +14,12 @@ const manifestPath = join(crateRoot, "Cargo.toml");
 const lockPath = join(crateRoot, "Cargo.lock");
 const sourcePath = join(crateRoot, "src", "lib.rs");
 const posixSourcePath = join(crateRoot, "src", "posix.rs");
+const posixMutationSourcePath = join(
+  crateRoot,
+  "src",
+  "posix",
+  "mutation.rs",
+);
 const targetMapPath = join(crateRoot, "src", "target_map.rs");
 const isolationMarker = "plurum-native-isolation-v1\n";
 
@@ -124,6 +130,7 @@ for (const path of [
   lockPath,
   sourcePath,
   posixSourcePath,
+  posixMutationSourcePath,
   targetMapPath,
 ]) {
   const metadata = lstatSync(path);
