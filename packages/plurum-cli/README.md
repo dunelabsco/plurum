@@ -61,6 +61,15 @@ package resolver, JavaScript fallback, or command/runtime import. Loading and
 platform access remain unavailable until the native macOS, Linux, and Windows
 suites establish their guarantees independently.
 
+The repository contains an unpublished Rust `cdylib` that establishes this
+boundary's Node-API 8 descriptor on native CI runners. Its adapter factory
+returns no value, so the TypeScript provider remains unavailable even when the
+test binary is loaded. The crate is excluded from the npm package, and no
+compiled native artifact is retained or published.
+The foundation matrix executes macOS arm64/x64, Linux glibc arm64/x64, and
+Windows x64. Linux musl and Windows arm64 identifiers remain reserved and
+unvalidated release blockers.
+
 API keys are accepted only through protected interactive input or
 `--api-key-stdin`. A value-bearing `--api-key` option does not exist, and invalid
 arguments are never reflected in diagnostics.

@@ -47,6 +47,7 @@ Thumbs.db
 # Build outputs
 .next/
 /out
+/packages/plurum-cli/native/credential-store/target/
 
 # Local research (cloned repos, not for commit)
 research/

@@ -106,3 +106,96 @@ jobs:
         run: npm ci
       - name: Typecheck, test, build, and verify package
         run: npm run check
+
+  native-credential-abi:
+    name: native credential ABI (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            architecture: arm64
+            target: darwin-arm64
+            rust_host: aarch64-apple-darwin
+          - os: macos-15-intel
+            architecture: x64
+            target: darwin-x64
+            rust_host: x86_64-apple-darwin
+          - os: ubuntu-24.04-arm
+            architecture: arm64
+            target: linux-arm64-gnu
+            rust_host: aarch64-unknown-linux-gnu
+          - os: ubuntu-24.04
+            architecture: x64
+            target: linux-x64-gnu
+            rust_host: x86_64-unknown-linux-gnu
+          - os: windows-2025
+            architecture: x64
+            target: win32-x64-msvc
+            rust_host: x86_64-pc-windows-msvc
+    defaults:
+      run:
+        working-directory: packages/plurum-cli
+    env:
+      RUSTUP_TOOLCHAIN: "1.97.1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.12.0"
+          architecture: ${{ matrix.architecture }}
+      - name: Prepare isolated native test paths
+        run: node native/credential-store/tests/prepare-isolation.mjs
+        env:
+          PLURUM_NATIVE_ISOLATION_ROOT: ${{ runner.temp }}/plurum-native-isolation
+          PLURUM_NATIVE_RUST_HOST: ${{ matrix.rust_host }}
+      - name: Install npm dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify the unwired CLI package
+        run: npm run check
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
+      - name: Fetch locked Rust dependencies
+        run: node native/credential-store/tests/run-isolated-cargo.mjs fetch
+      - name: Verify locked Rust metadata and features
+        run: node native/credential-store/tests/metadata-conformance.mjs
+      - name: Install the declared minimum Rust toolchain
+        if: matrix.target == 'linux-x64-gnu'
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Check the declared Rust minimum
+        if: matrix.target == 'linux-x64-gnu'
+        run: node native/credential-store/tests/run-isolated-cargo.mjs msrv
+      - name: Check Rust formatting
+        run: node native/credential-store/tests/run-isolated-cargo.mjs fmt
+      - name: Lint the native foundation
+        run: node native/credential-store/tests/run-isolated-cargo.mjs clippy
+      - name: Test the native foundation
+        run: node native/credential-store/tests/run-isolated-cargo.mjs test
+      - name: Build the native foundation
+        run: node native/credential-store/tests/run-isolated-cargo.mjs build
+      - name: Verify the Node 22.12 ABI floor
+        run: node native/credential-store/tests/abi-conformance.mjs
+        env:
+          PLURUM_NATIVE_EXPECTED_NODE: "22.12.0"
+          PLURUM_NATIVE_EXPECTED_TARGET: ${{ matrix.target }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.0.0"
+          architecture: ${{ matrix.architecture }}
+      - name: Verify the Node 24 ABI
+        run: node native/credential-store/tests/abi-conformance.mjs
+        env:
+          PLURUM_NATIVE_EXPECTED_NODE: "24.0.0"
+          PLURUM_NATIVE_EXPECTED_TARGET: ${{ matrix.target }}
+      - name: Recheck capability boundaries on Node 24
+        run: npm run verify-capabilities
+      - name: Recheck the npm package on Node 24
+        run: npm run verify-package
+      - name: Verify no native artifact entered the package tree
+        run: node native/credential-store/tests/artifact-conformance.mjs
+      - name: Verify tests generated no tracked changes
+        run: git diff --exit-code

@@ -65,6 +65,22 @@ updates:
           - minor
           - patch
 
+  - package-ecosystem: cargo
+    directory: "/packages/plurum-cli/native/credential-store"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Europe/Istanbul
+    open-pull-requests-limit: 5
+    groups:
+      native-credential-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
