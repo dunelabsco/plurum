@@ -259,6 +259,7 @@ const environment = {
   XDG_CONFIG_HOME: config,
   APPDATA: join(config, "appdata"),
   LOCALAPPDATA: join(config, "localappdata"),
+  PLURUM_NATIVE_ISOLATION_ROOT: isolationRoot,
   PLURUM_HOME: join(config, "plurum"),
   CODEX_HOME: join(config, "codex"),
   CLAUDE_CONFIG_DIR: join(config, "claude"),

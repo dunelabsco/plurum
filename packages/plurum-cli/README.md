@@ -41,9 +41,8 @@ The test harness refuses elevated or unverifiable execution, confines guarded
 fake operations to a unique private root, rejects lexical, canonical, ordinary
 symlink, and hard-link escapes, and never uses real credentials, host binaries,
 or production endpoints. An AST gate rejects direct capability imports or
-globals outside the small approved adapter boundary. Race-free native
-filesystem containment and elevation guarantees remain unclaimed on every
-platform until the later native suite passes.
+globals outside the small approved adapter boundary. Native filesystem access
+remains unavailable to production until the complete platform suites pass.
 
 A separate POSIX disk harness now runs the credential reader and transactional
 writer against real files inside that sentinel-backed root. It verifies private
@@ -66,9 +65,16 @@ boundary's Node-API 8 descriptor on native CI runners. Its adapter factory
 returns no value, so the TypeScript provider remains unavailable even when the
 test binary is loaded. The crate is excluded from the npm package, and no
 compiled native artifact is retained or published.
-The foundation matrix executes macOS arm64/x64, Linux glibc arm64/x64, and
-Windows x64. Linux musl and Windows arm64 identifiers remain reserved and
-unvalidated release blockers.
+The crate also contains private macOS/Linux directory, bounded-read, and
+kernel-lease primitives. Native tests exercise component-by-component
+no-follow traversal, retained identity binding, owner/mode/link checks,
+content-sensitive revisions, live contention, and process-death abandonment
+inside the sentinel-backed runner root. These primitives are not exported to
+JavaScript; POSIX mutation/durability, macOS ACL/full-flush, and Windows
+security remain activation blockers.
+The foundation matrix executes current macOS arm64/x64, Linux glibc arm64/x64,
+and Windows x64 runners. Oldest-supported macOS and Linux kernel/glibc floors,
+Linux musl, and Windows arm64 remain unvalidated release blockers.
 
 API keys are accepted only through protected interactive input or
 `--api-key-stdin`. A value-bearing `--api-key` option does not exist, and invalid

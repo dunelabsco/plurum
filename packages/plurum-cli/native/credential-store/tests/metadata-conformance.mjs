@@ -13,6 +13,7 @@ const crateRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const manifestPath = join(crateRoot, "Cargo.toml");
 const lockPath = join(crateRoot, "Cargo.lock");
 const sourcePath = join(crateRoot, "src", "lib.rs");
+const posixSourcePath = join(crateRoot, "src", "posix.rs");
 const targetMapPath = join(crateRoot, "src", "target_map.rs");
 const isolationMarker = "plurum-native-isolation-v1\n";
 
@@ -118,7 +119,13 @@ function commandEnvironment(root, cargoPath, rustcPath) {
   };
 }
 
-for (const path of [manifestPath, lockPath, sourcePath, targetMapPath]) {
+for (const path of [
+  manifestPath,
+  lockPath,
+  sourcePath,
+  posixSourcePath,
+  targetMapPath,
+]) {
   const metadata = lstatSync(path);
   assert.equal(metadata.isSymbolicLink(), false, `${path} must not be a symlink`);
   assert.equal(metadata.isFile(), true, `${path} must be a regular file`);
@@ -227,6 +234,24 @@ assert.deepEqual(dependencies, [
     features: [],
     target: null,
   },
+  {
+    name: "rustix",
+    requirement: "=1.1.4",
+    kind: null,
+    optional: false,
+    defaultFeatures: false,
+    features: ["fs", "process", "std"],
+    target: 'cfg(any(target_os = "macos", target_os = "linux"))',
+  },
+  {
+    name: "sha2",
+    requirement: "=0.11.0",
+    kind: null,
+    optional: false,
+    defaultFeatures: false,
+    features: [],
+    target: 'cfg(any(target_os = "macos", target_os = "linux"))',
+  },
 ]);
 
 assert.equal(rootPackage.targets.length, 2);
@@ -288,5 +313,34 @@ assert.deepEqual([...napiSysNode.features].sort(), [
   "napi7",
   "napi8",
 ]);
+
+const rustixDependency = rootNode.deps.find(({ name }) => name === "rustix");
+assert.ok(rustixDependency, "Cargo resolution must contain rustix");
+const rustixPackage = cargo.packages.find(
+  ({ id }) => id === rustixDependency.pkg,
+);
+assert.ok(rustixPackage, "Cargo metadata must describe the resolved rustix");
+assert.equal(rustixPackage.version, "1.1.4");
+assert.equal(rustixPackage.rust_version, "1.63");
+const rustixNode = cargo.resolve.nodes.find(
+  ({ id }) => id === rustixPackage.id,
+);
+assert.ok(rustixNode, "Cargo resolution must describe rustix features");
+assert.deepEqual([...rustixNode.features].sort(), [
+  "alloc",
+  "fs",
+  "process",
+  "std",
+]);
+
+const sha2Dependency = rootNode.deps.find(({ name }) => name === "sha2");
+assert.ok(sha2Dependency, "Cargo resolution must contain sha2");
+const sha2Package = cargo.packages.find(({ id }) => id === sha2Dependency.pkg);
+assert.ok(sha2Package, "Cargo metadata must describe the resolved sha2");
+assert.equal(sha2Package.version, "0.11.0");
+assert.equal(sha2Package.rust_version, "1.85");
+const sha2Node = cargo.resolve.nodes.find(({ id }) => id === sha2Package.id);
+assert.ok(sha2Node, "Cargo resolution must describe sha2 features");
+assert.deepEqual([...sha2Node.features].sort(), []);
 
 console.log("native credential Cargo metadata conforms");

@@ -2,6 +2,10 @@
 
 use napi_derive::napi;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg_attr(not(test), allow(dead_code))]
+mod posix;
+
 #[cfg(test)]
 mod target_map;
 
