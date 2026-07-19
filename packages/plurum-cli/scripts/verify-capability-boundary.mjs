@@ -84,7 +84,7 @@ function isUnwiredNativeBoundaryModule(resolvedModule) {
   );
 }
 
-function isAllowedNativeReflectApplyReference(node, parent) {
+function isAllowedNativeReflectReference(node, parent) {
   return (
     node.name === "Reflect" &&
     parent?.type === "MemberExpression" &&
@@ -92,7 +92,7 @@ function isAllowedNativeReflectApplyReference(node, parent) {
     parent.computed === false &&
     parent.optional === false &&
     parent.property.type === "Identifier" &&
-    parent.property.name === "apply"
+    ["apply", "ownKeys"].includes(parent.property.name)
   );
 }
 
@@ -499,7 +499,19 @@ function scanText(relativePath, text) {
           "getOwnPropertyDescriptor",
           "getOwnPropertyDescriptors",
           "setPrototypeOf",
-        ].includes(propertyName)
+        ].includes(propertyName) &&
+        !(
+          relativePath ===
+            "src/adapters/node/native-credential-store.ts" &&
+          ["getPrototypeOf", "getOwnPropertyDescriptor"].includes(
+            propertyName,
+          ) &&
+          node.computed === false &&
+          node.optional === false &&
+          parent?.type === "CallExpression" &&
+          parent.callee === node &&
+          parent.optional === false
+        )
       ) {
         report(
           node,
@@ -517,7 +529,7 @@ function scanText(relativePath, text) {
       if (
         relativePath === "src/adapters/node/native-credential-store.ts" &&
         objectName === "Reflect" &&
-        propertyName === "apply" &&
+        ["apply", "ownKeys"].includes(propertyName) &&
         !(
           node.computed === false &&
           node.optional === false &&
@@ -529,7 +541,7 @@ function scanText(relativePath, text) {
         report(
           node,
           "dynamic-code",
-          "Reflect.apply is allowed only as a direct noncomputed call in the native credential boundary",
+          "Reflect.apply and Reflect.ownKeys are allowed only as direct noncomputed calls in the native credential boundary",
         );
       }
     }
@@ -584,10 +596,10 @@ function scanText(relativePath, text) {
         }
       } else {
         const rule = reservedGlobals.get(node.name);
-        const allowedNativeReflectApply =
+        const allowedNativeReflect =
           relativePath === "src/adapters/node/native-credential-store.ts" &&
-          isAllowedNativeReflectApplyReference(node, parent);
-        if (rule !== undefined && !allowedNativeReflectApply) {
+          isAllowedNativeReflectReference(node, parent);
+        if (rule !== undefined && !allowedNativeReflect) {
           report(
             node,
             rule,
@@ -783,6 +795,11 @@ const negativeFixtures = [
   ],
   [
     "src/adapters/node/native-credential-store.ts",
+    "Reflect['ownKeys']({});",
+    "dynamic-code",
+  ],
+  [
+    "src/adapters/node/native-credential-store.ts",
     "const apply = Reflect.apply; apply(() => 1, undefined, []);",
     "dynamic-code",
   ],
@@ -819,6 +836,14 @@ const positiveFixtures = [
   [
     "src/adapters/node/native-credential-store.ts",
     "Reflect.apply(() => 1, undefined, []);",
+  ],
+  [
+    "src/adapters/node/native-credential-store.ts",
+    "Reflect.ownKeys(Object.freeze({}));",
+  ],
+  [
+    "src/adapters/node/native-credential-store.ts",
+    'Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), "byteLength");',
   ],
 ];
 

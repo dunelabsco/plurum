@@ -101,7 +101,8 @@ export type PrivateCredentialDirectoryOpenResult =
 
 /*
  * This portable port does not itself claim POSIX mode/nofollow or Windows
- * ACL/reparse enforcement. Those guarantees belong to a future native adapter.
+ * ACL/reparse enforcement. The staged native adapters establish those
+ * guarantees at their platform boundary before returning a handle.
  */
 export interface CredentialStoreReadAdapter {
   openPrivateDirectory(

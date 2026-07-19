@@ -8,6 +8,7 @@ import {
   lstatSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -81,17 +82,26 @@ function isolatedDirectory(root, environmentName, childName) {
 
 function regularFileFromEnvironment(name) {
   const path = requiredEnvironment(name);
-  assert.equal(isAbsolute(path), true, `${name} must be absolute`);
+  return regularFileFromPath(path, name);
+}
+
+function regularFileFromPath(path, label) {
+  assert.equal(isAbsolute(path), true, `${label} must be absolute`);
   const metadata = lstatSync(path);
-  assert.equal(metadata.isSymbolicLink(), false, `${name} must not be a symlink`);
-  assert.equal(metadata.isFile(), true, `${name} must be a regular file`);
+  assert.equal(
+    metadata.isSymbolicLink(),
+    false,
+    `${label} must not be a symlink`,
+  );
+  assert.equal(metadata.isFile(), true, `${label} must be a regular file`);
   return realpathSync(path);
 }
 
 function optionalSystemEnvironment() {
   return Object.fromEntries(
-    ["SystemRoot", "WINDIR", "CI"].flatMap((name) =>
-      process.env[name] === undefined ? [] : [[name, process.env[name]]],
+    ["SystemRoot", "WINDIR", "CI", "GITHUB_ACTIONS", "RUNNER_TEMP"].flatMap(
+      (name) =>
+        process.env[name] === undefined ? [] : [[name, process.env[name]]],
     ),
   );
 }
@@ -218,7 +228,12 @@ async function runChild() {
     );
   }
 
-  const [{ createNativeCredentialStoreProvider }, { CLI_VERSION }] =
+  const [
+    { createNativeCredentialStoreProvider },
+    { CLI_VERSION },
+    { readCredentialStore },
+    { recoverCredentialStore, writeCredentialStore },
+  ] =
     await Promise.all([
       import(
         pathToFileURL(
@@ -226,6 +241,12 @@ async function runChild() {
         ).href
       ),
       import(pathToFileURL(join(packageRoot, "dist", "version.js")).href),
+      import(pathToFileURL(join(packageRoot, "dist", "credentials", "store.js")).href),
+      import(
+        pathToFileURL(
+          join(packageRoot, "dist", "credentials", "store-writer.js"),
+        ).href
+      ),
     ]);
 
   assert.equal(addon.magic, "plurum-native-credential-store");
@@ -234,7 +255,28 @@ async function runChild() {
   assert.equal(addon.packageVersion, CLI_VERSION);
   assert.equal(addon.target, expectedTarget);
   assert.equal(typeof addon.createAdapters, "function");
-  assert.equal(Reflect.apply(addon.createAdapters, addon, []), undefined);
+  const rawAdapters = Reflect.apply(addon.createAdapters, addon, []);
+  assert.ok(rawAdapters !== null && typeof rawAdapters === "object");
+  assert.deepEqual(Object.keys(rawAdapters).sort(), ["mutation", "read"]);
+  assert.deepEqual(Object.keys(rawAdapters.read), ["openPrivateDirectory"]);
+  assert.deepEqual(Object.keys(rawAdapters.mutation), ["acquireSetupLease"]);
+  for (const extension of ["hidden", "symbol"]) {
+    const invalidOptions = { noFollow: true };
+    Object.defineProperty(
+      invalidOptions,
+      extension === "hidden" ? "unexpected" : Symbol("unexpected"),
+      { value: true },
+    );
+    assert.throws(
+      () =>
+        rawAdapters.read.openPrivateDirectory(
+          join(runRoot, "shape-rejection"),
+          invalidOptions,
+        ),
+      /invalid/iu,
+      `raw bridge must reject ${extension} option extensions`,
+    );
+  }
 
   let resolverCalls = 0;
   const provider = createNativeCredentialStoreProvider(
@@ -248,15 +290,89 @@ async function runChild() {
 
   assert.equal(resolverCalls, 0, "native resolution must remain lazy");
   const first = provider.load();
-  assert.deepEqual(first, {
-    status: "unavailable",
-    code: "native_credential_store_unavailable",
-  });
+  assert.equal(first.status, "available");
+  if (first.status !== "available") {
+    assert.fail("native credential adapters must be available");
+  }
   assert.equal(Object.isFrozen(first), true);
+  assert.equal(Object.isFrozen(first.read), true);
+  assert.equal(Object.isFrozen(first.mutation), true);
   assert.equal(resolverCalls, 1);
   assert.strictEqual(provider.load(), first);
   assert.equal(resolverCalls, 1, "native resolution must be memoized");
   assert.equal(Object.isFrozen(provider), true);
+
+  const credentialDirectory = join(runRoot, "credential-store");
+  const credentialKey = "plrm_live_native_abi_test_key_0000000001";
+  const timestamp = "2026-07-19T12:00:00.000Z";
+  const clock = Object.freeze({
+    now() {
+      return Date.parse(timestamp);
+    },
+  });
+  const random = Object.freeze({
+    uuid() {
+      return randomUUID();
+    },
+  });
+  const credential = Object.freeze({
+    schema_version: 1,
+    state: "active",
+    api_origin: "https://api.plurum.ai",
+    api_key: credentialKey,
+    agent_id: "018f5d10-ee3a-476f-9bfb-c1e93dd50074",
+    agent_name: "Native ABI Test Agent",
+    username: "native-abi-test",
+    registration_request_id: null,
+    created_at: timestamp,
+    updated_at: timestamp,
+    activated_at: timestamp,
+  });
+  const locations = Object.freeze({ directory: credentialDirectory });
+  const writerDependencies = Object.freeze({
+    storage: first.mutation,
+    clock,
+    random,
+  });
+
+  const written = await writeCredentialStore(
+    writerDependencies,
+    locations,
+    credential,
+  );
+  assert.deepEqual(written, { status: "written" });
+  assert.equal(Object.isFrozen(written), true);
+
+  const unchanged = await writeCredentialStore(
+    writerDependencies,
+    locations,
+    credential,
+  );
+  assert.deepEqual(unchanged, { status: "unchanged" });
+  assert.equal(Object.isFrozen(unchanged), true);
+
+  const recovered = await recoverCredentialStore(
+    Object.freeze({ storage: first.mutation, random }),
+    locations,
+  );
+  assert.deepEqual(recovered, { status: "clean" });
+  assert.equal(Object.isFrozen(recovered), true);
+
+  const loaded = await readCredentialStore(first.read, locations);
+  assert.equal(loaded.status, "loaded");
+  if (loaded.status !== "loaded") {
+    assert.fail("native credential readback must load the written document");
+  }
+  assert.ok(
+    loaded.credential.api_key === credentialKey,
+    "native credential key must round-trip without diagnostic rendering",
+  );
+  assert.equal(loaded.credential.agent_id, credential.agent_id);
+  assert.equal(loaded.credential.api_origin, credential.api_origin);
+  assert.deepEqual(readdirSync(credentialDirectory).sort(), [
+    "credentials.json",
+    "setup.lock",
+  ]);
 }
 
 function binaryName() {
@@ -270,6 +386,11 @@ function binaryName() {
     return "plurum_native_credential_store.dll";
   }
   assert.fail(`unsupported ABI-test platform: ${process.platform}`);
+}
+
+function launcherName() {
+  assert.equal(process.platform, "win32");
+  return "plurum-medium-integrity-test-launcher.exe";
 }
 
 function isOutside(parent, candidate) {
@@ -327,22 +448,40 @@ function runParent() {
   }
 
   try {
-    const result = spawnSync(process.execPath, [scriptPath, "--child"], {
-      cwd: temporaryRoot,
-      env: commandEnvironment(isolationRoot, {
-        PLURUM_NATIVE_EXPECTED_TARGET: expectedTarget,
-        PLURUM_NATIVE_EXPECTED_NODE: expectedNode,
-        PLURUM_NATIVE_STAGED_PATH: stagedPath,
-        PLURUM_NATIVE_TEST_RUN_ID: runId,
-        TMPDIR: temporaryRoot,
-        TEMP: temporaryRoot,
-        TMP: temporaryRoot,
-      }),
-      encoding: "utf8",
-      maxBuffer: 4 * 1024 * 1024,
-      shell: false,
-      timeout: 60_000,
+    const windowsLauncher =
+      process.platform === "win32"
+        ? regularFileFromPath(
+            join(realCargoTarget, "release", launcherName()),
+            "Windows medium-integrity ABI launcher",
+          )
+        : undefined;
+    const childEnvironment = commandEnvironment(isolationRoot, {
+      PLURUM_NATIVE_EXPECTED_TARGET: expectedTarget,
+      PLURUM_NATIVE_EXPECTED_NODE: expectedNode,
+      PLURUM_NATIVE_STAGED_PATH: stagedPath,
+      PLURUM_NATIVE_TEST_RUN_ID: runId,
+      TMPDIR: temporaryRoot,
+      TEMP: temporaryRoot,
+      TMP: temporaryRoot,
+      ...(windowsLauncher === undefined
+        ? {}
+        : {
+            PLURUM_NATIVE_ABI_NODE: realpathSync(process.execPath),
+            PLURUM_NATIVE_ABI_RUN_ROOT: temporaryRoot,
+          }),
     });
+    const result = spawnSync(
+      windowsLauncher ?? process.execPath,
+      windowsLauncher === undefined ? [scriptPath, "--child"] : [],
+      {
+        cwd: temporaryRoot,
+        env: childEnvironment,
+        encoding: "utf8",
+        maxBuffer: 4 * 1024 * 1024,
+        shell: false,
+        timeout: 60_000,
+      },
+    );
     assert.equal(result.error, undefined, "ABI child must start successfully");
     assert.equal(
       result.status,

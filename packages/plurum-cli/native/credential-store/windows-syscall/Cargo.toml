@@ -1,0 +1,33 @@
+[package]
+name = "plurum-windows-syscall"
+version = "0.0.0-development"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+publish = false
+description = "Audited Win32 capability primitives for Plurum's credential store"
+
+[features]
+default = []
+test-support = []
+
+[[bin]]
+name = "plurum-medium-integrity-test-launcher"
+path = "src/bin/medium-integrity-test-launcher.rs"
+required-features = ["test-support"]
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+  "Wdk_Storage_FileSystem",
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Ioctl",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

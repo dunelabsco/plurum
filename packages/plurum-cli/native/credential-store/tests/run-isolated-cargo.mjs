@@ -157,9 +157,18 @@ function platformBuildEnvironment() {
 
 const mode = process.argv[2];
 assert.ok(
-  ["build", "clippy", "fetch", "fmt", "msrv", "test"].includes(mode),
+  ["build", "clippy", "fetch", "fmt", "launcher", "msrv", "test"].includes(
+    mode,
+  ),
   "expected one fixed isolated Cargo operation",
 );
+if (mode === "launcher") {
+  assert.equal(
+    process.platform,
+    "win32",
+    "the medium-integrity ABI launcher is Windows-only",
+  );
+}
 
 const isolationRoot = verifiedIsolationRoot();
 const cargoHome = isolatedDirectory(isolationRoot, "CARGO_HOME", "cargo-home");
@@ -217,6 +226,7 @@ const operationArguments = {
     "--frozen",
     "--manifest-path",
     manifestPath,
+    "--workspace",
     "--all-targets",
     "--",
     "-D",
@@ -231,12 +241,32 @@ const operationArguments = {
     "--",
     "--check",
   ],
-  msrv: ["check", "--frozen", "--manifest-path", manifestPath],
+  launcher: [
+    "build",
+    "--frozen",
+    "--manifest-path",
+    manifestPath,
+    "--release",
+    "--package",
+    "plurum-windows-syscall",
+    "--features",
+    "test-support",
+    "--bin",
+    "plurum-medium-integrity-test-launcher",
+  ],
+  msrv: [
+    "check",
+    "--frozen",
+    "--manifest-path",
+    manifestPath,
+    "--workspace",
+  ],
   test: [
     "test",
     "--frozen",
     "--manifest-path",
     manifestPath,
+    "--workspace",
     "--all-targets",
   ],
 }[mode];

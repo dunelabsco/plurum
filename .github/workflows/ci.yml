@@ -164,10 +164,8 @@ jobs:
       - name: Verify locked Rust metadata and features
         run: node native/credential-store/tests/metadata-conformance.mjs
       - name: Install the declared minimum Rust toolchain
-        if: matrix.target == 'linux-x64-gnu'
         run: rustup toolchain install 1.88.0 --profile minimal
       - name: Check the declared Rust minimum
-        if: matrix.target == 'linux-x64-gnu'
         run: node native/credential-store/tests/run-isolated-cargo.mjs msrv
       - name: Check Rust formatting
         run: node native/credential-store/tests/run-isolated-cargo.mjs fmt
@@ -175,6 +173,9 @@ jobs:
         run: node native/credential-store/tests/run-isolated-cargo.mjs clippy
       - name: Test the native foundation
         run: node native/credential-store/tests/run-isolated-cargo.mjs test
+      - name: Build the test-only Windows ABI launcher
+        if: matrix.target == 'win32-x64-msvc'
+        run: node native/credential-store/tests/run-isolated-cargo.mjs launcher
       - name: Build the native foundation
         run: node native/credential-store/tests/run-isolated-cargo.mjs build
       - name: Verify the Node 22.12 ABI floor

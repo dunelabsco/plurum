@@ -12,13 +12,20 @@ use rustix::process;
 use sha2::{Digest, Sha256};
 
 mod mutation;
+mod platform;
+
+pub(crate) use mutation::{
+    CanonicalEntryRole, ConditionalMutationResult, ExclusiveCreateResult, ExpectedEntrySnapshot,
+    ManagedEntry, ManagedEntryObservation, MissingEntrySnapshot, PosixExclusiveWriteHandle,
+    PosixLeaseReadHandle, PresentEntrySnapshot, TemporaryEntry, TemporaryEntryRole,
+};
 
 const CREDENTIAL_ENTRY: &str = "credentials.json";
 const SETUP_LOCK_ENTRY: &str = "setup.lock";
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 const PERMISSION_AND_SPECIAL_BITS: u32 = 0o7777;
-const MAX_ATTESTED_BYTES: usize = 40_961;
+pub(crate) const MAX_ATTESTED_BYTES: usize = 40_961;
 
 const LOCK_RECORD_LENGTH: usize = 64;
 const LOCK_STATE_UNINITIALIZED: u8 = 0;
@@ -319,6 +326,7 @@ fn digest_metadata(
     domain: &[u8],
     facts: MetadataFacts,
     canonical_current: bool,
+    private_access: bool,
     parent: Option<ObjectIdentity>,
     content: &[u8],
 ) -> [u8; 32] {
@@ -336,6 +344,7 @@ fn digest_metadata(
     digest.update(facts.changed_seconds.to_le_bytes());
     digest.update(facts.changed_nanoseconds.to_le_bytes());
     digest.update([u8::from(canonical_current)]);
+    digest.update([u8::from(private_access)]);
     if let Some(parent) = parent {
         digest.update(parent.device.to_le_bytes());
         digest.update(parent.inode.to_le_bytes());
@@ -354,11 +363,12 @@ pub(crate) struct DirectoryAttestation {
     pub(crate) canonical_current: bool,
     pub(crate) current_user: bool,
     pub(crate) private_mode: bool,
+    pub(crate) private_access: bool,
 }
 
 impl DirectoryAttestation {
     fn is_secure(self) -> bool {
-        self.canonical_current && self.current_user && self.private_mode
+        self.canonical_current && self.current_user && self.private_mode && self.private_access
     }
 }
 
@@ -383,6 +393,7 @@ impl DirectoryCore {
         let directory = state.directory.as_ref().ok_or(PosixStoreError::Closed)?;
         let parent = state.parent.as_ref().ok_or(PosixStoreError::Closed)?;
         let facts = metadata(directory)?;
+        let private_access = platform::access_is_private(directory)?;
 
         let parent_binding = secure_openat(
             parent,
@@ -407,6 +418,7 @@ impl DirectoryCore {
                 b"plurum-posix-directory-revision-v1\0",
                 facts,
                 canonical_current,
+                private_access,
                 None,
                 &[],
             ),
@@ -414,6 +426,7 @@ impl DirectoryCore {
             current_user: facts.owned_by(self.process.uid),
             private_mode: facts.kind == ObjectKind::Directory
                 && facts.mode & PERMISSION_AND_SPECIAL_BITS == PRIVATE_DIRECTORY_MODE,
+            private_access,
         })
     }
 
@@ -615,7 +628,8 @@ pub(crate) fn ensure_private_directory(
             if disposition == DirectoryDisposition::Created {
                 rustix_fs::fchmod(&opened, private_directory_mode())
                     .map_err(|_| PosixStoreError::Io)?;
-                rustix_fs::fsync(&parent).map_err(|_| PosixStoreError::Io)?;
+                platform::initialize_created_access(&opened)?;
+                platform::sync_directory(&parent)?;
             }
             opened
         }
@@ -650,13 +664,18 @@ pub(crate) struct FileSecurityAttestation {
     pub(crate) canonical_current: bool,
     pub(crate) current_user: bool,
     pub(crate) private_mode: bool,
+    pub(crate) private_access: bool,
     pub(crate) links: u64,
     pub(crate) size: u64,
 }
 
 impl FileSecurityAttestation {
     fn is_secure(self) -> bool {
-        self.canonical_current && self.current_user && self.private_mode && self.links == 1
+        self.canonical_current
+            && self.current_user
+            && self.private_mode
+            && self.private_access
+            && self.links == 1
     }
 }
 
@@ -696,6 +715,7 @@ impl PosixCredentialReadHandle {
         if facts.kind != ObjectKind::RegularFile {
             return Err(PosixStoreError::Unsafe);
         }
+        let private_access = platform::access_is_private(file)?;
         let directory = directory_state
             .directory
             .as_ref()
@@ -718,6 +738,7 @@ impl PosixCredentialReadHandle {
                 canonical_current,
                 current_user: facts.owned_by(self.directory.process.uid),
                 private_mode: facts.mode & PERMISSION_AND_SPECIAL_BITS == PRIVATE_FILE_MODE,
+                private_access,
                 links: facts.links,
                 size: facts.size,
             },
@@ -755,6 +776,7 @@ impl PosixCredentialReadHandle {
             b"plurum-posix-credential-revision-v1\0",
             after,
             after_security.canonical_current,
+            after_security.private_access,
             Some(after_security.parent_identity),
             &bytes,
         );
@@ -966,7 +988,7 @@ fn read_lock_record(file: &File) -> Result<LockRecordState, PosixStoreError> {
 
 fn write_lock_state(file: &File, state: u8) -> Result<(), PosixStoreError> {
     write_all_at(file, &[state], 0)?;
-    file.sync_all().map_err(|_| PosixStoreError::Io)
+    platform::sync_file(file)
 }
 
 fn initialize_clean_lock_record(file: &File) -> Result<(), PosixStoreError> {
@@ -978,7 +1000,7 @@ fn initialize_clean_lock_record(file: &File) -> Result<(), PosixStoreError> {
     let mut tail = [0_u8; LOCK_RECORD_LENGTH - 1];
     tail[LOCK_HEADER_START - 1..LOCK_HEADER_END - 1].copy_from_slice(LOCK_HEADER);
     write_all_at(file, &tail, 1)?;
-    file.sync_all().map_err(|_| PosixStoreError::Io)?;
+    platform::sync_file(file)?;
     write_lock_state(file, LOCK_STATE_CLEAN)?;
     if read_lock_record(file)? == LockRecordState::Clean {
         Ok(())
@@ -992,7 +1014,7 @@ fn write_held_lock_record(file: &File, nonce: ValidatedUuidV4) -> Result<(), Pos
         return Err(PosixStoreError::Lost);
     }
     write_all_at(file, &nonce.0, LOCK_NONCE_START as u64)?;
-    file.sync_all().map_err(|_| PosixStoreError::Io)?;
+    platform::sync_file(file)?;
     write_lock_state(file, LOCK_STATE_HELD)?;
     if read_lock_record(file)? == LockRecordState::Held(nonce) {
         Ok(())
@@ -1009,10 +1031,11 @@ fn exact_setup_lock(
     directory.core.require_secure_locked(&state)?;
     let directory_file = state.directory.as_ref().ok_or(PosixStoreError::Closed)?;
     let facts = metadata(file)?;
-    if !facts.exact_private_file(directory.core.process.uid) {
+    if !facts.exact_private_file(directory.core.process.uid) || !platform::access_is_private(file)?
+    {
         return Ok(false);
     }
-    Ok(secure_openat(
+    let current = secure_openat(
         directory_file,
         OsStr::new(SETUP_LOCK_ENTRY),
         lock_open_flags(),
@@ -1020,10 +1043,16 @@ fn exact_setup_lock(
     )
     .ok()
     .map(File::from)
-    .and_then(|current| metadata(&current).ok())
-    .is_some_and(|current| {
-        current.identity == facts.identity && current.exact_private_file(directory.core.process.uid)
-    }))
+    .filter(|current| {
+        metadata(current).is_ok_and(|current_facts| {
+            current_facts.identity == facts.identity
+                && current_facts.exact_private_file(directory.core.process.uid)
+        })
+    });
+    match current {
+        Some(current) => platform::access_is_private(&current),
+        None => Ok(false),
+    }
 }
 
 fn open_or_create_setup_lock(
@@ -1070,6 +1099,7 @@ fn open_or_create_setup_lock(
     };
     if created {
         rustix_fs::fchmod(&file, private_file_mode()).map_err(|_| PosixStoreError::Io)?;
+        platform::initialize_created_access(&file)?;
     }
     drop(state);
 
@@ -1123,7 +1153,7 @@ pub(crate) fn acquire_setup_lease(
     if created {
         let state = lock_unpoisoned(&directory.core.state)?;
         let directory_file = state.directory.as_ref().ok_or(PosixStoreError::Closed)?;
-        rustix_fs::fsync(directory_file).map_err(|_| PosixStoreError::Io)?;
+        platform::sync_directory(directory_file)?;
     }
 
     let lease = PosixSetupLease {
@@ -1283,6 +1313,8 @@ mod tests {
     use std::env;
     use std::fs::{self, DirBuilder, OpenOptions};
     use std::io::{Read, Write};
+    #[cfg(target_os = "macos")]
+    use std::os::fd::AsFd;
     use std::os::unix::fs::{symlink, DirBuilderExt, OpenOptionsExt, PermissionsExt};
     use std::process::{Child, Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1513,6 +1545,12 @@ mod tests {
             .expect("private test directory must be created");
         fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE))
             .expect("private test directory mode must be set");
+        #[cfg(target_os = "macos")]
+        {
+            let directory = File::open(path).expect("private test directory must open");
+            plurum_native_macos_acl::clear_extended_acl(directory.as_fd())
+                .expect("private test directory ACL must clear");
+        }
     }
 
     pub(super) fn create_private_file(path: &Path, bytes: &[u8]) {
@@ -1524,6 +1562,9 @@ mod tests {
             .expect("private test file must be created");
         fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_FILE_MODE))
             .expect("private test file mode must be set");
+        #[cfg(target_os = "macos")]
+        plurum_native_macos_acl::clear_extended_acl(file.as_fd())
+            .expect("private test file ACL must clear");
         file.write_all(bytes)
             .expect("private test file must be written");
         file.sync_all().expect("private test file must sync");
@@ -1582,6 +1623,7 @@ mod tests {
         assert!(directory_attestation.canonical_current);
         assert!(directory_attestation.current_user);
         assert!(directory_attestation.private_mode);
+        assert!(directory_attestation.private_access);
 
         let credential = test.store.join(CREDENTIAL_ENTRY);
         create_private_file(&credential, b"alpha");
@@ -1621,6 +1663,117 @@ mod tests {
         file.close();
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_created_store_clears_inherited_acl_before_lock_durability() {
+        let test = TestRoot::new();
+        let process = ProcessIdentity::capture().expect("test process must be supported");
+        let parent = File::open(&test.root).expect("test parent descriptor must open");
+        plurum_native_macos_acl::install_current_user_inheritable_read_acl(
+            parent.as_fd(),
+            process.uid,
+        )
+        .expect("inheritable test ACL must install");
+        assert!(
+            !plurum_native_macos_acl::extended_acl_is_empty(parent.as_fd())
+                .expect("parent ACL must be inspectable")
+        );
+
+        let inherited_probe = test.root.join("inherited-probe");
+        let mut probe_builder = DirBuilder::new();
+        probe_builder.mode(PRIVATE_DIRECTORY_MODE);
+        probe_builder
+            .create(&inherited_probe)
+            .expect("inheritance probe must be created");
+        let probe = File::open(&inherited_probe).expect("inheritance probe must open");
+        assert!(
+            !plurum_native_macos_acl::extended_acl_is_empty(probe.as_fd())
+                .expect("inherited probe ACL must be inspectable"),
+            "the fixture must prove Darwin propagated an inherited ACE"
+        );
+        drop(probe);
+        fs::remove_dir(&inherited_probe).expect("inheritance probe must be removed");
+
+        let ensured = ensure_private_directory(&test.store).expect("store must be ensured");
+        assert_eq!(ensured.disposition, DirectoryDisposition::Created);
+        let attestation = ensured
+            .directory
+            .attest()
+            .expect("created store must attest");
+        assert!(attestation.private_access);
+        let store = File::open(&test.store).expect("created store descriptor must open");
+        assert!(
+            plurum_native_macos_acl::extended_acl_is_empty(store.as_fd())
+                .expect("created store ACL must be inspectable")
+        );
+        plurum_native_macos_acl::clear_extended_acl(parent.as_fd())
+            .expect("test parent ACL must clear");
+        drop(ensured);
+
+        let (_, disposition, mut lease) = acquired_lease(&test.store, NONCE_1);
+        assert_eq!(disposition, DirectoryDisposition::Existing);
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(test.store.join(SETUP_LOCK_ENTRY))
+            .expect("setup lock descriptor must open");
+        assert!(plurum_native_macos_acl::extended_acl_is_empty(lock.as_fd())
+            .expect("setup lock ACL must be inspectable"));
+        lease
+            .release()
+            .expect("F_FULLFSYNC-backed lease release must succeed");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_rejects_any_extended_acl_on_store_credential_and_lock() {
+        let test = TestRoot::new();
+        let process = ProcessIdentity::capture().expect("test process must be supported");
+        create_private_directory(&test.store);
+
+        let store = File::open(&test.store).expect("store descriptor must open");
+        plurum_native_macos_acl::install_current_user_read_acl(store.as_fd(), process.uid)
+            .expect("store test ACL must install");
+        let mut opened = opened_directory(&test.store);
+        let directory_security = opened.attest().expect("store must remain inspectable");
+        assert!(!directory_security.private_access);
+        assert!(matches!(
+            ensure_private_directory(&test.store),
+            Err(PosixStoreError::Unsafe)
+        ));
+        opened.close();
+        plurum_native_macos_acl::clear_extended_acl(store.as_fd())
+            .expect("store test ACL must clear");
+
+        let directory = opened_directory(&test.store);
+        let credential_path = test.store.join(CREDENTIAL_ENTRY);
+        create_private_file(&credential_path, b"do-not-read");
+        let credential = File::open(&credential_path).expect("credential descriptor must open");
+        plurum_native_macos_acl::install_current_user_read_acl(credential.as_fd(), process.uid)
+            .expect("credential test ACL must install");
+        let file = opened_credential(&directory);
+        let file_security = file
+            .security_attestation()
+            .expect("credential must remain inspectable");
+        assert!(!file_security.private_access);
+        assert_eq!(file.attest(), Err(PosixStoreError::Unsafe));
+        assert_eq!(file.read_bounded(32), Err(PosixStoreError::Unsafe));
+
+        let (_, _, mut lease) = acquired_lease(&test.store, NONCE_1);
+        lease.release().expect("fixture lease must release");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(test.store.join(SETUP_LOCK_ENTRY))
+            .expect("setup lock descriptor must open");
+        plurum_native_macos_acl::install_current_user_read_acl(lock.as_fd(), process.uid)
+            .expect("setup lock test ACL must install");
+        assert!(matches!(
+            acquire_setup_lease(&test.store, NONCE_2),
+            Ok(SetupLeaseAcquireResult::Busy)
+        ));
+    }
+
     #[test]
     fn revision_digest_changes_for_bytes_with_identical_metadata() {
         let test = TestRoot::new();
@@ -1633,12 +1786,14 @@ mod tests {
             b"plurum-posix-credential-revision-v1\0",
             facts,
             true,
+            true,
             Some(facts.identity),
             b"alpha",
         );
         let second = digest_metadata(
             b"plurum-posix-credential-revision-v1\0",
             facts,
+            true,
             true,
             Some(facts.identity),
             b"bravo",

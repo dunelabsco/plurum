@@ -1,0 +1,15 @@
+[package]
+name = "plurum-native-macos-acl"
+version = "0.0.0-development"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+publish = false
+description = "Private descriptor-based macOS ACL boundary for Plurum"
+
+[features]
+default = []
+test-support = []
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

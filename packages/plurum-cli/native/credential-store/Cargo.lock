@@ -277,8 +277,21 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "plurum-native-macos-acl",
+ "plurum-windows-syscall",
  "rustix",
  "sha2",
+]
+
+[[package]]
+name = "plurum-native-macos-acl"
+version = "0.0.0-development"
+
+[[package]]
+name = "plurum-windows-syscall"
+version = "0.0.0-development"
+dependencies = [
+ "windows-sys",
 ]
 
 [[package]]

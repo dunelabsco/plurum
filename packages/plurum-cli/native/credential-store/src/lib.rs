@@ -1,10 +1,18 @@
 #![deny(unsafe_code)]
 
+use napi::{bindgen_prelude::ObjectRef, Env};
 use napi_derive::napi;
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+mod bridge;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg_attr(not(test), allow(dead_code))]
 mod posix;
+
+#[cfg(target_os = "windows")]
+#[cfg_attr(not(test), allow(dead_code))]
+mod windows;
 
 #[cfg(test)]
 mod target_map;
@@ -33,15 +41,18 @@ pub const packageVersion: &str = env!("CARGO_PKG_VERSION");
 #[napi]
 pub const target: &str = TARGET_VALUE;
 
-/// This foundation crate must remain unusable until platform safety is proven.
 #[napi(js_name = "createAdapters")]
-pub fn create_adapters() {}
+pub fn create_adapters(env: Env) -> napi::Result<Option<ObjectRef<false>>> {
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    {
+        bridge::create_adapters(&env).map(Some)
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::{
-        abiVersion, create_adapters, magic, nodeApiVersion, packageVersion, target, target_map,
-        TARGET_VALUE,
+        abiVersion, magic, nodeApiVersion, packageVersion, target, target_map, TARGET_VALUE,
     };
 
     #[test]
@@ -51,11 +62,6 @@ mod tests {
         assert_eq!(nodeApiVersion, 8);
         assert_eq!(packageVersion, "0.0.0-development");
         assert_eq!(target, TARGET_VALUE);
-    }
-
-    #[test]
-    fn adapter_factory_has_no_value() {
-        create_adapters();
     }
 
     #[test]

@@ -48,6 +48,17 @@ impl TemporaryEntry {
         })
     }
 
+    pub(crate) fn role(self) -> TemporaryEntryRole {
+        self.role
+    }
+
+    pub(crate) fn transaction_id(&self) -> &str {
+        // ValidatedUuidV4 owns a fixed ASCII UUID. The bridge copies this value
+        // into JavaScript before this temporary descriptor can be dropped.
+        std::str::from_utf8(&self.transaction_id.0)
+            .expect("validated UUIDv4 bytes are always ASCII")
+    }
+
     fn prefix(self) -> &'static [u8] {
         match self.role {
             TemporaryEntryRole::Credential => CREDENTIAL_CANDIDATE_PREFIX,
@@ -275,7 +286,9 @@ fn exact_current_file(
         Err(_) => return Err(PosixStoreError::Unsafe),
     };
     let facts = metadata(&opened)?;
-    Ok(facts.identity == expected && facts.exact_private_file(uid))
+    Ok(facts.identity == expected
+        && facts.exact_private_file(uid)
+        && platform::access_is_private(&opened)?)
 }
 
 fn expected_matches(
@@ -415,9 +428,10 @@ impl PosixExclusiveWriteHandle {
             )
             .map_err(|_| PosixStoreError::Io)
         })();
-        if let Err(error) = result {
+        if result.is_err() {
             bytes.fill(0);
-            return Err(error);
+            mark_lost(&mut runtime);
+            return Err(PosixStoreError::Lost);
         }
 
         let verified: Result<bool, PosixStoreError> = (|| {
@@ -444,20 +458,31 @@ impl PosixExclusiveWriteHandle {
         if !self.write_complete {
             return Err(PosixStoreError::Unsafe);
         }
-        self.with_live(|file| {
-            let before = file.attest()?;
+        if self.closed {
+            return Err(PosixStoreError::Closed);
+        }
+        let lease = self.lease.upgrade().ok_or(PosixStoreError::Closed)?;
+        let mut runtime = lock_lease_runtime(&lease)?;
+        lease.verify_or_latch_locked(&mut runtime)?;
+        if runtime.generation != self.generation {
+            return Err(PosixStoreError::Lost);
+        }
+        let result: Result<bool, PosixStoreError> = (|| {
+            let before = self.file.attest()?;
             {
-                let slot = lock_unpoisoned(&file.slot)?;
+                let slot = lock_unpoisoned(&self.file.slot)?;
                 let opened = slot.as_ref().ok_or(PosixStoreError::Closed)?;
-                rustix_fs::fsync(opened).map_err(|_| PosixStoreError::Io)?;
+                platform::sync_file(opened)?;
             }
-            let after = file.attest()?;
-            if before == after {
-                Ok(())
-            } else {
-                Err(PosixStoreError::Lost)
-            }
-        })
+            let after = self.file.attest()?;
+            Ok(before == after)
+        })();
+        if matches!(result, Ok(true)) {
+            Ok(())
+        } else {
+            mark_lost(&mut runtime);
+            Err(PosixStoreError::Lost)
+        }
     }
 
     pub(crate) fn close(&mut self) -> Result<(), PosixStoreError> {
@@ -595,6 +620,7 @@ impl PosixSetupLease {
         };
         let created_result = (|| {
             rustix_fs::fchmod(&opened, private_file_mode()).map_err(|_| PosixStoreError::Io)?;
+            platform::initialize_created_access(&opened)?;
             let facts = metadata(&opened)?;
             if !facts.exact_private_file(directory.core.process.uid) || facts.size != 0 {
                 return Err(PosixStoreError::Unsafe);
@@ -851,7 +877,11 @@ impl PosixSetupLease {
         let state = lock_unpoisoned(&directory.core.state)?;
         directory.core.require_secure_locked(&state)?;
         let directory_file = state.directory.as_ref().ok_or(PosixStoreError::Closed)?;
-        rustix_fs::fsync(directory_file).map_err(|_| PosixStoreError::Io)?;
+        if platform::sync_directory(directory_file).is_err() {
+            drop(state);
+            mark_lost(&mut runtime);
+            return Err(PosixStoreError::Lost);
+        }
         if directory.core.require_secure_locked(&state).is_err() {
             drop(state);
             mark_lost(&mut runtime);
@@ -1291,6 +1321,70 @@ mod tests {
         lease
             .release()
             .expect("exclusive-create lease must release");
+    }
+
+    #[test]
+    fn write_and_sync_uncertainty_terminally_loses_the_lease() {
+        {
+            let test = TestRoot::new();
+            let (_, _, mut lease) = acquired_lease(&test.store, NONCE_1);
+            let entry = temporary(TemporaryEntryRole::Credential, ID_1);
+            let expected = missing(&lease, ManagedEntry::Temporary(entry));
+            let mut writer = match lease
+                .create_temporary_exclusive(entry, &expected)
+                .expect("write-failure candidate creation must complete")
+            {
+                ExclusiveCreateResult::Conflict => {
+                    panic!("write-failure candidate unexpectedly conflicts")
+                }
+                ExclusiveCreateResult::Created(writer) => writer,
+            };
+            let read_only = OpenOptions::new()
+                .read(true)
+                .open(test.store.join(entry.file_name()))
+                .expect("candidate must reopen read-only");
+            *writer
+                .file
+                .slot
+                .lock()
+                .expect("candidate slot must remain healthy") = Some(read_only);
+
+            assert_eq!(writer.write_all(b"alpha"), Err(PosixStoreError::Lost));
+            assert_eq!(lease.renew(), LeaseRenewal::Lost);
+            assert_eq!(lease.release(), Err(PosixStoreError::Lost));
+            assert_eq!(writer.attest(), Err(PosixStoreError::Closed));
+            writer.close().expect("lost writer must close");
+        }
+
+        {
+            let test = TestRoot::new();
+            let (_, _, mut lease) = acquired_lease(&test.store, NONCE_1);
+            let entry = temporary(TemporaryEntryRole::Credential, ID_2);
+            let expected = missing(&lease, ManagedEntry::Temporary(entry));
+            let mut writer = match lease
+                .create_temporary_exclusive(entry, &expected)
+                .expect("sync-failure candidate creation must complete")
+            {
+                ExclusiveCreateResult::Conflict => {
+                    panic!("sync-failure candidate unexpectedly conflicts")
+                }
+                ExclusiveCreateResult::Created(writer) => writer,
+            };
+            writer
+                .write_all(b"alpha")
+                .expect("candidate write must complete before sync failure");
+            writer
+                .file
+                .slot
+                .lock()
+                .expect("candidate slot must remain healthy")
+                .take();
+
+            assert_eq!(writer.sync(), Err(PosixStoreError::Lost));
+            assert_eq!(lease.renew(), LeaseRenewal::Lost);
+            assert_eq!(lease.release(), Err(PosixStoreError::Lost));
+            writer.close().expect("lost writer must close");
+        }
     }
 
     #[test]

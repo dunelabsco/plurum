@@ -28,21 +28,24 @@ and platform access enter commands only through injected capabilities.
 Production filesystem, network, and process adapters remain deny-by-default
 until their implementation steps.
 The canonical credential schema, protected read port, and transactional
-write/recovery state machine are implemented as portable, injected cores. They
-remain deliberately unwired: no command can access a real credential path until
-the native POSIX and Windows ownership, permission/ACL, link, lease, atomic
-replacement, and durability adapters pass their isolated platform suites.
+write/recovery state machine are implemented as portable, injected cores. A
+native semantic bridge and platform adapters now exercise those cores in
+isolated tests. They remain deliberately unwired from commands: the package has
+no native artifact resolver or runtime import, so no command can access a real
+credential path.
 Read-only commands cannot mutate local or product state or spawn. Status and
 doctor are restricted to GET requests; any later protocol-level MCP diagnostic
 will require its own narrowly defined capability. Dry-run setup cannot read file
 contents, stdin, or authenticated network state.
 
-The test harness refuses elevated or unverifiable execution, confines guarded
-fake operations to a unique private root, rejects lexical, canonical, ordinary
-symlink, and hard-link escapes, and never uses real credentials, host binaries,
-or production endpoints. An AST gate rejects direct capability imports or
-globals outside the small approved adapter boundary. Native filesystem access
-remains unavailable to production until the complete platform suites pass.
+The test harness refuses unverifiable execution and unsafe identity changes,
+confines guarded fake operations to a unique private root, rejects lexical,
+canonical, symlink/reparse-point, and hard-link escapes, and never uses real
+credentials, host binaries, or production endpoints. On POSIX it also refuses
+effective-user changes and privileged execution; on Windows it refuses thread
+impersonation and binds access to the process token's exact user SID. An AST
+gate rejects direct capability imports or globals outside the small approved
+adapter boundary. Native filesystem access remains unavailable to production.
 
 A separate POSIX disk harness now runs the credential reader and transactional
 writer against real files inside that sentinel-backed root. It verifies private
@@ -52,35 +55,48 @@ does not claim production locking, crash abandonment, directory-relative
 syscalls, macOS ACL/full-flush guarantees, or safety outside the controlled test
 root.
 
-The production build also contains a lazy semantic boundary for a future native
+The production build contains a lazy semantic boundary for the native
 credential adapter. It accepts only one exact, versioned Plurum ABI and exposes
-only the existing high-level read and transactional-mutation ports. The
-boundary is intentionally unwired and has no binary, native dependency,
-package resolver, JavaScript fallback, or command/runtime import. Loading and
-platform access remain unavailable until the native macOS, Linux, and Windows
-suites establish their guarantees independently.
+only the existing high-level read and transactional-mutation ports through
+frozen, lease-scoped capabilities. The boundary is intentionally unwired and
+has no binary, native dependency, package resolver, JavaScript fallback, or
+command/runtime import.
 
 The repository contains an unpublished Rust `cdylib` that establishes this
-boundary's Node-API 8 descriptor on native CI runners. Its adapter factory
-returns no value, so the TypeScript provider remains unavailable even when the
-test binary is loaded. The crate is excluded from the npm package, and no
-compiled native artifact is retained or published.
-The crate also contains private macOS/Linux directory, bounded-read,
-kernel-lease, and transactional-mutation primitives. Native tests exercise
+boundary's Node-API 8 descriptor and semantic adapter factory on native CI
+runners. Staged ABI tests load that factory and drive the portable reader,
+writer, and recovery cores end to end with a fake credential. The crate is
+excluded from the npm package, and no compiled native artifact is retained or
+published.
+
+The crate contains private macOS/Linux directory, bounded-read, kernel-lease,
+and transactional-mutation primitives. Native tests exercise
 component-by-component no-follow traversal, retained identity binding,
-owner/mode/link checks, content-sensitive revisions, exclusive fixed-name
-candidates, exact write readback, conditional descriptor-relative
-rename/removal, file/directory flushes, bounded recovery enumeration,
-adversarial replacement, live contention, and process-death abandonment inside
-the sentinel-backed runner root. Abrupt-process tests establish visible
-filesystem states and kernel lock release after process exit; they do not claim
-physical power-loss persistence.
-These primitives are not exported to JavaScript. macOS ACL/full-flush policy,
-Windows security, bridge-level native fault injection, artifact
-resolution/packaging, and command wiring remain activation blockers.
+owner/mode/link and exact macOS ACL checks, content-sensitive revisions,
+exclusive fixed-name candidates, exact write readback, conditional
+descriptor-relative rename/removal, bounded recovery enumeration, adversarial
+replacement, live contention, and process-death abandonment inside the
+sentinel-backed runner root. Linux uses ordinary file and directory flushes;
+macOS adds `F_FULLFSYNC` for sensitive files and the lock.
+
+The Windows adapter binds retained handles to a local fixed NTFS volume, the
+current process user SID, an exact protected user-only DACL, non-reparse
+objects, and stable file identities. It uses a persistent kernel lock,
+same-directory exclusive candidates, handle-relative atomic replacement and
+removal, flushed files, bounded recovery enumeration, and post-operation
+reattestation. It accepts only an exact medium-integrity process token and fails
+closed under impersonation, high integrity, low integrity, or other integrity
+levels; users in a high-integrity terminal must rerun the CLI normally.
+Windows has no documented general directory-flush primitive, so its namespace
+barrier covers completed operations and process crashes but does not claim
+physical power-loss durability.
+
+Native artifact resolution/packaging and command wiring remain activation
+blockers.
 The foundation matrix executes current macOS arm64/x64, Linux glibc arm64/x64,
-and Windows x64 runners. Oldest-supported macOS and Linux kernel/glibc floors,
-Linux musl, and Windows arm64 remain unvalidated release blockers.
+and Windows x64 runners, including the declared Rust 1.88 minimum. Older
+macOS/Linux floors, Linux musl, and Windows arm64 remain unvalidated release
+targets.
 
 API keys are accepted only through protected interactive input or
 `--api-key-stdin`. A value-bearing `--api-key` option does not exist, and invalid
