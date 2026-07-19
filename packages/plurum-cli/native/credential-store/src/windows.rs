@@ -662,6 +662,10 @@ pub(crate) fn open_private_directory(
         }
         Err(error) => return Err(classify_path_error(error)),
     };
+    let facts = metadata(&directory)?;
+    if facts.kind != ObjectKind::Directory || facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(WindowsStoreError::Unsafe);
+    }
     let directory = directory_from_parts(process, path, parent, directory);
     {
         let state = lock_unpoisoned(&directory.core.state)?;
@@ -698,6 +702,10 @@ pub(crate) fn ensure_private_directory(
         }
         Err(error) => return Err(classify_path_error(error)),
     };
+    let facts = metadata(&directory)?;
+    if facts.kind != ObjectKind::Directory || facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(WindowsStoreError::Unsafe);
+    }
 
     let directory = directory_from_parts(process, path, parent, directory);
     {

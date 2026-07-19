@@ -1058,10 +1058,10 @@ mod tests {
             .sync_directory()
             .expect("process-crash barrier succeeds");
 
-        let (old_destination, mut old_reader) = opened(&lease, ManagedEntry::credential());
-        old_reader.close().expect("old reader closes");
         let second = temporary(TemporaryEntryRole::Credential, ID_2);
         let second_snapshot = create_written(&lease, second, b"second");
+        let (old_destination, mut old_reader) = opened(&lease, ManagedEntry::credential());
+        old_reader.close().expect("old reader closes");
         assert_eq!(
             lease.move_temporary_conditionally(
                 second,

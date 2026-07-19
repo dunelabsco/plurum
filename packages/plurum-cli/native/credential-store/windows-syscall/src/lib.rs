@@ -39,7 +39,7 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Security::{
     AddMandatoryAce, CreateWellKnownSid, SetTokenInformation, WinBuiltinAdministratorsSid,
     WinWorldSid, PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES,
-    TOKEN_ADJUST_DEFAULT,
+    TOKEN_ADJUST_DEFAULT, UNPROTECTED_DACL_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, FileDispositionInfoEx, FileIdInfo, FileStandardInfo,
@@ -1207,7 +1207,7 @@ fn set_test_dacl(path: &Path, kind: SecurityKind, broad: bool) -> Result<()> {
     if unsafe { InitializeAcl(acl, acl_length, ACL_REVISION) } == 0 {
         return Err(WinError::last(ErrorKind::Other));
     }
-    let ace_flags = kind.ace_flags() | if broad { 0 } else { INHERITED_ACE as u8 };
+    let ace_flags = kind.ace_flags();
     // SAFETY: acl is initialized with exact space and sid is valid for the call.
     if unsafe {
         AddAccessAllowedAceEx(
@@ -1226,7 +1226,12 @@ fn set_test_dacl(path: &Path, kind: SecurityKind, broad: bool) -> Result<()> {
         SetSecurityInfo(
             handle.0,
             SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            DACL_SECURITY_INFORMATION
+                | if broad {
+                    PROTECTED_DACL_SECURITY_INFORMATION
+                } else {
+                    UNPROTECTED_DACL_SECURITY_INFORMATION
+                },
             null_mut(),
             null_mut(),
             acl,
