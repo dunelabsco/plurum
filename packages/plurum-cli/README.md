@@ -53,6 +53,14 @@ does not claim production locking, crash abandonment, directory-relative
 syscalls, macOS ACL/full-flush guarantees, or safety outside the controlled test
 root.
 
+The production build also contains a lazy semantic boundary for a future native
+credential adapter. It accepts only one exact, versioned Plurum ABI and exposes
+only the existing high-level read and transactional-mutation ports. The
+boundary is intentionally unwired and has no binary, native dependency,
+package resolver, JavaScript fallback, or command/runtime import. Loading and
+platform access remain unavailable until the native macOS, Linux, and Windows
+suites establish their guarantees independently.
+
 API keys are accepted only through protected interactive input or
 `--api-key-stdin`. A value-bearing `--api-key` option does not exist, and invalid
 arguments are never reflected in diagnostics.

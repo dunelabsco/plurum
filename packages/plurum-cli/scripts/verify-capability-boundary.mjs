@@ -46,6 +46,9 @@ const allowedProcessMembers = new Map([
 ]);
 
 const reservedGlobals = new Map([
+  ["require", "commonjs-require"],
+  ["module", "commonjs-require"],
+  ["createRequire", "commonjs-require"],
   ["fetch", "network-global"],
   ["WebSocket", "network-global"],
   ["EventSource", "network-global"],
@@ -61,6 +64,37 @@ const reservedGlobals = new Map([
   ["Deno", "runtime-global"],
   ["console", "diagnostic-global"],
 ]);
+const unwiredNativeBoundaryStem =
+  "src/adapters/node/native-credential-store";
+const sourceModuleExtensions = Object.freeze([
+  "",
+  ".js",
+  ".jsx",
+  ".ts",
+  ".tsx",
+  ".mjs",
+  ".cjs",
+  ".mts",
+  ".cts",
+]);
+
+function isUnwiredNativeBoundaryModule(resolvedModule) {
+  return sourceModuleExtensions.some(
+    (extension) => resolvedModule === `${unwiredNativeBoundaryStem}${extension}`,
+  );
+}
+
+function isAllowedNativeReflectApplyReference(node, parent) {
+  return (
+    node.name === "Reflect" &&
+    parent?.type === "MemberExpression" &&
+    parent.object === node &&
+    parent.computed === false &&
+    parent.optional === false &&
+    parent.property.type === "Identifier" &&
+    parent.property.name === "apply"
+  );
+}
 
 function normalizedRelative(filePath) {
   return relative(packageRoot, filePath).split(sep).join("/");
@@ -245,6 +279,13 @@ function scanText(relativePath, text) {
 
   function validateModule(node, specifier, importNode) {
     let resolvedModule;
+    if (specifier.toLowerCase().endsWith(".node")) {
+      report(
+        node,
+        "native-binary-import",
+        "native binaries require a separately reviewed fixed-package bridge",
+      );
+    }
     if (specifier.startsWith(".")) {
       const sourceDirectory = posix.dirname(relativePath);
       resolvedModule = posix.normalize(posix.join(sourceDirectory, specifier));
@@ -300,6 +341,17 @@ function scanText(relativePath, text) {
           "Node adapters may only be composed by the runtime boundary",
         );
       }
+    }
+
+    if (
+      resolvedModule !== undefined &&
+      isUnwiredNativeBoundaryModule(resolvedModule)
+    ) {
+      report(
+        node,
+        "native-credential-wiring",
+        "the native credential boundary must remain unwired until native platform suites pass",
+      );
     }
 
     if (
@@ -462,6 +514,24 @@ function scanText(relativePath, text) {
           "computed global access can bypass the capability boundary",
         );
       }
+      if (
+        relativePath === "src/adapters/node/native-credential-store.ts" &&
+        objectName === "Reflect" &&
+        propertyName === "apply" &&
+        !(
+          node.computed === false &&
+          node.optional === false &&
+          parent?.type === "CallExpression" &&
+          parent.callee === node &&
+          parent.optional === false
+        )
+      ) {
+        report(
+          node,
+          "dynamic-code",
+          "Reflect.apply is allowed only as a direct noncomputed call in the native credential boundary",
+        );
+      }
     }
 
     if (node.type === "Identifier" && isIdentifierReference(node, parent, key)) {
@@ -514,7 +584,10 @@ function scanText(relativePath, text) {
         }
       } else {
         const rule = reservedGlobals.get(node.name);
-        if (rule !== undefined) {
+        const allowedNativeReflectApply =
+          relativePath === "src/adapters/node/native-credential-store.ts" &&
+          isAllowedNativeReflectApplyReference(node, parent);
+        if (rule !== undefined && !allowedNativeReflectApply) {
           report(
             node,
             rule,
@@ -587,6 +660,41 @@ const negativeFixtures = [
   ["src/example.ts", "const name = './local.js'; void import(name);", "dynamic-import"],
   ["src/example.ts", 'require("node:fs");', "commonjs-require"],
   [
+    "src/example.ts",
+    'require.call(null, "node:fs");',
+    "commonjs-require",
+  ],
+  [
+    "src/example.ts",
+    '(0, require)("node:fs");',
+    "commonjs-require",
+  ],
+  [
+    "src/example.ts",
+    'module.require("node:fs");',
+    "commonjs-require",
+  ],
+  [
+    "src/example.ts",
+    'const load = createRequire(import.meta.url); load("node:fs");',
+    "commonjs-require",
+  ],
+  [
+    "src/example.ts",
+    'process.dlopen({}, "./credential-store.node");',
+    "process-global",
+  ],
+  [
+    "src/adapters/node/example.ts",
+    'import { createRequire } from "node:module";',
+    "external-module",
+  ],
+  [
+    "src/adapters/node/example.ts",
+    'import "./credential-store.node";',
+    "native-binary-import",
+  ],
+  [
     "src/commands/example.ts",
     'import "../adapters/node/production.js";',
     "adapter-boundary",
@@ -605,6 +713,36 @@ const negativeFixtures = [
     "src/runtime.ts",
     'import "./adapters/Node/production.js";',
     "source-boundary",
+  ],
+  [
+    "src/adapters/node/production.ts",
+    'import "./native-credential-store.js";',
+    "native-credential-wiring",
+  ],
+  [
+    "src/adapters/node/production.ts",
+    'import "./native-credential-store";',
+    "native-credential-wiring",
+  ],
+  [
+    "src/adapters/node/production.ts",
+    'import "./native-credential-store.ts";',
+    "native-credential-wiring",
+  ],
+  [
+    "src/adapters/node/production.ts",
+    'export * from "./native-credential-store.mjs";',
+    "native-credential-wiring",
+  ],
+  [
+    "src/adapters/node/production.ts",
+    'import "./native-credential-store.jsx";',
+    "native-credential-wiring",
+  ],
+  [
+    "src/adapters/node/production.ts",
+    'import "./native-credential-store.tsx";',
+    "native-credential-wiring",
   ],
   ["src/example.ts", 'import "/tmp/outside.js";', "source-boundary"],
   ["src/example.ts", 'import "../outside.js";', "source-boundary"],
@@ -631,6 +769,21 @@ const negativeFixtures = [
   [
     "src/example.ts",
     'Reflect.construct(Function, ["return process"])();',
+    "dynamic-code",
+  ],
+  [
+    "src/example.ts",
+    "Reflect.apply(() => 1, undefined, []);",
+    "dynamic-code",
+  ],
+  [
+    "src/adapters/node/native-credential-store.ts",
+    "Reflect['apply'](() => 1, undefined, []);",
+    "dynamic-code",
+  ],
+  [
+    "src/adapters/node/native-credential-store.ts",
+    "const apply = Reflect.apply; apply(() => 1, undefined, []);",
     "dynamic-code",
   ],
   [
@@ -663,6 +816,10 @@ const positiveFixtures = [
   ],
   ["src/adapters/node/clock.ts", "Date.now();"],
   ["src/example.ts", "new Date(0); Date.parse('2026-01-01'); Date.UTC(2026, 0);"],
+  [
+    "src/adapters/node/native-credential-store.ts",
+    "Reflect.apply(() => 1, undefined, []);",
+  ],
 ];
 
 for (const [file, fixture, expectedRule] of negativeFixtures) {

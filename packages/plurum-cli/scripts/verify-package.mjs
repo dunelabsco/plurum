@@ -27,6 +27,7 @@ const expectedFiles = [
   "README.md",
   "dist/adapters/node/clock.js",
   "dist/adapters/node/hash.js",
+  "dist/adapters/node/native-credential-store.js",
   "dist/adapters/node/platform.js",
   "dist/adapters/node/production.js",
   "dist/adapters/node/random.js",
@@ -122,6 +123,7 @@ try {
     CI: "true",
     NO_COLOR: "1",
     npm_config_cache: cacheDirectory,
+    npm_config_globalconfig: join(configDirectory, "global-npmrc"),
     npm_config_userconfig: join(configDirectory, "npmrc"),
     npm_config_update_notifier: "false",
   };
@@ -165,6 +167,11 @@ try {
   assert.deepEqual(
     packResults[0].files.map(({ path }) => path).sort(),
     [...expectedFiles].sort(),
+  );
+  assert.equal(
+    packResults[0].files.some(({ path }) => path.endsWith(".node")),
+    false,
+    "the boundary slice must not ship a native binary",
   );
 
   const archivePath = join(artifactDirectory, packResults[0].filename);

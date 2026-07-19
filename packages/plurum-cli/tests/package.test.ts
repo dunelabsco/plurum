@@ -15,6 +15,11 @@ interface PackageJson {
   readonly engines: Record<string, string>;
   readonly license: string;
   readonly dependencies?: Record<string, string>;
+  readonly optionalDependencies?: Record<string, string>;
+  readonly bundleDependencies?: readonly string[] | boolean;
+  readonly bundledDependencies?: readonly string[] | boolean;
+  readonly peerDependencies?: Record<string, string>;
+  readonly peerDependenciesMeta?: Record<string, unknown>;
 }
 
 const packageJson = JSON.parse(
@@ -35,11 +40,33 @@ describe("package safety invariants", () => {
   it("ships only the runtime build and required package documents", () => {
     expect(packageJson.files).toEqual(["dist", "LICENSE", "README.md"]);
     expect(packageJson.dependencies).toBeUndefined();
+    expect(packageJson.optionalDependencies).toBeUndefined();
+    expect(packageJson.bundleDependencies).toBeUndefined();
+    expect(packageJson.bundledDependencies).toBeUndefined();
+    expect(packageJson.peerDependencies).toBeUndefined();
+    expect(packageJson.peerDependenciesMeta).toBeUndefined();
+    expect(packageJson.scripts).toEqual({
+      clean:
+        "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+      "verify-capabilities": "node scripts/verify-capability-boundary.mjs",
+      prebuild: "npm run clean && npm run verify-capabilities",
+      build: "tsc -p tsconfig.build.json",
+      typecheck: "tsc -p tsconfig.json --noEmit",
+      pretest: "npm run build",
+      test: "vitest run",
+      "verify-package": "node scripts/verify-package.mjs",
+      check:
+        "npm run verify-capabilities && npm run typecheck && npm test && npm run verify-package",
+      prepack: "npm run check",
+    });
     for (const forbiddenLifecycle of [
       "preinstall",
       "install",
       "postinstall",
+      "prepublish",
+      "preprepare",
       "prepare",
+      "postprepare",
     ]) {
       expect(packageJson.scripts[forbiddenLifecycle]).toBeUndefined();
     }
