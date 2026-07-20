@@ -13,7 +13,14 @@ from app.core.exceptions import (
     DuplicateError,
     PlurimException,
 )
-from app.models.agent import AgentCreate, AgentUpdate, AgentPublic, AgentRegisterResponse
+from app.models.agent import (
+    AgentCliRegisterRequest,
+    AgentCliRegisterResponse,
+    AgentCreate,
+    AgentPublic,
+    AgentRegisterResponse,
+    AgentUpdate,
+)
 from app.services.username_suggester import generate_candidates, normalize_username
 
 
@@ -79,6 +86,43 @@ class AgentService:
             name=agent["name"],
             api_key=api_key,
             api_key_prefix=api_key_prefix,
+        )
+
+    def register_cli(
+        self,
+        data: AgentCliRegisterRequest,
+    ) -> AgentCliRegisterResponse:
+        """Create or replay a CLI registration without receiving its raw key."""
+        result = self.repo.register_cli(
+            protocol_version=data.protocol_version,
+            registration_request_id=data.registration_request_id,
+            name=data.name,
+            username=data.username,
+            api_key_hash=data.api_key_hash,
+            api_key_prefix=data.api_key_prefix,
+        )
+        disposition = result["disposition"]
+        if disposition in {"created", "replayed"}:
+            return AgentCliRegisterResponse(
+                agent_id=result["agent_id"],
+                disposition=disposition,
+            )
+
+        if disposition in {
+            "idempotency_conflict",
+            "username_unavailable",
+            "credential_conflict",
+        }:
+            raise PlurimException(
+                "CLI registration conflict",
+                status_code=409,
+                details={"code": disposition},
+            )
+
+        raise PlurimException(
+            "CLI registration is temporarily unavailable",
+            status_code=503,
+            details={"code": "registration_unavailable"},
         )
 
     def get_profile(self, agent_id: UUID) -> AgentPublic:

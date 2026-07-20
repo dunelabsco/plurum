@@ -3,8 +3,12 @@ import type { ApiOriginPolicy } from "./origin.js";
 import type { CredentialLocations } from "./paths.js";
 import {
   serializeCredentialDocument,
+  type ActiveCredentialV1,
   type CanonicalTimestamp,
   type CredentialV1,
+  type PendingCredentialV1,
+  type RegistrationRequestId,
+  type Username,
   validateCredentialDocument,
 } from "./schema.js";
 import {
@@ -64,6 +68,61 @@ export type CredentialStoreWriteResult = Readonly<{
   status: "written" | "unchanged";
 }>;
 
+export interface VerifiedRegistrationAgent {
+  readonly id: string;
+  readonly name: string;
+  readonly username: string | null;
+}
+
+export type CredentialRegistrationReadResult =
+  | Readonly<{
+      status: "pending-created";
+      credential: PendingCredentialV1;
+    }>
+  | Readonly<{
+      status: "pending-resumed";
+      credential: PendingCredentialV1;
+    }>
+  | Readonly<{
+      status: "existing-active";
+      credential: ActiveCredentialV1;
+    }>;
+
+export type CredentialRegistrationActivationResult =
+  | Readonly<{
+      status: "activated";
+      credential: ActiveCredentialV1;
+    }>
+  | Readonly<{
+      status: "already-active";
+      credential: ActiveCredentialV1;
+    }>;
+
+export type CredentialRegistrationUsernameReplacementResult =
+  | Readonly<{
+      status: "pending-replaced";
+      credential: PendingCredentialV1;
+    }>
+  | Readonly<{
+      status: "pending-unchanged";
+      credential: PendingCredentialV1;
+    }>
+  | Readonly<{ status: "no-pending" }>;
+
+export interface ExclusiveCredentialRegistrationSession {
+  readOrCreatePending(
+    factory: (createdAt: CanonicalTimestamp) => PendingCredentialV1,
+  ): Promise<CredentialRegistrationReadResult>;
+  activateExactPending(
+    expected: PendingCredentialV1,
+    verifiedAgent: VerifiedRegistrationAgent,
+  ): Promise<CredentialRegistrationActivationResult>;
+  replaceUsernameAfterConflict(
+    username: Username,
+    requestIdFactory: () => RegistrationRequestId,
+  ): Promise<CredentialRegistrationUsernameReplacementResult>;
+}
+
 interface DirectorySnapshot {
   readonly identity: CredentialObjectIdentity;
 }
@@ -97,7 +156,7 @@ interface PreparedLease {
   readonly nonce: CredentialSetupLeaseNonce;
 }
 
-interface PreparedWrite extends PreparedLease {
+interface PreparedWrite {
   readonly transactionId: ReturnType<typeof validateCredentialTransactionId>;
   readonly createdAt: CanonicalTimestamp;
   readonly credential: CredentialV1;
@@ -1469,42 +1528,67 @@ function prepareTimestamp(clock: ClockAdapter): CanonicalTimestamp {
   }
 }
 
-function prepareWrite(
+function prepareTransitionTimestamp(
+  clock: ClockAdapter,
+  notBefore: CanonicalTimestamp,
+): CanonicalTimestamp {
+  const timestamp = prepareTimestamp(clock);
+  return timestamp < notBefore ? notBefore : timestamp;
+}
+
+function prepareWriteAt(
   dependencies: CredentialStoreWriterDependencies,
-  locations: Pick<CredentialLocations, "directory">,
   input: CredentialV1,
   originPolicy: ApiOriginPolicy,
+  createdAt: CanonicalTimestamp,
+  preparedTransactionId?: ReturnType<
+    typeof validateCredentialTransactionId
+  >,
 ): PreparedWrite {
+  let credentialBytesValue: Uint8Array | undefined;
+  let succeeded = false;
   try {
-    const storage = dependencies.storage;
     const random = dependencies.random;
-    const clock = dependencies.clock;
-    if (!isMutationAdapter(storage)) {
-      return storeUnavailable();
-    }
-    const directory = prepareDirectory(locations);
-    const nonce = prepareUuid(random) as CredentialSetupLeaseNonce;
-    const transactionId = validateCredentialTransactionId(
-      prepareUuid(random),
-    );
-    const createdAt = prepareTimestamp(clock);
     const credential = validateCredentialDocument(input, originPolicy);
-    const credentialBytesValue = credentialBytes(credential, originPolicy);
-    return Object.freeze({
-      storage,
-      directory,
-      nonce,
-      transactionId,
+    credentialBytesValue = credentialBytes(credential, originPolicy);
+    const prepared = Object.freeze({
+      transactionId:
+        preparedTransactionId ??
+        validateCredentialTransactionId(prepareUuid(random)),
       createdAt,
       credential,
       credentialBytes: credentialBytesValue,
     });
+    succeeded = true;
+    return prepared;
   } catch (error) {
     if (error instanceof CredentialError) {
       throw error;
     }
     return storeUnavailable();
+  } finally {
+    if (!succeeded && credentialBytesValue !== undefined) {
+      wipeBytes(credentialBytesValue);
+    }
   }
+}
+
+function prepareWrite(
+  dependencies: CredentialStoreWriterDependencies,
+  input: CredentialV1,
+  originPolicy: ApiOriginPolicy,
+): PreparedWrite {
+  const transactionId = validateCredentialTransactionId(
+    prepareUuid(dependencies.random),
+  );
+  const createdAt = prepareTimestamp(dependencies.clock);
+  return prepareWriteAt(
+    dependencies,
+    input,
+    originPolicy,
+    createdAt,
+    transactionId,
+  );
 }
 
 function inspectAcquireResult(value: unknown):
@@ -1706,6 +1790,478 @@ async function withLease<T>(
   return result as T;
 }
 
+function preparePendingCredential(
+  factory: (createdAt: CanonicalTimestamp) => PendingCredentialV1,
+  createdAt: CanonicalTimestamp,
+  originPolicy: ApiOriginPolicy,
+): PendingCredentialV1 {
+  let input: CredentialV1;
+  try {
+    input = factory(createdAt);
+  } catch (error) {
+    if (error instanceof CredentialError) {
+      throw error;
+    }
+    return storeUnavailable();
+  }
+
+  const credential = validateCredentialDocument(input, originPolicy);
+  if (
+    credential.state !== "pending" ||
+    credential.created_at !== createdAt ||
+    credential.updated_at !== createdAt
+  ) {
+    return storeUnavailable();
+  }
+  return credential;
+}
+
+interface VerifiedRegistrationAgentSnapshot {
+  readonly id: string;
+  readonly name: string;
+  readonly username: string | null;
+}
+
+function snapshotVerifiedRegistrationAgent(
+  value: VerifiedRegistrationAgent,
+): VerifiedRegistrationAgentSnapshot {
+  try {
+    const id = value.id;
+    const name = value.name;
+    const username = value.username;
+    if (
+      typeof id !== "string" ||
+      typeof name !== "string" ||
+      (username !== null && typeof username !== "string")
+    ) {
+      return storeConflict();
+    }
+    return Object.freeze({ id, name, username });
+  } catch {
+    return storeConflict();
+  }
+}
+
+function verifiedAgentMatchesPending(
+  agent: VerifiedRegistrationAgentSnapshot,
+  pending: PendingCredentialV1,
+): boolean {
+  return (
+    agent.name === pending.agent_name &&
+    agent.username === pending.username
+  );
+}
+
+function alreadyActiveEquivalent(
+  active: ActiveCredentialV1,
+  pending: PendingCredentialV1,
+  agent: VerifiedRegistrationAgentSnapshot,
+): boolean {
+  return (
+    verifiedAgentMatchesPending(agent, pending) &&
+    active.api_origin === pending.api_origin &&
+    active.api_key === pending.api_key &&
+    active.agent_id === agent.id &&
+    active.agent_name === agent.name &&
+    active.username === agent.username &&
+    active.registration_request_id === pending.registration_request_id &&
+    active.created_at === pending.created_at &&
+    active.activated_at === active.updated_at
+  );
+}
+
+function createActivatedCredential(
+  pending: PendingCredentialV1,
+  agent: VerifiedRegistrationAgentSnapshot,
+  activatedAt: CanonicalTimestamp,
+  originPolicy: ApiOriginPolicy,
+): ActiveCredentialV1 {
+  if (!verifiedAgentMatchesPending(agent, pending)) {
+    return storeConflict();
+  }
+  try {
+    const credential = validateCredentialDocument(
+      {
+        schema_version: pending.schema_version,
+        state: "active",
+        api_origin: pending.api_origin,
+        api_key: pending.api_key,
+        agent_id: agent.id,
+        agent_name: pending.agent_name,
+        username: pending.username,
+        registration_request_id: pending.registration_request_id,
+        created_at: pending.created_at,
+        updated_at: activatedAt,
+        activated_at: activatedAt,
+      },
+      originPolicy,
+    );
+    return credential.state === "active" ? credential : storeConflict();
+  } catch {
+    return storeConflict();
+  }
+}
+
+async function readOrCreatePendingWithinLease(
+  session: LeaseSession,
+  dependencies: CredentialStoreWriterDependencies,
+  factory: (createdAt: CanonicalTimestamp) => PendingCredentialV1,
+  originPolicy: ApiOriginPolicy,
+): Promise<CredentialRegistrationReadResult> {
+  const current = await readCredential(session, originPolicy);
+  if (current.status === "loaded") {
+    try {
+      return current.credential.state === "pending"
+        ? Object.freeze({
+            status: "pending-resumed" as const,
+            credential: current.credential,
+          })
+        : Object.freeze({
+            status: "existing-active" as const,
+            credential: current.credential,
+          });
+    } finally {
+      wipeBytes(current.bytes);
+    }
+  }
+
+  const createdAt = prepareTimestamp(dependencies.clock);
+  const pending = preparePendingCredential(factory, createdAt, originPolicy);
+  const prepared = prepareWriteAt(
+    dependencies,
+    pending,
+    originPolicy,
+    createdAt,
+  );
+  try {
+    const result = await runTransactionalWrite(
+      session,
+      prepared,
+      originPolicy,
+      current,
+    );
+    if (result.status !== "written") {
+      return storeUnavailable();
+    }
+    return Object.freeze({
+      status: "pending-created" as const,
+      credential: pending,
+    });
+  } finally {
+    wipeBytes(prepared.credentialBytes);
+  }
+}
+
+async function activateExactPendingWithinLease(
+  session: LeaseSession,
+  dependencies: CredentialStoreWriterDependencies,
+  expectedInput: PendingCredentialV1,
+  verifiedAgentInput: VerifiedRegistrationAgent,
+  originPolicy: ApiOriginPolicy,
+): Promise<CredentialRegistrationActivationResult> {
+  const expectedCredential = validateCredentialDocument(
+    expectedInput,
+    originPolicy,
+  );
+  if (expectedCredential.state !== "pending") {
+    return storeConflict();
+  }
+  const agent = snapshotVerifiedRegistrationAgent(verifiedAgentInput);
+  if (!verifiedAgentMatchesPending(agent, expectedCredential)) {
+    return storeConflict();
+  }
+  const expectedBytes = credentialBytes(expectedCredential, originPolicy);
+  let current:
+    | Awaited<ReturnType<typeof readCredential>>
+    | undefined;
+  try {
+    current = await readCredential(session, originPolicy);
+    if (current.status === "missing") {
+      return storeConflict();
+    }
+    if (current.credential.state === "active") {
+      if (
+        !alreadyActiveEquivalent(
+          current.credential,
+          expectedCredential,
+          agent,
+        )
+      ) {
+        return storeConflict();
+      }
+      return Object.freeze({
+        status: "already-active" as const,
+        credential: current.credential,
+      });
+    }
+    if (!bytesEqual(current.bytes, expectedBytes)) {
+      return storeConflict();
+    }
+
+    const activatedAt = prepareTransitionTimestamp(
+      dependencies.clock,
+      expectedCredential.updated_at,
+    );
+    const active = createActivatedCredential(
+      expectedCredential,
+      agent,
+      activatedAt,
+      originPolicy,
+    );
+    const prepared = prepareWriteAt(
+      dependencies,
+      active,
+      originPolicy,
+      activatedAt,
+    );
+    try {
+      const result = await runTransactionalWrite(
+        session,
+        prepared,
+        originPolicy,
+        current,
+      );
+      if (result.status !== "written") {
+        return storeUnavailable();
+      }
+      return Object.freeze({
+        status: "activated" as const,
+        credential: active,
+      });
+    } finally {
+      wipeBytes(prepared.credentialBytes);
+    }
+  } finally {
+    wipeBytes(expectedBytes);
+    if (current?.status === "loaded") {
+      wipeBytes(current.bytes);
+    }
+  }
+}
+
+async function replaceUsernameAfterConflictWithinLease(
+  session: LeaseSession,
+  dependencies: CredentialStoreWriterDependencies,
+  usernameInput: Username,
+  requestIdFactory: () => RegistrationRequestId,
+  originPolicy: ApiOriginPolicy,
+): Promise<CredentialRegistrationUsernameReplacementResult> {
+  let username: Username;
+  try {
+    username = usernameInput;
+    if (typeof username !== "string") {
+      return storeConflict();
+    }
+  } catch {
+    return storeConflict();
+  }
+
+  const current = await readCredential(session, originPolicy);
+  if (
+    current.status === "missing" ||
+    current.credential.state === "active"
+  ) {
+    if (current.status === "loaded") {
+      wipeBytes(current.bytes);
+    }
+    return Object.freeze({ status: "no-pending" as const });
+  }
+
+  try {
+    if (username === current.credential.username) {
+      return Object.freeze({
+        status: "pending-unchanged" as const,
+        credential: current.credential,
+      });
+    }
+
+    let registrationRequestId: RegistrationRequestId;
+    try {
+      registrationRequestId = requestIdFactory();
+    } catch {
+      return storeUnavailable();
+    }
+    if (
+      typeof registrationRequestId !== "string" ||
+      registrationRequestId ===
+        current.credential.registration_request_id
+    ) {
+      return storeConflict();
+    }
+
+    const updatedAt = prepareTransitionTimestamp(
+      dependencies.clock,
+      current.credential.updated_at,
+    );
+    let replacement: CredentialV1;
+    try {
+      replacement = validateCredentialDocument(
+        {
+          ...current.credential,
+          username,
+          registration_request_id: registrationRequestId,
+          updated_at: updatedAt,
+        },
+        originPolicy,
+      );
+    } catch {
+      return storeConflict();
+    }
+    if (replacement.state !== "pending") {
+      return storeConflict();
+    }
+
+    const prepared = prepareWriteAt(
+      dependencies,
+      replacement,
+      originPolicy,
+      updatedAt,
+    );
+    try {
+      const result = await runTransactionalWrite(
+        session,
+        prepared,
+        originPolicy,
+        current,
+      );
+      if (result.status !== "written") {
+        return storeUnavailable();
+      }
+      return Object.freeze({
+        status: "pending-replaced" as const,
+        credential: replacement,
+      });
+    } finally {
+      wipeBytes(prepared.credentialBytes);
+    }
+  } finally {
+    wipeBytes(current.bytes);
+  }
+}
+
+async function runRegistrationCallback<T>(
+  leaseSession: LeaseSession,
+  dependencies: CredentialStoreWriterDependencies,
+  operation: (
+    session: ExclusiveCredentialRegistrationSession,
+  ) => Promise<T>,
+  originPolicy: ApiOriginPolicy,
+): Promise<T> {
+  let active = true;
+  let inFlight: Promise<unknown> | undefined;
+  let terminalError: unknown;
+
+  function invoke<R>(task: () => Promise<R>): Promise<R> {
+    if (!active) {
+      return Promise.reject(
+        new CredentialError("credential_store_unavailable"),
+      );
+    }
+    if (inFlight !== undefined) {
+      terminalError ??= new CredentialError(
+        "credential_store_unavailable",
+      );
+      return Promise.reject(terminalError);
+    }
+    const pending = (async () => {
+      try {
+        return await task();
+      } catch (error) {
+        const safeError =
+          error === LEASE_LOST || error instanceof CredentialError
+            ? error
+            : new CredentialError("credential_store_unavailable");
+        terminalError ??= safeError;
+        throw safeError;
+      }
+    })();
+    inFlight = pending;
+    void pending.then(
+      () => {
+        if (inFlight === pending) {
+          inFlight = undefined;
+        }
+      },
+      () => {
+        if (inFlight === pending) {
+          inFlight = undefined;
+        }
+      },
+    );
+    return pending;
+  }
+
+  const registrationSession: ExclusiveCredentialRegistrationSession =
+    Object.freeze({
+      readOrCreatePending(
+        factory: (createdAt: CanonicalTimestamp) => PendingCredentialV1,
+      ) {
+        return invoke(() =>
+          readOrCreatePendingWithinLease(
+            leaseSession,
+            dependencies,
+            factory,
+            originPolicy,
+          ),
+        );
+      },
+      activateExactPending(
+        expected: PendingCredentialV1,
+        verifiedAgent: VerifiedRegistrationAgent,
+      ) {
+        return invoke(() =>
+          activateExactPendingWithinLease(
+            leaseSession,
+            dependencies,
+            expected,
+            verifiedAgent,
+            originPolicy,
+          ),
+        );
+      },
+      replaceUsernameAfterConflict(
+        username: Username,
+        requestIdFactory: () => RegistrationRequestId,
+      ) {
+        return invoke(() =>
+          replaceUsernameAfterConflictWithinLease(
+            leaseSession,
+            dependencies,
+            username,
+            requestIdFactory,
+            originPolicy,
+          ),
+        );
+      },
+    });
+
+  let callbackError: unknown;
+  let result: T | undefined;
+  try {
+    result = await operation(registrationSession);
+  } catch (error) {
+    callbackError = error;
+  }
+  active = false;
+
+  const abandonedOperation = inFlight;
+  if (abandonedOperation !== undefined) {
+    try {
+      await abandonedOperation;
+    } catch (error) {
+      callbackError ??= error;
+    }
+    callbackError = terminalError ?? callbackError;
+    callbackError ??= new CredentialError("credential_store_unavailable");
+  }
+
+  callbackError = terminalError ?? callbackError;
+  if (callbackError !== undefined) {
+    throw callbackError;
+  }
+  return result as T;
+}
+
 export async function recoverCredentialStore(
   dependencies: CredentialStoreRecoveryDependencies,
   locations: Pick<CredentialLocations, "directory">,
@@ -1723,16 +2279,12 @@ export async function writeCredentialStore(
   input: CredentialV1,
   originPolicy: ApiOriginPolicy = "https-only",
 ): Promise<CredentialStoreWriteResult> {
-  const prepared = prepareWrite(
-    dependencies,
-    locations,
-    input,
-    originPolicy,
-  );
+  const preparedLease = prepareLease(dependencies, locations);
+  const prepared = prepareWrite(dependencies, input, originPolicy);
   try {
     return await withLease(
-      prepared.storage,
-      prepared,
+      preparedLease.storage,
+      preparedLease,
       async (session) => {
         await recoverWithinLease(session, originPolicy);
         const current = await readCredential(session, originPolicy);
@@ -1757,4 +2309,24 @@ export async function writeCredentialStore(
   } finally {
     wipeBytes(prepared.credentialBytes);
   }
+}
+
+export async function runExclusiveCredentialRegistration<T>(
+  dependencies: CredentialStoreWriterDependencies,
+  locations: Pick<CredentialLocations, "directory">,
+  operation: (
+    session: ExclusiveCredentialRegistrationSession,
+  ) => Promise<T>,
+  originPolicy: ApiOriginPolicy = "https-only",
+): Promise<T> {
+  const prepared = prepareLease(dependencies, locations);
+  return withLease(prepared.storage, prepared, async (session) => {
+    await recoverWithinLease(session, originPolicy);
+    return runRegistrationCallback(
+      session,
+      dependencies,
+      operation,
+      originPolicy,
+    );
+  });
 }

@@ -12,12 +12,28 @@ jobs:
   backend:
     name: backend tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: plurum_registration_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d plurum_registration_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
       SUPABASE_URL: https://example.supabase.co
       SUPABASE_DB_URL: postgresql://localhost/test
       SUPABASE_KEY: test-key
       OPENAI_API_KEY: test-key
       ENVIRONMENT: development
+      PLURUM_TEST_POSTGRES_URL: postgresql://postgres:postgres@127.0.0.1:5432/plurum_registration_test
+      PLURUM_ALLOW_DESTRUCTIVE_POSTGRES_TEST: "1"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -27,6 +43,8 @@ jobs:
         run: pipx install poetry
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
       - name: Lint
         run: poetry run ruff check app tests
       - name: Run backend and Hermes plugin tests

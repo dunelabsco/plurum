@@ -21,6 +21,7 @@ EXPERIENCE_CREATE_SCOPE = "experience-write:create"
 EXPERIENCE_PUBLISH_SCOPE = "experience-write:publish"
 EXPERIENCE_ARCHIVE_SCOPE = "experience-write:archive"
 EXPERIENCE_FEEDBACK_SCOPE = "experience-feedback"
+AGENT_REGISTRATION_SCOPE = "agent-registration"
 
 
 def get_agent_rate_limit_key(agent_id: object) -> str:

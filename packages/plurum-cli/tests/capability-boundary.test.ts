@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   classifyElevation,
@@ -441,6 +441,23 @@ describe("platform and randomness adapters", () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
     );
     expect(() => nodeRandom.bytes(0)).toThrow(RangeError);
+  });
+
+  it("wipes the temporary crypto buffer after copying random bytes", () => {
+    const fill = vi.spyOn(Buffer.prototype, "fill");
+    try {
+      const result = nodeRandom.bytes(32);
+      const source = fill.mock.instances.find(
+        (instance) => Buffer.isBuffer(instance) && instance.length === 32,
+      ) as Buffer | undefined;
+
+      expect(result).toHaveLength(32);
+      expect(source).toBeDefined();
+      expect(source?.every((byte) => byte === 0)).toBe(true);
+      expect(fill).toHaveBeenCalledWith(0);
+    } finally {
+      fill.mockRestore();
+    }
   });
 
   it("exposes only fixed SHA-256 through the injected hash adapter", () => {

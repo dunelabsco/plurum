@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+import re
+from typing import Literal
+import unicodedata
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, UUID4, field_validator
 
 
 class SubscriptionTier(str, Enum):
@@ -120,6 +123,120 @@ class AgentRegisterResponse(BaseModel):
             }
         }
     )
+
+
+_PLURUM_API_KEY_TOKEN = re.compile(r"plrm_live_[A-Za-z0-9_-]{10,}")
+
+
+def _is_default_ignorable(character: str) -> bool:
+    code_point = ord(character)
+    return (
+        unicodedata.category(character) == "Cf"
+        or code_point == 0x034F
+        or 0x115F <= code_point <= 0x1160
+        or 0x17B4 <= code_point <= 0x17B5
+        or 0x180B <= code_point <= 0x180D
+        or code_point == 0x3164
+        or 0xFE00 <= code_point <= 0xFE0F
+        or code_point == 0xFFA0
+        or 0xE0100 <= code_point <= 0xE01EF
+    )
+
+
+def _contains_plurum_api_key_token(value: str) -> bool:
+    """Recognize raw or visually obscured Plurum key-shaped text."""
+    try:
+        normalized = unicodedata.normalize("NFKC", value)
+    except Exception:
+        return True
+    display_skeleton = "".join(
+        character
+        for character in normalized
+        if not _is_default_ignorable(character)
+    )
+    return any(
+        _PLURUM_API_KEY_TOKEN.search(candidate)
+        for candidate in (value, normalized, display_skeleton)
+    )
+
+
+class AgentCliRegisterRequest(BaseModel):
+    """Secret-free request for recoverable CLI registration."""
+
+    protocol_version: Literal[1] = 1
+    registration_request_id: UUID4
+    name: str = Field(..., min_length=1, max_length=255)
+    username: str = Field(
+        ...,
+        min_length=3,
+        max_length=50,
+        pattern=r"^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$",
+    )
+    api_key_hash: str = Field(
+        ...,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    api_key_prefix: str = Field(
+        ...,
+        min_length=19,
+        max_length=19,
+        pattern=r"^plrm_live_[A-Za-z0-9_-]{6}\.\.\.$",
+    )
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @field_validator("protocol_version", mode="before")
+    @classmethod
+    def validate_protocol_version(cls, value: object) -> object:
+        """Accept only the JSON integer 1, not booleans or floats."""
+        if type(value) is not int or value != 1:  # noqa: E721
+            raise ValueError("Invalid protocol version")
+        return value
+
+    @field_validator("registration_request_id", mode="before")
+    @classmethod
+    def validate_canonical_request_id(cls, value: object) -> object:
+        """Require a canonical lowercase RFC 4122 UUID-v4 string."""
+        if type(value) is not str or not re.fullmatch(  # noqa: E721
+            r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            value,
+        ):
+            raise ValueError("Invalid registration request ID")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def validate_display_name(cls, value: str) -> str:
+        """Reject control and bidirectional-display characters."""
+        if re.search(r"[\x00-\x1f\x7f-\x9f]", value) or re.search(
+            r"[\u061c\u200e\u200f\u2028-\u202e\u2066-\u206f]",
+            value,
+        ):
+            raise ValueError("Invalid agent name")
+        if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+            raise ValueError("Invalid agent name")
+        if _contains_plurum_api_key_token(value):
+            raise ValueError("Invalid agent name")
+        return value
+
+    @field_validator("username")
+    @classmethod
+    def validate_username_secret_free(cls, value: str) -> str:
+        """Keep key-shaped text out of the public agent identity."""
+        if _contains_plurum_api_key_token(value):
+            raise ValueError("Invalid username")
+        return value
+
+
+class AgentCliRegisterResponse(BaseModel):
+    """Minimal result for recoverable CLI registration."""
+
+    agent_id: UUID
+    disposition: Literal["created", "replayed"]
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 class AgentClaimRequest(BaseModel):

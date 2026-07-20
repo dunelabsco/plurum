@@ -10,6 +10,10 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from app.api.v1.agents import (
+    CLI_REGISTRATION_MAX_BODY_BYTES,
+    CliRegistrationHttpError,
+)
 from app.api.v1.router import router as v1_router
 from app.config import get_settings
 from app.core.exceptions import PlurimException
@@ -63,6 +67,10 @@ def create_app() -> FastAPI:
     application.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=settings.max_request_body_bytes,
+        path_body_byte_limits={
+            "/api/v1/agents/register/cli": CLI_REGISTRATION_MAX_BODY_BYTES,
+            "/api/v1/agents/register/cli/": CLI_REGISTRATION_MAX_BODY_BYTES,
+        },
     )
 
     @application.middleware("http")
@@ -72,7 +80,20 @@ def create_app() -> FastAPI:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        if request.url.path == "/api/v1/agents/register/cli":
+            response.headers["Cache-Control"] = "no-store"
         return response
+
+    @application.exception_handler(CliRegistrationHttpError)
+    async def cli_registration_exception_handler(
+        _request: Request,
+        exc: CliRegistrationHttpError,
+    ):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": exc.error},
+            headers={"Cache-Control": "no-store"},
+        )
 
     @application.exception_handler(PlurimException)
     async def plurim_exception_handler(_request: Request, exc: PlurimException):
