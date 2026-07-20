@@ -74,6 +74,12 @@ describe("deny-by-default production ports", () => {
           timeoutMs: 1_000,
           maxOutputBytes: 1_024,
         }),
+      () =>
+        system.hosts.inspection["claude-code"].inspect({
+          host: "claude-code",
+          scope: "user",
+          excludedProjectDirectory: "/isolated/neutral",
+        }),
     ];
 
     for (const attempt of attempts) {
@@ -110,6 +116,8 @@ describe("deny-by-default production ports", () => {
       expect("open" in scoped.filesystem).toBe(false);
       expect("rename" in scoped.filesystem).toBe(false);
       expect("unlink" in scoped.filesystem).toBe(false);
+      expect("inspection" in scoped.hosts).toBe(true);
+      expect("mutation" in scoped.hosts).toBe(false);
     }
     expect("openReadOnly" in planning.filesystem).toBe(false);
     expect("openReadOnly" in status.filesystem).toBe(true);
@@ -128,6 +136,99 @@ describe("deny-by-default production ports", () => {
     expect("random" in setup).toBe(true);
     expect("hash" in setup).toBe(true);
     expect("rename" in setup.filesystem).toBe(true);
+    expect("inspection" in setup.hosts).toBe(true);
+    expect("mutation" in setup.hosts).toBe(true);
+  });
+
+  it("keeps host inspection semantic, user-scoped, and tied to the invocation cwd", async () => {
+    const base = createTestSystem();
+    const delegatedRequests: unknown[] = [];
+    const claudeHost = Object.freeze({
+      async inspect(request: unknown) {
+        delegatedRequests.push(request);
+        return Object.freeze({
+          host: "claude-code" as const,
+          status: "absent" as const,
+        });
+      },
+      async apply() {
+        return Object.freeze({ status: "failed" as const });
+      },
+      async rollback() {
+        return Object.freeze({ status: "failed" as const });
+      },
+    });
+    const system: SystemCapabilities = Object.freeze({
+      ...base,
+      hosts: Object.freeze({
+        ...base.hosts,
+        inspection: Object.freeze({
+          ...base.hosts.inspection,
+          "claude-code": claudeHost,
+        }),
+        mutation: Object.freeze({
+          ...base.hosts.mutation,
+          "claude-code": claudeHost,
+        }),
+      }),
+    });
+    const planning = planningScope(system);
+    const setup = setupScope(system);
+
+    await expect(
+      planning.hosts.inspection["claude-code"].inspect({
+        host: "claude-code",
+        scope: "user",
+        excludedProjectDirectory: "/different/project",
+      }),
+    ).rejects.toBeInstanceOf(CapabilityPolicyError);
+    await expect(
+      setup.hosts.mutation["claude-code"].inspect({
+        host: "claude-code",
+        scope: "user",
+        excludedProjectDirectory: "/different/project",
+      }),
+    ).rejects.toBeInstanceOf(CapabilityPolicyError);
+    expect(delegatedRequests).toEqual([]);
+
+    await expect(
+      planning.hosts.inspection["claude-code"].inspect({
+        host: "claude-code",
+        scope: "user",
+        excludedProjectDirectory: base.platform.cwd,
+      }),
+    ).resolves.toEqual({
+      host: "claude-code",
+      status: "absent",
+    });
+    await expect(
+      setup.hosts.mutation["claude-code"].inspect({
+        host: "claude-code",
+        scope: "user",
+        excludedProjectDirectory: base.platform.cwd,
+      }),
+    ).resolves.toEqual({
+      host: "claude-code",
+      status: "absent",
+    });
+    expect(delegatedRequests).toEqual([
+      {
+        host: "claude-code",
+        scope: "user",
+        excludedProjectDirectory: base.platform.cwd,
+      },
+      {
+        host: "claude-code",
+        scope: "user",
+        excludedProjectDirectory: base.platform.cwd,
+      },
+    ]);
+    expect(delegatedRequests[0]).toEqual({
+      host: "claude-code",
+      scope: "user",
+      excludedProjectDirectory: base.platform.cwd,
+    });
+    expect(delegatedRequests.every(Object.isFrozen)).toBe(true);
   });
 
   it("copies only the dedicated credential environment snapshot", () => {

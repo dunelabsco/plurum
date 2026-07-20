@@ -9,6 +9,10 @@ describe("runtime environment boundary", () => {
       HOME: "/isolated/home",
       PLURUM_HOME: "/isolated/plurum",
       PLURUM_TEST_ROOT: "/isolated",
+      SystemRoot: "C:\\Windows",
+      ComSpec: "C:\\Windows\\System32\\cmd.exe",
+      PATHEXT: ".COM;.EXE;.BAT;.CMD",
+      WINDIR: "C:\\Windows",
       PLURUM_API_KEY: "must-not-enter-the-runtime",
       AWS_SECRET_ACCESS_KEY: "must-not-enter-the-runtime",
     });
@@ -17,6 +21,10 @@ describe("runtime environment boundary", () => {
       HOME: "/isolated/home",
       PLURUM_HOME: "/isolated/plurum",
       PLURUM_TEST_ROOT: "/isolated",
+      SystemRoot: "C:\\Windows",
+      ComSpec: "C:\\Windows\\System32\\cmd.exe",
+      PATHEXT: ".COM;.EXE;.BAT;.CMD",
+      WINDIR: "C:\\Windows",
     });
     expect(Object.isFrozen(selected)).toBe(true);
     expect("PLURUM_API_KEY" in selected).toBe(false);

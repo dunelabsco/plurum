@@ -2,7 +2,8 @@ export type CapabilityName =
   | "filesystem"
   | "processes"
   | "network"
-  | "credential-environment";
+  | "credential-environment"
+  | "hosts";
 
 export class CapabilityUnavailableError extends Error {
   readonly code = "capability_unavailable";

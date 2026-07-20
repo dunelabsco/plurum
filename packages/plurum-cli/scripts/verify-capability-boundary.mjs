@@ -553,14 +553,17 @@ function scanText(relativePath, text) {
           "setPrototypeOf",
         ].includes(propertyName) &&
         !(
-          [
-            "src/adapters/node/native-credential-store.ts",
-            "src/data/uint8-array.ts",
-            "src/system/credential-environment.ts",
-          ].includes(relativePath) &&
-          ["getPrototypeOf", "getOwnPropertyDescriptor"].includes(
-            propertyName,
-          ) &&
+          (([
+              "src/adapters/node/native-credential-store.ts",
+              "src/data/uint8-array.ts",
+              "src/system/credential-environment.ts",
+            ].includes(relativePath) &&
+            ["getPrototypeOf", "getOwnPropertyDescriptor"].includes(
+              propertyName,
+            )) ||
+            (relativePath ===
+              "src/system/host-mutation-boundary.ts" &&
+              propertyName === "getOwnPropertyDescriptor")) &&
           node.computed === false &&
           node.optional === false &&
           parent?.type === "CallExpression" &&

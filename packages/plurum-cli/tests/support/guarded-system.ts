@@ -149,5 +149,6 @@ export function createGuardedFakeSystem(
     random: delegate.random,
     hash: guardHash(delegate.hash),
     platform: delegate.platform,
+    hosts: delegate.hosts,
   });
 }

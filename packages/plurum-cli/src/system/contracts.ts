@@ -1,3 +1,9 @@
+import type {
+  HostAdapterMap,
+  HostInspectionAdapter,
+  HostMutationAdapter,
+} from "../hosts/contracts.js";
+
 export const RUNTIME_ENVIRONMENT_KEYS = [
   "PATH",
   "HOME",
@@ -14,6 +20,10 @@ export const RUNTIME_ENVIRONMENT_KEYS = [
   "TMPDIR",
   "TEMP",
   "TMP",
+  "SystemRoot",
+  "ComSpec",
+  "PATHEXT",
+  "WINDIR",
 ] as const;
 
 export type RuntimeEnvironmentKey = (typeof RUNTIME_ENVIRONMENT_KEYS)[number];
@@ -191,12 +201,19 @@ export interface SystemCapabilities {
   readonly random: RandomAdapter;
   readonly hash: HashAdapter;
   readonly platform: PlatformAdapter;
+  readonly hosts: HostCapabilities;
+}
+
+export interface HostCapabilities {
+  readonly inspection: HostAdapterMap<HostInspectionAdapter>;
+  readonly mutation: HostAdapterMap<HostMutationAdapter>;
 }
 
 export interface PlanningCapabilities {
   readonly filesystem: MetadataFileSystemAdapter;
   readonly clock: ClockAdapter;
   readonly platform: PlatformAdapter;
+  readonly hosts: Pick<HostCapabilities, "inspection">;
 }
 
 export interface SetupCapabilities extends SystemCapabilities {}
@@ -208,6 +225,7 @@ export interface StatusCapabilities {
   readonly clock: ClockAdapter;
   readonly hash: HashAdapter;
   readonly platform: PlatformAdapter;
+  readonly hosts: Pick<HostCapabilities, "inspection">;
 }
 
 export interface DoctorCapabilities extends StatusCapabilities {}

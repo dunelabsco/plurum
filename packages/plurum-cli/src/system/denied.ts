@@ -16,6 +16,11 @@ import type {
   SystemCapabilities,
   WritableFileHandleAdapter,
 } from "./contracts.js";
+import type {
+  HostAdapterMap,
+  HostInspectionAdapter,
+  HostMutationAdapter,
+} from "../hosts/contracts.js";
 import { CapabilityUnavailableError, type CapabilityName } from "./errors.js";
 
 function unavailable(capability: CapabilityName, operation: string): never {
@@ -71,6 +76,35 @@ export const deniedCredentialEnvironment: CredentialEnvironmentAdapter =
     },
   });
 
+function deniedHostAdapter(): HostMutationAdapter {
+  return Object.freeze({
+    async inspect(): Promise<never> {
+      return unavailable("hosts", "inspect");
+    },
+    async apply(): Promise<never> {
+      return unavailable("hosts", "apply");
+    },
+    async rollback(): Promise<never> {
+      return unavailable("hosts", "rollback");
+    },
+  });
+}
+
+const deniedClaudeHost = deniedHostAdapter();
+const deniedCodexHost = deniedHostAdapter();
+
+export const deniedHostInspection: HostAdapterMap<HostInspectionAdapter> =
+  Object.freeze({
+    "claude-code": deniedClaudeHost,
+    codex: deniedCodexHost,
+  });
+
+export const deniedHostMutation: HostAdapterMap<HostMutationAdapter> =
+  Object.freeze({
+    "claude-code": deniedClaudeHost,
+    codex: deniedCodexHost,
+  });
+
 export function createDenyByDefaultSystem(
   clock: ClockAdapter,
   random: RandomAdapter,
@@ -88,5 +122,9 @@ export function createDenyByDefaultSystem(
     random,
     hash,
     platform,
+    hosts: Object.freeze({
+      inspection: deniedHostInspection,
+      mutation: deniedHostMutation,
+    }),
   });
 }
