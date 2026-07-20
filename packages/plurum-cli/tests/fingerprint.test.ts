@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { nodeHash } from "../src/adapters/node/hash.js";
 import { CredentialError } from "../src/credentials/errors.js";
-import { fingerprintCredentialKey } from "../src/credentials/fingerprint.js";
+import {
+  fingerprintCredentialKey,
+  identifyCredentialKey,
+} from "../src/credentials/fingerprint.js";
 import {
   type CredentialV1,
+  parseApiKey,
   validateCredentialDocument,
 } from "../src/credentials/schema.js";
 import type { HashAdapter } from "../src/system/contracts.js";
@@ -34,6 +38,250 @@ function hexadecimal(bytes: Uint8Array): string {
     "",
   );
 }
+
+describe("API key parsing", () => {
+  it("accepts the exact supported API key alphabet and length boundaries", () => {
+    const shortest = `plrm_live_${"A".repeat(10)}`;
+    const longest = `plrm_live_${"a0_-".repeat(50)}`;
+
+    expect(parseApiKey(shortest)).toBe(shortest);
+    expect(parseApiKey(longest)).toBe(longest);
+  });
+
+  it.each([
+    undefined,
+    null,
+    42,
+    "",
+    "plrm_live_ABCDEFGHI",
+    `plrm_live_${"A".repeat(201)}`,
+    "plrm_test_ABCDEFGHIJ",
+    "plrm_live_ABCDEFGHI!",
+    " plrm_live_ABCDEFGHIJ",
+    "plrm_live_ABCDEFGHIJ ",
+    "Bearer plrm_live_ABCDEFGHIJ",
+  ])("rejects malformed input with one fixed non-secret error", (input) => {
+    try {
+      parseApiKey(input);
+      throw new Error("malformed API key unexpectedly accepted");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CredentialError);
+      expect(error).toMatchObject({ code: "invalid_api_key" });
+      expect(String(error)).toBe(
+        "CredentialError: The Plurum API key is invalid.",
+      );
+      if (typeof input === "string" && input.length > 0) {
+        expect(String(error)).not.toContain(input);
+      }
+    }
+  });
+});
+
+describe("credential key identity", () => {
+  it("returns the full audited digest and compatible display fingerprint", () => {
+    let preimage: Uint8Array | undefined;
+    let adapterDigest: Uint8Array | undefined;
+    const capturingHash: HashAdapter = Object.freeze({
+      sha256(data: Uint8Array): Uint8Array {
+        preimage = data;
+        adapterDigest = nodeHash.sha256(data);
+        return adapterDigest;
+      },
+    });
+
+    const identified = identifyCredentialKey(
+      "https://api.plurum.ai",
+      API_KEY,
+      "https-only",
+      capturingHash,
+    );
+
+    expect(identified).toEqual({
+      identity:
+        "16fe461aa99a080414a0a8e5e951eea0ef1b87294d74061128bc9df1fd44835e",
+      fingerprint: "plurum-fp-v1:16fe461aa99a",
+    });
+    expect(Object.isFrozen(identified)).toBe(true);
+    expect(identified.identity).toMatch(/^[0-9a-f]{64}$/u);
+    expect(identified.identity).not.toContain(API_KEY);
+    expect(identified.fingerprint).not.toContain(API_KEY);
+    expect(preimage?.every((byte) => byte === 0)).toBe(true);
+    expect(adapterDigest).toBeDefined();
+    expect(hexadecimal(adapterDigest!)).toBe(identified.identity);
+  });
+
+  it("normalizes the origin under the supplied policy before hashing", () => {
+    const canonical = identifyCredentialKey(
+      "https://api.plurum.ai",
+      API_KEY,
+      "https-only",
+      nodeHash,
+    );
+    const equivalent = identifyCredentialKey(
+      "HTTPS://API.PLURUM.AI:443/",
+      API_KEY,
+      "https-only",
+      nodeHash,
+    );
+
+    expect(equivalent).toEqual(canonical);
+    expect(
+      identifyCredentialKey(
+        "http://127.0.0.1:43197",
+        API_KEY,
+        "explicit-loopback-development",
+        nodeHash,
+      ).identity,
+    ).toMatch(/^[0-9a-f]{64}$/u);
+    expect(() =>
+      identifyCredentialKey(
+        "http://127.0.0.1:43197",
+        API_KEY,
+        "https-only",
+        nodeHash,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "invalid_api_origin" }));
+  });
+
+  it("is deterministic and distinct across canonical origins and keys", () => {
+    const baseline = identifyCredentialKey(
+      "https://api.plurum.ai",
+      API_KEY,
+      "https-only",
+      nodeHash,
+    );
+    const repeated = identifyCredentialKey(
+      "https://api.plurum.ai",
+      API_KEY,
+      "https-only",
+      nodeHash,
+    );
+    const changedOrigin = identifyCredentialKey(
+      "https://api.example.test",
+      API_KEY,
+      "https-only",
+      nodeHash,
+    );
+    const changedKey = identifyCredentialKey(
+      "https://api.plurum.ai",
+      "plrm_live_ABCDEFGHIJK",
+      "https-only",
+      nodeHash,
+    );
+
+    expect(repeated).toEqual(baseline);
+    expect(changedOrigin.identity).not.toBe(baseline.identity);
+    expect(changedKey.identity).not.toBe(baseline.identity);
+    expect(changedOrigin.fingerprint).not.toBe(baseline.fingerprint);
+    expect(changedKey.fingerprint).not.toBe(baseline.fingerprint);
+  });
+
+  it("rejects malformed keys and policies before calling the hash adapter", () => {
+    let called = false;
+    const observingHash: HashAdapter = Object.freeze({
+      sha256(): Uint8Array {
+        called = true;
+        return new Uint8Array(32);
+      },
+    });
+
+    expect(() =>
+      identifyCredentialKey(
+        "https://api.plurum.ai",
+        `plrm_live_${CANARY}!`,
+        "https-only",
+        observingHash,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "invalid_api_key" }));
+    expect(() =>
+      identifyCredentialKey(
+        "https://api.plurum.ai",
+        API_KEY,
+        "unsupported" as "https-only",
+        observingHash,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "invalid_api_origin" }));
+    expect(called).toBe(false);
+  });
+
+  it("wipes the owned preimage even when the adapter mutates it", () => {
+    let retainedPreimage: Uint8Array | undefined;
+    const mutatingHash: HashAdapter = Object.freeze({
+      sha256(data: Uint8Array): Uint8Array {
+        retainedPreimage = data;
+        const digest = nodeHash.sha256(data);
+        data.fill(0xa5);
+        return digest;
+      },
+    });
+
+    const identified = identifyCredentialKey(
+      "https://api.plurum.ai",
+      API_KEY,
+      "https-only",
+      mutatingHash,
+    );
+
+    expect(identified.identity).toBe(
+      "16fe461aa99a080414a0a8e5e951eea0ef1b87294d74061128bc9df1fd44835e",
+    );
+    expect(retainedPreimage?.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it.each([0, 31, 33])(
+    "rejects a %s-byte identity digest with one fixed non-secret error",
+    (length) => {
+      const invalidHash: HashAdapter = Object.freeze({
+        sha256(): Uint8Array {
+          return new Uint8Array(length);
+        },
+      });
+
+      expect(() =>
+        identifyCredentialKey(
+          "https://api.plurum.ai",
+          API_KEY,
+          "https-only",
+          invalidHash,
+        ),
+      ).toThrowError(
+        expect.objectContaining({ code: "credential_fingerprint_failed" }),
+      );
+    },
+  );
+
+  it("replaces malformed or failing adapter output without reflecting secrets", () => {
+    const malformedHash: HashAdapter = Object.freeze({
+      sha256(): Uint8Array {
+        return "not-bytes" as unknown as Uint8Array;
+      },
+    });
+    const failingHash: HashAdapter = Object.freeze({
+      sha256(): Uint8Array {
+        throw new Error(`${API_KEY}:${CANARY}`);
+      },
+    });
+
+    for (const hash of [malformedHash, failingHash]) {
+      try {
+        identifyCredentialKey(
+          "https://api.plurum.ai",
+          API_KEY,
+          "https-only",
+          hash,
+        );
+        throw new Error("invalid adapter unexpectedly accepted");
+      } catch (error) {
+        expect(error).toBeInstanceOf(CredentialError);
+        expect(error).toMatchObject({
+          code: "credential_fingerprint_failed",
+        });
+        expect(String(error)).not.toContain(API_KEY);
+        expect(String(error)).not.toContain(CANARY);
+      }
+    }
+  });
+});
 
 describe("credential key fingerprint", () => {
   it("matches the audited origin-bound framing and display vector", () => {

@@ -68,6 +68,7 @@ const FIELDS = [
 ] as const;
 
 const API_KEY = /^plrm_live_[A-Za-z0-9_-]{10,200}$/u;
+const API_KEY_TOKEN = /plrm_live_[A-Za-z0-9_-]{10,200}/u;
 const USERNAME = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const AGENT_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -77,6 +78,7 @@ const CANONICAL_TIMESTAMP =
   /^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$/u;
 const NAME_CONTROL = /[\u0000-\u001f\u007f-\u009f]/u;
 const NAME_DISPLAY_CONTROL = /[\u061c\u200e\u200f\u2028-\u202e\u2066-\u206f]/u;
+const DEFAULT_IGNORABLE = /\p{Default_Ignorable_Code_Point}/gu;
 
 function invalidDocument(): never {
   throw new CredentialError("invalid_credential_document");
@@ -94,8 +96,44 @@ function hasExactFields(value: Record<string, unknown>): boolean {
   );
 }
 
+export function parseApiKey(input: unknown): ApiKey {
+  if (typeof input !== "string" || !API_KEY.test(input)) {
+    throw new CredentialError("invalid_api_key");
+  }
+  return input as ApiKey;
+}
+
+export function containsApiKeyToken(
+  input: unknown,
+  exactApiKey?: ApiKey,
+): boolean {
+  if (typeof input !== "string") {
+    return false;
+  }
+  let displaySkeleton: string;
+  try {
+    displaySkeleton = input
+      .normalize("NFKC")
+      .replace(DEFAULT_IGNORABLE, "");
+  } catch {
+    return true;
+  }
+  return (
+    (exactApiKey !== undefined &&
+      (input.includes(exactApiKey) ||
+        displaySkeleton.includes(exactApiKey))) ||
+    API_KEY_TOKEN.test(input) ||
+    API_KEY_TOKEN.test(displaySkeleton)
+  );
+}
+
 function isApiKey(value: unknown): value is ApiKey {
-  return typeof value === "string" && API_KEY.test(value);
+  try {
+    parseApiKey(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isAgentId(value: unknown): value is AgentId {
@@ -202,6 +240,13 @@ export function validateCredentialDocument(
   }
 
   const apiOrigin = validateOrigin(input.api_origin, originPolicy);
+  if (
+    containsApiKeyToken(apiOrigin, input.api_key) ||
+    containsApiKeyToken(input.agent_name, input.api_key) ||
+    containsApiKeyToken(input.username, input.api_key)
+  ) {
+    return invalidDocument();
+  }
 
   if (input.state === "pending") {
     if (

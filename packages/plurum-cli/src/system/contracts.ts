@@ -21,6 +21,17 @@ export type RuntimeEnvironment = Readonly<
   Partial<Record<RuntimeEnvironmentKey, string>>
 >;
 
+export interface CredentialEnvironmentSnapshot {
+  readonly PLURUM_API_KEY?: string;
+  readonly PLURUM_API_URL?: string;
+  readonly HERMES_HOME?: string;
+  readonly OPENCLAW_HOME?: string;
+}
+
+export interface CredentialEnvironmentAdapter {
+  read(): CredentialEnvironmentSnapshot;
+}
+
 export type SupportedOs = "darwin" | "linux" | "win32" | "unsupported";
 export type ElevationState = "standard" | "elevated" | "unknown";
 export type PathKind = "file" | "directory" | "symbolic-link" | "other";
@@ -175,6 +186,7 @@ export interface SystemCapabilities {
   readonly filesystem: FileSystemAdapter;
   readonly processes: ProcessAdapter;
   readonly network: NetworkAdapter;
+  readonly credentialEnvironment: CredentialEnvironmentAdapter;
   readonly clock: ClockAdapter;
   readonly random: RandomAdapter;
   readonly hash: HashAdapter;
@@ -192,6 +204,7 @@ export interface SetupCapabilities extends SystemCapabilities {}
 export interface StatusCapabilities {
   readonly filesystem: ReadOnlyFileSystemAdapter;
   readonly network: ReadOnlyNetworkAdapter;
+  readonly credentialEnvironment: CredentialEnvironmentAdapter;
   readonly clock: ClockAdapter;
   readonly hash: HashAdapter;
   readonly platform: PlatformAdapter;

@@ -1,15 +1,32 @@
 import type { HashAdapter } from "../system/contracts.js";
 import { CredentialError } from "./errors.js";
 import {
+  type ApiOrigin,
+  type ApiOriginPolicy,
+  normalizeApiOrigin,
+} from "./origin.js";
+import {
+  type ApiKey,
   type CredentialV1,
+  parseApiKey,
   validateCredentialDocument,
 } from "./schema.js";
 
 declare const credentialKeyFingerprintBrand: unique symbol;
+declare const credentialKeyIdentityBrand: unique symbol;
 
 export type CredentialKeyFingerprint = string & {
   readonly [credentialKeyFingerprintBrand]: true;
 };
+
+export type CredentialKeyIdentity = string & {
+  readonly [credentialKeyIdentityBrand]: true;
+};
+
+export interface IdentifiedCredentialKey {
+  readonly identity: CredentialKeyIdentity;
+  readonly fingerprint: CredentialKeyFingerprint;
+}
 
 const DOMAIN = new TextEncoder().encode(
   "plurum.ai/credential-key-fingerprint/sha256/v1",
@@ -17,6 +34,8 @@ const DOMAIN = new TextEncoder().encode(
 const SHA256_DIGEST_BYTES = 32;
 const DISPLAY_DIGEST_BYTES = 6;
 const DISPLAY_PREFIX = "plurum-fp-v1:";
+const fillBytes = Uint8Array.prototype.fill;
+const setBytes = Uint8Array.prototype.set;
 
 function writeUint32BigEndian(
   destination: Uint8Array,
@@ -33,10 +52,21 @@ function failure(): never {
   throw new CredentialError("credential_fingerprint_failed");
 }
 
-function encodePreimage(credential: CredentialV1): Uint8Array {
+function wipe(bytes: Uint8Array | undefined): void {
+  if (bytes === undefined) {
+    return;
+  }
+  try {
+    fillBytes.call(bytes, 0);
+  } catch {
+    // A hostile adapter may detach the exposed preimage. Detached data is gone.
+  }
+}
+
+function encodePreimage(apiOrigin: ApiOrigin, apiKey: ApiKey): Uint8Array {
   const encoder = new TextEncoder();
-  const origin = encoder.encode(credential.api_origin);
-  const key = encoder.encode(credential.api_key);
+  const origin = encoder.encode(apiOrigin);
+  const key = encoder.encode(apiKey);
   try {
     const length = DOMAIN.length + 1 + 4 + origin.length + 4 + key.length;
     if (
@@ -62,35 +92,44 @@ function encodePreimage(credential: CredentialV1): Uint8Array {
     preimage.set(key, offset);
     return preimage;
   } finally {
-    origin.fill(0);
-    key.fill(0);
+    wipe(origin);
+    wipe(key);
   }
 }
 
-function displayDigest(digest: Uint8Array): CredentialKeyFingerprint {
+function hexadecimalDigest(digest: Uint8Array, bytes: number): string {
   let hexadecimal = "";
-  for (let index = 0; index < DISPLAY_DIGEST_BYTES; index += 1) {
+  for (let index = 0; index < bytes; index += 1) {
     const byte = digest[index];
     if (byte === undefined) {
       return failure();
     }
     hexadecimal += byte.toString(16).padStart(2, "0");
   }
+  return hexadecimal;
+}
+
+function displayDigest(digest: Uint8Array): CredentialKeyFingerprint {
+  const hexadecimal = hexadecimalDigest(digest, DISPLAY_DIGEST_BYTES);
   return `${DISPLAY_PREFIX}${hexadecimal}` as CredentialKeyFingerprint;
 }
 
-export function fingerprintCredentialKey(
-  credential: CredentialV1,
+function fullDigest(digest: Uint8Array): CredentialKeyIdentity {
+  return hexadecimalDigest(
+    digest,
+    SHA256_DIGEST_BYTES,
+  ) as CredentialKeyIdentity;
+}
+
+function hashCredentialKey(
+  apiOrigin: ApiOrigin,
+  apiKey: ApiKey,
   hash: HashAdapter,
-): CredentialKeyFingerprint {
+): IdentifiedCredentialKey {
   let digest: Uint8Array | undefined;
   let preimage: Uint8Array | undefined;
   try {
-    const validated = validateCredentialDocument(
-      credential,
-      "explicit-loopback-development",
-    );
-    preimage = encodePreimage(validated);
+    preimage = encodePreimage(apiOrigin, apiKey);
     const adapterDigest = hash.sha256(preimage);
     if (
       !(adapterDigest instanceof Uint8Array) ||
@@ -98,12 +137,53 @@ export function fingerprintCredentialKey(
     ) {
       return failure();
     }
-    digest = Uint8Array.prototype.slice.call(adapterDigest) as Uint8Array;
-    return displayDigest(digest);
+    digest = new Uint8Array(SHA256_DIGEST_BYTES);
+    setBytes.call(digest, adapterDigest);
+    return Object.freeze({
+      identity: fullDigest(digest),
+      fingerprint: displayDigest(digest),
+    });
   } catch {
     return failure();
   } finally {
-    digest?.fill(0);
-    preimage?.fill(0);
+    wipe(digest);
+    wipe(preimage);
+  }
+}
+
+export function identifyCredentialKey(
+  apiOrigin: unknown,
+  apiKey: unknown,
+  originPolicy: ApiOriginPolicy,
+  hash: HashAdapter,
+): IdentifiedCredentialKey {
+  if (
+    originPolicy !== "https-only" &&
+    originPolicy !== "explicit-loopback-development"
+  ) {
+    throw new CredentialError("invalid_api_origin");
+  }
+  const normalizedOrigin = normalizeApiOrigin(apiOrigin, originPolicy);
+  const parsedApiKey = parseApiKey(apiKey);
+  return hashCredentialKey(normalizedOrigin, parsedApiKey, hash);
+}
+
+export function fingerprintCredentialKey(
+  credential: CredentialV1,
+  hash: HashAdapter,
+): CredentialKeyFingerprint {
+  try {
+    const validated = validateCredentialDocument(
+      credential,
+      "explicit-loopback-development",
+    );
+    return identifyCredentialKey(
+      validated.api_origin,
+      validated.api_key,
+      "explicit-loopback-development",
+      hash,
+    ).fingerprint;
+  } catch {
+    return failure();
   }
 }

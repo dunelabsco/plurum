@@ -18,6 +18,14 @@ const allowedExternalImports = new Map([
     new Map([["node:crypto", ["createHash"]]]),
   ],
   [
+    "src/adapters/node/network.ts",
+    new Map([["node:timers", ["clearTimeout", "setTimeout"]]]),
+  ],
+  [
+    "src/adapters/node/credential-environment.ts",
+    new Map([["node:process", ["default:process"]]]),
+  ],
+  [
     "src/adapters/node/platform.ts",
     new Map([
       ["node:path", ["posix", "win32"]],
@@ -29,6 +37,7 @@ const allowedExternalImports = new Map([
 const allowedProcessMembers = new Map([
   ["src/runtime.ts", new Set(["stdin", "stdout", "stderr"])],
   ["src/index.ts", new Set(["argv", "exitCode", "stderr"])],
+  ["src/adapters/node/credential-environment.ts", new Set(["env"])],
   [
     "src/adapters/node/platform.ts",
     new Set([
@@ -84,7 +93,13 @@ function isUnwiredNativeBoundaryModule(resolvedModule) {
   );
 }
 
-function isAllowedNativeReflectReference(node, parent) {
+function isAllowedBoundaryReflectReference(relativePath, node, parent) {
+  const allowedMembers =
+    relativePath === "src/adapters/node/native-credential-store.ts"
+      ? ["apply", "ownKeys"]
+      : relativePath === "src/data/uint8-array.ts"
+        ? ["apply"]
+        : [];
   return (
     node.name === "Reflect" &&
     parent?.type === "MemberExpression" &&
@@ -92,7 +107,44 @@ function isAllowedNativeReflectReference(node, parent) {
     parent.computed === false &&
     parent.optional === false &&
     parent.property.type === "Identifier" &&
-    ["apply", "ownKeys"].includes(parent.property.name)
+    allowedMembers.includes(parent.property.name)
+  );
+}
+
+function isAllowedNetworkFetchReference(
+  relativePath,
+  node,
+  parent,
+  key,
+  ancestors,
+) {
+  const call = ancestors.at(-1);
+  const declarator = ancestors.at(-2);
+  const declaration = ancestors.at(-3);
+  const exported = ancestors.at(-4);
+  const program = ancestors.at(-5);
+  return (
+    relativePath === "src/adapters/node/network.ts" &&
+    node.name === "fetch" &&
+    key === "arguments" &&
+    call === parent &&
+    parent?.type === "CallExpression" &&
+    parent.optional === false &&
+    parent.arguments.length === 1 &&
+    parent.arguments[0] === node &&
+    parent.callee.type === "Identifier" &&
+    parent.callee.name === "createNodeNetwork" &&
+    declarator?.type === "VariableDeclarator" &&
+    declarator.id.type === "Identifier" &&
+    declarator.id.name === "nodeNetwork" &&
+    declarator.init === parent &&
+    declaration?.type === "VariableDeclaration" &&
+    declaration.kind === "const" &&
+    declaration.declarations.length === 1 &&
+    declaration.declarations[0] === declarator &&
+    exported?.type === "ExportNamedDeclaration" &&
+    exported.declaration === declaration &&
+    program?.type === "Program"
   );
 }
 
@@ -368,7 +420,7 @@ function scanText(relativePath, text) {
     }
   }
 
-  function visit(node, parent, key) {
+  function visit(node, parent, key, ancestors) {
     if (node.type === "ImportDeclaration") {
       validateModule(node.source, node.source.value, node);
       if (
@@ -501,8 +553,11 @@ function scanText(relativePath, text) {
           "setPrototypeOf",
         ].includes(propertyName) &&
         !(
-          relativePath ===
-            "src/adapters/node/native-credential-store.ts" &&
+          [
+            "src/adapters/node/native-credential-store.ts",
+            "src/data/uint8-array.ts",
+            "src/system/credential-environment.ts",
+          ].includes(relativePath) &&
           ["getPrototypeOf", "getOwnPropertyDescriptor"].includes(
             propertyName,
           ) &&
@@ -527,9 +582,15 @@ function scanText(relativePath, text) {
         );
       }
       if (
-        relativePath === "src/adapters/node/native-credential-store.ts" &&
+        [
+          "src/adapters/node/native-credential-store.ts",
+          "src/data/uint8-array.ts",
+        ].includes(relativePath) &&
         objectName === "Reflect" &&
-        ["apply", "ownKeys"].includes(propertyName) &&
+        (relativePath === "src/adapters/node/native-credential-store.ts"
+          ? ["apply", "ownKeys"]
+          : ["apply"]
+        ).includes(propertyName) &&
         !(
           node.computed === false &&
           node.optional === false &&
@@ -541,7 +602,7 @@ function scanText(relativePath, text) {
         report(
           node,
           "dynamic-code",
-          "Reflect.apply and Reflect.ownKeys are allowed only as direct noncomputed calls in the native credential boundary",
+          "Reflect methods are allowed only as direct noncomputed calls in approved boundaries",
         );
       }
     }
@@ -596,10 +657,20 @@ function scanText(relativePath, text) {
         }
       } else {
         const rule = reservedGlobals.get(node.name);
-        const allowedNativeReflect =
-          relativePath === "src/adapters/node/native-credential-store.ts" &&
-          isAllowedNativeReflectReference(node, parent);
-        if (rule !== undefined && !allowedNativeReflect) {
+        const allowedBoundaryReflect =
+          isAllowedBoundaryReflectReference(relativePath, node, parent);
+        const allowedNetworkFetch = isAllowedNetworkFetchReference(
+          relativePath,
+          node,
+          parent,
+          key,
+          ancestors,
+        );
+        if (
+          rule !== undefined &&
+          !allowedBoundaryReflect &&
+          !allowedNetworkFetch
+        ) {
           report(
             node,
             rule,
@@ -616,16 +687,16 @@ function scanText(relativePath, text) {
       if (Array.isArray(value)) {
         for (const child of value) {
           if (isNode(child)) {
-            visit(child, node, childKey);
+            visit(child, node, childKey, [...ancestors, node]);
           }
         }
       } else if (isNode(value)) {
-        visit(value, node, childKey);
+        visit(value, node, childKey, [...ancestors, node]);
       }
     }
   }
 
-  visit(program, undefined, undefined);
+  visit(program, undefined, undefined, []);
   return findings;
 }
 
@@ -767,6 +838,21 @@ const negativeFixtures = [
   ["src/example.ts", "process.env.SECRET;", "process-global"],
   ["src/example.ts", 'globalThis["fetch"]("http://example.test");', "global-object"],
   ["src/example.ts", 'fetch("http://example.test");', "network-global"],
+  [
+    "src/adapters/node/network.ts",
+    'fetch("https://example.test");',
+    "network-global",
+  ],
+  [
+    "src/adapters/node/network.ts",
+    "const escapedFetch = fetch;",
+    "network-global",
+  ],
+  [
+    "src/adapters/node/network.ts",
+    "function shadow(createNodeNetwork) { const nodeNetwork = createNodeNetwork(fetch); return nodeNetwork; }",
+    "network-global",
+  ],
   ["src/example.ts", "Date.now();", "clock-global"],
   ["src/example.ts", "new Date();", "clock-global"],
   ["src/example.ts", "Math.random();", "random-global"],
@@ -804,6 +890,46 @@ const negativeFixtures = [
     "dynamic-code",
   ],
   [
+    "src/data/uint8-array.ts",
+    "Reflect['apply'](() => 1, undefined, []);",
+    "dynamic-code",
+  ],
+  [
+    "src/data/uint8-array.ts",
+    "const apply = Reflect.apply; apply(() => 1, undefined, []);",
+    "dynamic-code",
+  ],
+  [
+    "src/data/uint8-array.ts",
+    "Object['getPrototypeOf']({});",
+    "dynamic-code",
+  ],
+  [
+    "src/data/uint8-array.ts",
+    "const getDescriptor = Object.getOwnPropertyDescriptor; getDescriptor({}, 'key');",
+    "dynamic-code",
+  ],
+  [
+    "src/system/credential-environment.ts",
+    "Object['getPrototypeOf']({});",
+    "dynamic-code",
+  ],
+  [
+    "src/system/credential-environment.ts",
+    "const getPrototype = Object.getPrototypeOf; getPrototype({});",
+    "dynamic-code",
+  ],
+  [
+    "src/system/credential-environment.ts",
+    "Object['getOwnPropertyDescriptor']({}, 'key');",
+    "dynamic-code",
+  ],
+  [
+    "src/system/credential-environment.ts",
+    "const getDescriptor = Object.getOwnPropertyDescriptor; getDescriptor({}, 'key');",
+    "dynamic-code",
+  ],
+  [
     "src/example.ts",
     "Object.getPrototypeOf(() => {}).call(null, 'return process')();",
     "dynamic-code",
@@ -822,6 +948,10 @@ const positiveFixtures = [
   [
     "src/adapters/node/hash.ts",
     'import { createHash } from "node:crypto"; createHash("sha256");',
+  ],
+  [
+    "src/adapters/node/network.ts",
+    'import { clearTimeout as cancelTimer, setTimeout as scheduleTimer } from "node:timers"; export const nodeNetwork = createNodeNetwork(fetch); cancelTimer(scheduleTimer(() => {}, 1));',
   ],
   [
     "src/adapters/node/platform.ts",
@@ -844,6 +974,14 @@ const positiveFixtures = [
   [
     "src/adapters/node/native-credential-store.ts",
     'Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), "byteLength");',
+  ],
+  [
+    "src/system/credential-environment.ts",
+    'Object.getOwnPropertyDescriptor({}, "key"); Object.getPrototypeOf({});',
+  ],
+  [
+    "src/data/uint8-array.ts",
+    'const getter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), "byteLength")?.get; Reflect.apply(getter, new Uint8Array(), []);',
   ],
 ];
 

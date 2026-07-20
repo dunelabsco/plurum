@@ -380,6 +380,17 @@ describe("credential schema", () => {
     pendingInput({ agent_name: "Codex\u202ereversed" }),
     pendingInput({ agent_name: "Codex\u2066isolated" }),
     pendingInput({ agent_name: "😀".repeat(256) }),
+    pendingInput({ agent_name: API_KEY }),
+    pendingInput({
+      agent_name: [...API_KEY].join("\u200b"),
+    }),
+    pendingInput({
+      api_key: "plrm_live_reflected_key_1234",
+      username: "plrm_live_reflected_key_1234",
+    }),
+    pendingInput({
+      api_origin: "https://plrm_live_reflected_key_1234.example",
+    }),
     pendingInput({ username: "UPPERCASE" }),
     pendingInput({ username: "ab" }),
     pendingInput({ username: "a".repeat(51) }),

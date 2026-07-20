@@ -87,6 +87,15 @@ describe("deny-by-default production ports", () => {
     }
   });
 
+  it("denies the credential environment unless a dedicated adapter is injected", () => {
+    expect(() => createTestSystem().credentialEnvironment.read()).toThrowError(
+      expect.objectContaining({
+        code: "capability_unavailable",
+        capability: "credential-environment",
+      }),
+    );
+  });
+
   it("removes mutation and process capabilities from read-only command scopes", () => {
     const system = createTestSystem();
     const planning = planningScope(system);
@@ -109,12 +118,187 @@ describe("deny-by-default production ports", () => {
     expect("hash" in status).toBe(true);
     expect("hash" in doctor).toBe(true);
     expect("network" in planning).toBe(false);
+    expect("credentialEnvironment" in planning).toBe(false);
     expect("network" in status).toBe(true);
     expect("network" in doctor).toBe(true);
+    expect("credentialEnvironment" in status).toBe(true);
+    expect("credentialEnvironment" in doctor).toBe(true);
+    expect("credentialEnvironment" in setup).toBe(true);
     expect("processes" in setup).toBe(true);
     expect("random" in setup).toBe(true);
     expect("hash" in setup).toBe(true);
     expect("rename" in setup.filesystem).toBe(true);
+  });
+
+  it("copies only the dedicated credential environment snapshot", () => {
+    const base = createTestSystem();
+    const original = {
+      PLURUM_API_KEY: CANARY,
+      PLURUM_API_URL: "https://api.plurum.ai",
+      HERMES_HOME: "/isolated/hermes",
+      OPENCLAW_HOME: "/isolated/openclaw",
+    };
+    const system: SystemCapabilities = Object.freeze({
+      ...base,
+      credentialEnvironment: Object.freeze({
+        read: () => original,
+      }),
+    });
+
+    for (const scoped of [
+      setupScope(system),
+      statusScope(system),
+      doctorScope(system),
+    ]) {
+      const snapshot = scoped.credentialEnvironment.read();
+      expect(snapshot).toEqual({
+        PLURUM_API_URL: "https://api.plurum.ai",
+        HERMES_HOME: "/isolated/hermes",
+        OPENCLAW_HOME: "/isolated/openclaw",
+      });
+      expect(snapshot.PLURUM_API_KEY).toBe(CANARY);
+      expect(Object.keys(snapshot)).not.toContain("PLURUM_API_KEY");
+      expect(Object.isFrozen(snapshot)).toBe(true);
+      expect(snapshot).not.toBe(original);
+    }
+  });
+
+  it("replaces hostile credential environment failures with a fixed policy error", () => {
+    const base = createTestSystem();
+    const system: SystemCapabilities = Object.freeze({
+      ...base,
+      credentialEnvironment: Object.freeze({
+        read() {
+          throw new Error(CANARY);
+        },
+      }),
+    });
+
+    for (const scoped of [
+      setupScope(system),
+      statusScope(system),
+      doctorScope(system),
+    ]) {
+      try {
+        scoped.credentialEnvironment.read();
+        throw new Error("hostile credential environment unexpectedly succeeded");
+      } catch (error) {
+        expect(error).toBeInstanceOf(CapabilityPolicyError);
+        expect(String(error)).not.toContain(CANARY);
+      }
+    }
+  });
+
+  it.each([
+    Promise.resolve({}),
+    new Date(0),
+    [],
+    Object.create({ PLURUM_API_KEY: CANARY }),
+    { PLURUM_API_KEY: CANARY, unrelated: CANARY },
+    Object.defineProperty({}, "PLURUM_API_KEY", {
+      get() {
+        throw new Error(CANARY);
+      },
+    }),
+  ])("rejects a malformed credential environment snapshot", (snapshot) => {
+    const base = createTestSystem();
+    const system: SystemCapabilities = Object.freeze({
+      ...base,
+      credentialEnvironment: Object.freeze({
+        read: () => snapshot,
+      }),
+    });
+
+    expect(() => statusScope(system).credentialEnvironment.read()).toThrowError(
+      expect.objectContaining({ code: "capability_policy_rejected" }),
+    );
+  });
+
+  it("refuses to propagate the Plurum key to child processes", async () => {
+    const base = createTestSystem();
+    let delegated = false;
+    const system: SystemCapabilities = Object.freeze({
+      ...base,
+      processes: Object.freeze({
+        async run() {
+          delegated = true;
+          return {
+            exitCode: 0,
+            stdout: new Uint8Array(),
+            stderr: new Uint8Array(),
+          };
+        },
+      }),
+    });
+
+    for (const name of [
+      "PLURUM_API_KEY",
+      "plurum_api_key",
+      "PlUrUm_ApI_kEy",
+    ]) {
+      await expect(
+        setupScope(system).processes.run({
+          executable: "/isolated/bin/host",
+          args: Object.freeze([]),
+          cwd: "/isolated/neutral",
+          env: Object.freeze({ [name]: CANARY }),
+          timeoutMs: 1_000,
+          maxOutputBytes: 1_024,
+        }),
+      ).rejects.toBeInstanceOf(CapabilityPolicyError);
+    }
+    expect(delegated).toBe(false);
+  });
+
+  it("snapshots a hostile child environment once before checking it", async () => {
+    const base = createTestSystem();
+    let enumerations = 0;
+    let delegatedEnvironment: Readonly<Record<string, string>> | undefined;
+    const changingEnvironment = new Proxy(
+      {},
+      {
+        ownKeys() {
+          enumerations += 1;
+          return enumerations === 1 ? [] : ["PLURUM_API_KEY"];
+        },
+        getOwnPropertyDescriptor() {
+          return {
+            configurable: true,
+            enumerable: true,
+            value: CANARY,
+            writable: true,
+          };
+        },
+      },
+    ) as Readonly<Record<string, string>>;
+    const system: SystemCapabilities = Object.freeze({
+      ...base,
+      processes: Object.freeze({
+        async run(
+          request: Parameters<SystemCapabilities["processes"]["run"]>[0],
+        ) {
+          delegatedEnvironment = request.env;
+          return {
+            exitCode: 0,
+            stdout: new Uint8Array(),
+            stderr: new Uint8Array(),
+          };
+        },
+      }),
+    });
+
+    await setupScope(system).processes.run({
+      executable: "/isolated/bin/host",
+      args: Object.freeze([]),
+      cwd: "/isolated/neutral",
+      env: changingEnvironment,
+      timeoutMs: 1_000,
+      maxOutputBytes: 1_024,
+    });
+
+    expect(enumerations).toBe(1);
+    expect(delegatedEnvironment).toEqual({});
+    expect("PLURUM_API_KEY" in (delegatedEnvironment ?? {})).toBe(false);
   });
 
   it("rejects POST or body-bearing requests from read-only commands", async () => {
@@ -170,6 +354,55 @@ describe("deny-by-default production ports", () => {
     expect(delegatedRequest).not.toBe(request);
     expect(Object.isFrozen(delegatedRequest)).toBe(true);
     expect(Object.isFrozen(delegatedRequest?.headers)).toBe(true);
+  });
+
+  it("snapshots hostile read-only method and body state exactly once", async () => {
+    const base = createTestSystem();
+    let methodReads = 0;
+    let bodyChecks = 0;
+    let delegatedRequest:
+      | Parameters<SystemCapabilities["network"]["request"]>[0]
+      | undefined;
+    const system: SystemCapabilities = Object.freeze({
+      ...base,
+      network: Object.freeze({
+        async request(
+          request: Parameters<SystemCapabilities["network"]["request"]>[0],
+        ) {
+          delegatedRequest = request;
+          return {
+            status: 204,
+            headers: Object.freeze({}),
+            body: new Uint8Array(),
+          };
+        },
+      }),
+    });
+    const target = networkRequest("https://example.invalid/health");
+    const changing = new Proxy(target, {
+      get(value, property) {
+        if (property === "method") {
+          methodReads += 1;
+          return methodReads === 1 ? "GET" : "POST";
+        }
+        return value[property as keyof typeof value];
+      },
+      has(value, property) {
+        if (property === "body") {
+          bodyChecks += 1;
+          return bodyChecks > 1;
+        }
+        return property in value;
+      },
+    });
+
+    await expect(
+      statusScope(system).network.request(changing),
+    ).resolves.toMatchObject({ status: 204 });
+    expect(methodReads).toBe(1);
+    expect(bodyChecks).toBe(1);
+    expect(delegatedRequest?.method).toBe("GET");
+    expect("body" in (delegatedRequest ?? {})).toBe(false);
   });
 });
 

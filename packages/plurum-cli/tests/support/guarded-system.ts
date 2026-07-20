@@ -1,4 +1,5 @@
 import type {
+  CredentialEnvironmentAdapter,
   FileSystemAdapter,
   HashAdapter,
   NetworkAdapter,
@@ -8,6 +9,9 @@ import type {
   SystemCapabilities,
 } from "../../src/system/contracts.js";
 import type { TestAccessBoundary } from "./test-boundary.js";
+import {
+  copyCredentialEnvironmentSnapshot,
+} from "../../src/system/credential-environment.js";
 
 function copyNetworkRequest(request: NetworkRequest): NetworkRequest {
   return Object.freeze({
@@ -120,6 +124,16 @@ function guardHash(delegate: HashAdapter): HashAdapter {
   });
 }
 
+function guardCredentialEnvironment(
+  delegate: CredentialEnvironmentAdapter,
+): CredentialEnvironmentAdapter {
+  return Object.freeze<CredentialEnvironmentAdapter>({
+    read() {
+      return copyCredentialEnvironmentSnapshot(delegate.read());
+    },
+  });
+}
+
 export function createGuardedFakeSystem(
   boundary: TestAccessBoundary,
   delegate: SystemCapabilities,
@@ -128,6 +142,9 @@ export function createGuardedFakeSystem(
     filesystem: guardFileSystem(boundary, delegate.filesystem),
     network: guardNetwork(boundary, delegate.network),
     processes: guardProcesses(boundary, delegate.processes),
+    credentialEnvironment: guardCredentialEnvironment(
+      delegate.credentialEnvironment,
+    ),
     clock: delegate.clock,
     random: delegate.random,
     hash: guardHash(delegate.hash),

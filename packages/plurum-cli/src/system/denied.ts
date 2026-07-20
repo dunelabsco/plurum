@@ -1,5 +1,7 @@
 import type {
   ClockAdapter,
+  CredentialEnvironmentAdapter,
+  CredentialEnvironmentSnapshot,
   DirectoryHandleAdapter,
   FileSystemAdapter,
   HashAdapter,
@@ -62,16 +64,26 @@ export const deniedNetwork: NetworkAdapter = Object.freeze<NetworkAdapter>({
   },
 });
 
+export const deniedCredentialEnvironment: CredentialEnvironmentAdapter =
+  Object.freeze<CredentialEnvironmentAdapter>({
+    read(): CredentialEnvironmentSnapshot {
+      return unavailable("credential-environment", "read");
+    },
+  });
+
 export function createDenyByDefaultSystem(
   clock: ClockAdapter,
   random: RandomAdapter,
   hash: HashAdapter,
   platform: PlatformAdapter,
+  credentialEnvironment: CredentialEnvironmentAdapter =
+    deniedCredentialEnvironment,
 ): SystemCapabilities {
   return Object.freeze({
     filesystem: deniedFileSystem,
     processes: deniedProcesses,
     network: deniedNetwork,
+    credentialEnvironment,
     clock,
     random,
     hash,

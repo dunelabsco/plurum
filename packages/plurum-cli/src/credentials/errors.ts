@@ -5,6 +5,7 @@ export type CredentialErrorCode =
   | "credential_store_conflict"
   | "credential_recovery_required"
   | "credential_store_unavailable"
+  | "invalid_api_key"
   | "invalid_api_origin"
   | "invalid_credential_document"
   | "invalid_credential_origin"
@@ -27,6 +28,7 @@ const SAFE_MESSAGES: Readonly<Record<CredentialErrorCode, string>> = Object.free
     "The Plurum credential store requires safe recovery.",
   credential_store_unavailable:
     "The Plurum credential store could not be accessed safely.",
+  invalid_api_key: "The Plurum API key is invalid.",
   invalid_api_origin: "The Plurum API origin is invalid.",
   invalid_credential_document: "The Plurum credential file is invalid.",
   invalid_credential_origin:
