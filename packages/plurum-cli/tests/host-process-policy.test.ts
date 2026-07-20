@@ -131,6 +131,19 @@ describe("safe host process policy", () => {
     expect(Object.isFrozen(request.env)).toBe(true);
   });
 
+  it("allows the documented marketplace download timeout ceiling", () => {
+    const request = buildSafeHostProcessRequest(
+      directExecutable(),
+      ["plugin", "marketplace", "add", "dunelabsco/plurum", "--scope", "user"],
+      { ...policy, timeoutMs: 120_000 },
+      linuxPaths,
+      "linux",
+    );
+
+    expect(request.timeoutMs).toBe(120_000);
+    expect(request.shell).toBe(false);
+  });
+
   it("turns an approved Windows shim into node plus argument-array execution", () => {
     const executable = windowsShimExecutable();
     const request = buildSafeHostProcessRequest(
@@ -244,8 +257,28 @@ describe("safe host process policy", () => {
       },
     },
     {
+      label: "invalid Claude HTTPS preference",
+      value: {
+        ...policy,
+        environment: {
+          ...policy.environment,
+          CLAUDE_CODE_PLUGIN_PREFER_HTTPS: "true",
+        },
+      },
+    },
+    {
+      label: "invalid Claude git timeout",
+      value: {
+        ...policy,
+        environment: {
+          ...policy.environment,
+          CLAUDE_CODE_PLUGIN_GIT_TIMEOUT_MS: "120001",
+        },
+      },
+    },
+    {
       label: "oversized timeout",
-      value: { ...policy, timeoutMs: 30_001 },
+      value: { ...policy, timeoutMs: 120_001 },
     },
     {
       label: "oversized output",

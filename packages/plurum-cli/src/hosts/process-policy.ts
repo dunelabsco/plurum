@@ -19,6 +19,8 @@ import type {
 
 const ALLOWED_ENVIRONMENT_KEYS = new Set([
   "APPDATA",
+  "CLAUDE_CODE_PLUGIN_GIT_TIMEOUT_MS",
+  "CLAUDE_CODE_PLUGIN_PREFER_HTTPS",
   "CLAUDE_CONFIG_DIR",
   "CODEX_HOME",
   "ComSpec",
@@ -63,6 +65,7 @@ const WINDOWS_EXECUTABLE_EXTENSIONS = new Set([
 ]);
 const MAX_PATH_ENTRIES = 256;
 const MAX_PATHEXT_ENTRIES = 16;
+export const MAX_HOST_PROCESS_TIMEOUT_MS = 120_000;
 const WINDOWS_EXTENSION = /^\.[A-Za-z0-9]{1,16}$/u;
 const REDACTION = new TextEncoder().encode("[REDACTED]");
 
@@ -274,6 +277,24 @@ function safeEnvironment(
         return invalidRequest();
       }
       copied[name] = safeWindowsPathExt(value);
+    } else if (name === "CLAUDE_CODE_PLUGIN_PREFER_HTTPS") {
+      if (value !== "1") {
+        return invalidRequest();
+      }
+      copied[name] = value;
+    } else if (name === "CLAUDE_CODE_PLUGIN_GIT_TIMEOUT_MS") {
+      if (!/^[1-9][0-9]{3,5}$/u.test(value)) {
+        return invalidRequest();
+      }
+      const timeout = Number(value);
+      if (
+        !Number.isSafeInteger(timeout) ||
+        timeout < 1_000 ||
+        timeout > MAX_HOST_PROCESS_TIMEOUT_MS
+      ) {
+        return invalidRequest();
+      }
+      copied[name] = value;
     } else if (PATH_ENVIRONMENT_KEYS.has(name)) {
       copied[name] = safeEnvironmentPath(value, excluded, paths, os);
     } else if (
@@ -341,7 +362,7 @@ export function buildSafeHostProcessRequest(
       (os !== "darwin" && os !== "linux" && os !== "win32") ||
       !Number.isSafeInteger(policy.timeoutMs) ||
       policy.timeoutMs < 100 ||
-      policy.timeoutMs > 30_000 ||
+      policy.timeoutMs > MAX_HOST_PROCESS_TIMEOUT_MS ||
       !Number.isSafeInteger(policy.maxOutputBytes) ||
       policy.maxOutputBytes < 1 ||
       policy.maxOutputBytes > 1024 * 1024

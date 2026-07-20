@@ -556,11 +556,16 @@ function scanText(relativePath, text) {
           (([
               "src/adapters/node/native-credential-store.ts",
               "src/data/uint8-array.ts",
+              "src/hosts/claude-code/adapter.ts",
+              "src/hosts/claude-code/output.ts",
               "src/system/credential-environment.ts",
             ].includes(relativePath) &&
             ["getPrototypeOf", "getOwnPropertyDescriptor"].includes(
               propertyName,
             )) ||
+            (relativePath ===
+              "src/hosts/claude-code/headers-helper.ts" &&
+              propertyName === "getOwnPropertyDescriptor") ||
             (relativePath ===
               "src/system/host-mutation-boundary.ts" &&
               propertyName === "getOwnPropertyDescriptor")) &&
@@ -933,6 +938,11 @@ const negativeFixtures = [
     "dynamic-code",
   ],
   [
+    "src/hosts/claude-code/headers-helper.ts",
+    "Object.getPrototypeOf({});",
+    "dynamic-code",
+  ],
+  [
     "src/example.ts",
     "Object.getPrototypeOf(() => {}).call(null, 'return process')();",
     "dynamic-code",
@@ -981,6 +991,18 @@ const positiveFixtures = [
   [
     "src/system/credential-environment.ts",
     'Object.getOwnPropertyDescriptor({}, "key"); Object.getPrototypeOf({});',
+  ],
+  [
+    "src/hosts/claude-code/output.ts",
+    'Object.getOwnPropertyDescriptor({}, "key"); Object.getPrototypeOf({});',
+  ],
+  [
+    "src/hosts/claude-code/adapter.ts",
+    'Object.getOwnPropertyDescriptor({}, "key"); Object.getPrototypeOf({});',
+  ],
+  [
+    "src/hosts/claude-code/headers-helper.ts",
+    'Object.getOwnPropertyDescriptor({}, "key");',
   ],
   [
     "src/data/uint8-array.ts",
