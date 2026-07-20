@@ -1,5 +1,10 @@
 import type {
+  HostActionKind,
+  HostRollbackRecipe,
+} from "../contracts.js";
+import type {
   ClaudeCodeCommand,
+  ClaudeCodeMutationCommand,
 } from "./contracts.js";
 
 export interface ClaudeCodeCommandSpecification {
@@ -137,4 +142,35 @@ export function claudeCodeCommandSpecification(
   command: ClaudeCodeCommand,
 ): ClaudeCodeCommandSpecification {
   return SPECIFICATIONS[command];
+}
+
+export function claudeCodeApplyCommand(
+  action: HostActionKind,
+): ClaudeCodeMutationCommand | null {
+  switch (action) {
+    case "add-marketplace":
+      return "add-marketplace";
+    case "install-plugin":
+      return "install-plugin";
+    case "enable-plugin":
+      return "enable-plugin";
+    case "update-plugin":
+      // No exact historical-version restore exists, so this never auto-runs.
+      return null;
+  }
+}
+
+export function claudeCodeRollbackCommand(
+  rollback: HostRollbackRecipe["kind"],
+): ClaudeCodeMutationCommand | null {
+  switch (rollback) {
+    case "remove-cli-created-marketplace":
+      return "remove-marketplace";
+    case "remove-cli-created-plugin":
+      return "uninstall-plugin";
+    case "restore-plugin-disabled":
+      return "disable-plugin";
+    case "restore-plugin-version":
+      return null;
+  }
 }

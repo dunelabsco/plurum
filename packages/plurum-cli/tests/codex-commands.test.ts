@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  codexApplyCommand,
   codexCommandSpecification,
+  codexRollbackCommand,
 } from "../src/hosts/codex/commands.js";
 import {
   CODEX_MUTATION_COMMANDS,
@@ -52,6 +54,39 @@ describe("Codex fixed command contract", () => {
         "plurum@plurum",
         "--json",
       ],
+    });
+  });
+
+  it("uses one mapping for adapter execution and setup previews", () => {
+    expect({
+      addMarketplace: codexApplyCommand("add-marketplace"),
+      installPlugin: codexApplyCommand("install-plugin"),
+      updatePlugin: codexApplyCommand("update-plugin"),
+      enablePlugin: codexApplyCommand("enable-plugin"),
+    }).toEqual({
+      addMarketplace: "add-marketplace",
+      installPlugin: "install-plugin",
+      updatePlugin: null,
+      enablePlugin: null,
+    });
+    expect({
+      removeMarketplace: codexRollbackCommand(
+        "remove-cli-created-marketplace",
+      ),
+      removePlugin: codexRollbackCommand(
+        "remove-cli-created-plugin",
+      ),
+      restoreVersion: codexRollbackCommand(
+        "restore-plugin-version",
+      ),
+      restoreDisabled: codexRollbackCommand(
+        "restore-plugin-disabled",
+      ),
+    }).toEqual({
+      removeMarketplace: "remove-marketplace",
+      removePlugin: "uninstall-plugin",
+      restoreVersion: null,
+      restoreDisabled: null,
     });
   });
 

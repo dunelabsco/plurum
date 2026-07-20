@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  claudeCodeApplyCommand,
   claudeCodeCommandSpecification,
+  claudeCodeRollbackCommand,
 } from "../src/hosts/claude-code/commands.js";
 import {
   CLAUDE_CODE_MUTATION_COMMANDS,
@@ -88,6 +90,39 @@ describe("Claude Code fixed command contract", () => {
         "--scope",
         "user",
       ],
+    });
+  });
+
+  it("uses one mapping for adapter execution and setup previews", () => {
+    expect({
+      addMarketplace: claudeCodeApplyCommand("add-marketplace"),
+      installPlugin: claudeCodeApplyCommand("install-plugin"),
+      updatePlugin: claudeCodeApplyCommand("update-plugin"),
+      enablePlugin: claudeCodeApplyCommand("enable-plugin"),
+    }).toEqual({
+      addMarketplace: "add-marketplace",
+      installPlugin: "install-plugin",
+      updatePlugin: null,
+      enablePlugin: "enable-plugin",
+    });
+    expect({
+      removeMarketplace: claudeCodeRollbackCommand(
+        "remove-cli-created-marketplace",
+      ),
+      removePlugin: claudeCodeRollbackCommand(
+        "remove-cli-created-plugin",
+      ),
+      restoreVersion: claudeCodeRollbackCommand(
+        "restore-plugin-version",
+      ),
+      restoreDisabled: claudeCodeRollbackCommand(
+        "restore-plugin-disabled",
+      ),
+    }).toEqual({
+      removeMarketplace: "remove-marketplace",
+      removePlugin: "uninstall-plugin",
+      restoreVersion: null,
+      restoreDisabled: "disable-plugin",
     });
   });
 

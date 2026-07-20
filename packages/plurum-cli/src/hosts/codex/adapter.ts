@@ -29,7 +29,11 @@ import {
   snapshotHostApplyRequest,
   snapshotHostRollbackRequest,
 } from "../../system/host-mutation-boundary.js";
-import { codexCommandSpecification } from "./commands.js";
+import {
+  codexApplyCommand,
+  codexCommandSpecification,
+  codexRollbackCommand,
+} from "./commands.js";
 import {
   CODEX_DESIRED_CONFIGURATION,
   CODEX_MARKETPLACE_NAME,
@@ -593,32 +597,6 @@ function unavailable(
   });
 }
 
-function mutationCommand(request: HostApplyRequest): CodexMutationCommand | null {
-  switch (request.action.kind) {
-    case "add-marketplace":
-      return "add-marketplace";
-    case "install-plugin":
-      return "install-plugin";
-    case "enable-plugin":
-    case "update-plugin":
-      return null;
-  }
-}
-
-function rollbackCommand(
-  request: HostRollbackRequest,
-): CodexMutationCommand | null {
-  switch (request.action.rollback.kind) {
-    case "remove-cli-created-marketplace":
-      return "remove-marketplace";
-    case "remove-cli-created-plugin":
-      return "uninstall-plugin";
-    case "restore-plugin-disabled":
-    case "restore-plugin-version":
-      return null;
-  }
-}
-
 export function createCodexAdapter(
   dependencies: CodexAdapterDependencies,
   platform: PlatformAdapter,
@@ -751,7 +729,7 @@ export function createCodexAdapter(
       } catch {
         return Object.freeze({ status: "failed" });
       }
-      const command = mutationCommand(request);
+      const command = codexApplyCommand(request.action.kind);
       if (command === null) {
         return Object.freeze({ status: "failed" });
       }
@@ -814,7 +792,9 @@ export function createCodexAdapter(
       } catch {
         return Object.freeze({ status: "failed" });
       }
-      const command = rollbackCommand(request);
+      const command = codexRollbackCommand(
+        request.action.rollback.kind,
+      );
       if (command === null) {
         return Object.freeze({ status: "failed" });
       }

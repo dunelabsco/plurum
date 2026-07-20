@@ -1,4 +1,8 @@
 import type {
+  HostActionKind,
+  HostRollbackRecipe,
+} from "../contracts.js";
+import type {
   CodexMutationCommand,
 } from "./contracts.js";
 
@@ -63,4 +67,32 @@ export function codexCommandSpecification(
   command: CodexMutationCommand,
 ): CodexCommandSpecification {
   return SPECIFICATIONS[command];
+}
+
+export function codexApplyCommand(
+  action: HostActionKind,
+): CodexMutationCommand | null {
+  switch (action) {
+    case "add-marketplace":
+      return "add-marketplace";
+    case "install-plugin":
+      return "install-plugin";
+    case "enable-plugin":
+    case "update-plugin":
+      return null;
+  }
+}
+
+export function codexRollbackCommand(
+  rollback: HostRollbackRecipe["kind"],
+): CodexMutationCommand | null {
+  switch (rollback) {
+    case "remove-cli-created-marketplace":
+      return "remove-marketplace";
+    case "remove-cli-created-plugin":
+      return "uninstall-plugin";
+    case "restore-plugin-disabled":
+    case "restore-plugin-version":
+      return null;
+  }
 }

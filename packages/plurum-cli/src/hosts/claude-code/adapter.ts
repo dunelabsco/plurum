@@ -38,7 +38,9 @@ import {
   snapshotHostRollbackRequest,
 } from "../../system/host-mutation-boundary.js";
 import {
+  claudeCodeApplyCommand,
   claudeCodeCommandSpecification,
+  claudeCodeRollbackCommand,
 } from "./commands.js";
 import {
   CLAUDE_CODE_DESIRED_CONFIGURATION,
@@ -699,37 +701,6 @@ function unavailable(
   });
 }
 
-function mutationCommand(
-  request: HostApplyRequest,
-): ClaudeCodeMutationCommand | null {
-  switch (request.action.kind) {
-    case "add-marketplace":
-      return "add-marketplace";
-    case "install-plugin":
-      return "install-plugin";
-    case "enable-plugin":
-      return "enable-plugin";
-    case "update-plugin":
-      // No exact historical-version restore exists, so this never auto-runs.
-      return null;
-  }
-}
-
-function rollbackCommand(
-  request: HostRollbackRequest,
-): ClaudeCodeMutationCommand | null {
-  switch (request.action.rollback.kind) {
-    case "remove-cli-created-marketplace":
-      return "remove-marketplace";
-    case "remove-cli-created-plugin":
-      return "uninstall-plugin";
-    case "restore-plugin-disabled":
-      return "disable-plugin";
-    case "restore-plugin-version":
-      return null;
-  }
-}
-
 export function createClaudeCodeAdapter(
   dependencies: ClaudeCodeAdapterDependencies,
   platform: PlatformAdapter,
@@ -908,7 +879,7 @@ export function createClaudeCodeAdapter(
       } catch {
         return Object.freeze({ status: "failed" });
       }
-      const command = mutationCommand(request);
+      const command = claudeCodeApplyCommand(request.action.kind);
       if (command === null) {
         return Object.freeze({ status: "failed" });
       }
@@ -974,7 +945,9 @@ export function createClaudeCodeAdapter(
       } catch {
         return Object.freeze({ status: "failed" });
       }
-      const command = rollbackCommand(request);
+      const command = claudeCodeRollbackCommand(
+        request.action.rollback.kind,
+      );
       if (command === null) {
         return Object.freeze({ status: "failed" });
       }

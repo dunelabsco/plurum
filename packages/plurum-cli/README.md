@@ -6,9 +6,11 @@ Code and Codex to Plurum's hosted collective-intelligence tools.
 ## Development status
 
 This package is private throughout Phase 4 and cannot be published accidentally.
-The command surface is scaffolded, but unfinished commands return an explicit
-nonzero result instead of pretending that registration or host configuration
-succeeded.
+`plurum setup --dry-run` now performs a secret-free host preflight and prints
+the exact future credential destinations and reversible host commands without
+reading credentials or changing state. Setup apply, status, and doctor remain
+unavailable and return an explicit nonzero result instead of pretending that
+registration or host configuration succeeded.
 
 The completed CLI will expose only:
 
@@ -25,18 +27,23 @@ plurum doctor
 
 Filesystem, network, process, clock, randomness, fixed cryptographic hashing,
 and platform access enter commands only through injected capabilities.
-Production filesystem, network, and process adapters remain deny-by-default
-until their implementation steps.
+Production filesystem, network, process, and host adapters remain
+deny-by-default until their implementation steps.
 The canonical credential schema, protected read port, and transactional
 write/recovery state machine are implemented as portable, injected cores. A
 native semantic bridge and platform adapters now exercise those cores in
 isolated tests. They remain deliberately unwired from commands: the package has
 no native artifact resolver or runtime import, so no command can access a real
 credential path.
-Read-only commands cannot mutate local or product state or spawn. Status and
-doctor are restricted to GET requests; any later protocol-level MCP diagnostic
-will require its own narrowly defined capability. Dry-run setup cannot read file
-contents, stdin, or authenticated network state.
+Portable read-only command code cannot mutate local or product state or use the
+generic process capability. Native host inspection remains a separate,
+narrowly bounded semantic capability that may perform only each host's fixed
+read operations. Status and doctor are restricted to GET requests; any later
+protocol-level MCP diagnostic will require its own narrowly defined capability.
+Dry-run setup resolves credential destination names and uses only semantic host
+inspection. It cannot directly read arbitrary file contents, credential
+sources, stdin, authenticated network state, randomness, or host-mutation
+capabilities.
 
 The test harness refuses unverifiable execution and unsafe identity changes,
 confines guarded fake operations to a unique private root, rejects lexical,
@@ -91,8 +98,8 @@ Windows has no documented general directory-flush primitive, so its namespace
 barrier covers completed operations and process crashes but does not claim
 physical power-loss durability.
 
-Native artifact resolution/packaging and command wiring remain activation
-blockers.
+Native artifact resolution/packaging and mutating command wiring remain
+activation blockers.
 The foundation matrix executes current macOS arm64/x64, Linux glibc arm64/x64,
 and Windows x64 runners, including the declared Rust 1.88 minimum. Older
 macOS/Linux floors, Linux musl, and Windows arm64 remain unvalidated release

@@ -37,6 +37,8 @@ const expectedFiles = [
   "dist/api/agent-validation.js",
   "dist/cli.js",
   "dist/commands/doctor.js",
+  "dist/commands/setup-output.js",
+  "dist/commands/setup-preflight.js",
   "dist/commands/setup.js",
   "dist/commands/status.js",
   "dist/commands/types.js",
@@ -300,11 +302,26 @@ try {
     !groups.includes(0);
 
   if (standardExecution) {
-    for (const arguments_ of [["setup"], ["setup", "--dry-run"]]) {
-      const setup = runInstalled(arguments_, 3);
-      assert.equal(setup.stdout, "");
-      assert.match(setup.stderr, /private development build/);
-    }
+    const setup = runInstalled(["setup"], 3);
+    assert.equal(setup.stdout, "");
+    assert.match(setup.stderr, /private development build/);
+
+    const dryRunCanary =
+      "plrm_live_PACKAGE_VERIFY_CANARY_DO_NOT_PRINT";
+    const dryRun = runInstalled(
+      ["setup", "--dry-run"],
+      1,
+      { PLURUM_API_KEY: dryRunCanary },
+    );
+    assert.match(dryRun.stdout, /^Plurum setup preflight/m);
+    assert.equal(
+      (dryRun.stdout.match(/status: inspection-failed/g) ?? []).length,
+      2,
+    );
+    assert.match(dryRun.stdout, /^readiness: unavailable$/m);
+    assert.match(dryRun.stdout, /^No changes were made\.$/m);
+    assert.doesNotMatch(dryRun.stdout, new RegExp(dryRunCanary));
+    assert.equal(dryRun.stderr, "");
 
     for (const command of ["status", "doctor"]) {
       const readOnly = runInstalled([command, "--json"], 3);

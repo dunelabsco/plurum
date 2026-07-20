@@ -373,7 +373,7 @@ describe("CLI surface", () => {
   });
 });
 
-describe("private development handlers", () => {
+describe("development handlers", () => {
   it("fails setup closed instead of pretending configuration succeeded", async () => {
     const harness = createHarness();
 
@@ -394,9 +394,12 @@ describe("private development handlers", () => {
     const harness = createHarness(stdin);
 
     expect(await runCli(["setup", "--dry-run"], harness.runtime)).toBe(
-      ExitCode.Unavailable,
+      ExitCode.OperationalFailure,
     );
     expect(readAttempted).toBe(false);
+    expect(harness.stdout()).toContain("Plurum setup preflight");
+    expect(harness.stdout()).toContain("No changes were made.");
+    expect(harness.stderr()).toBe("");
   });
 
   it.each(["status", "doctor"] as const)(
