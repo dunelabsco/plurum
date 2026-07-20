@@ -75,6 +75,7 @@ const reservedGlobals = new Map([
 ]);
 const unwiredNativeBoundaryStem =
   "src/adapters/node/native-credential-store";
+const codexCredentialBoundaryStem = "src/credentials/codex-dotenv";
 const sourceModuleExtensions = Object.freeze([
   "",
   ".js",
@@ -97,6 +98,12 @@ function isAllowedBoundaryReflectReference(relativePath, node, parent) {
   const allowedMembers =
     relativePath === "src/adapters/node/native-credential-store.ts"
       ? ["apply", "ownKeys"]
+      : [
+            "src/credentials/codex-dotenv-projection.ts",
+            "src/hosts/codex/adapter.ts",
+            "src/hosts/codex/output.ts",
+          ].includes(relativePath)
+        ? ["ownKeys"]
       : relativePath === "src/data/uint8-array.ts"
         ? ["apply"]
         : [];
@@ -407,6 +414,28 @@ function scanText(relativePath, text) {
     }
 
     if (
+      resolvedModule?.startsWith(codexCredentialBoundaryStem) &&
+      relativePath.startsWith("src/hosts/")
+    ) {
+      report(
+        node,
+        "codex-credential-boundary",
+        "semantic host adapters must not import the secret-bearing Codex credential projection",
+      );
+    }
+
+    if (
+      resolvedModule?.startsWith(codexCredentialBoundaryStem) &&
+      !relativePath.startsWith(codexCredentialBoundaryStem)
+    ) {
+      report(
+        node,
+        "codex-credential-wiring",
+        "the Codex credential family must remain isolated until native platform suites pass",
+      );
+    }
+
+    if (
       relativePath.startsWith("src/commands/") &&
       resolvedModule === "src/runtime.js" &&
       importNode !== undefined &&
@@ -555,9 +584,12 @@ function scanText(relativePath, text) {
         !(
           (([
               "src/adapters/node/native-credential-store.ts",
+              "src/credentials/codex-dotenv-projection.ts",
               "src/data/uint8-array.ts",
               "src/hosts/claude-code/adapter.ts",
               "src/hosts/claude-code/output.ts",
+              "src/hosts/codex/adapter.ts",
+              "src/hosts/codex/output.ts",
               "src/system/credential-environment.ts",
             ].includes(relativePath) &&
             ["getPrototypeOf", "getOwnPropertyDescriptor"].includes(
@@ -826,6 +858,26 @@ const negativeFixtures = [
     "native-credential-wiring",
   ],
   [
+    "src/hosts/codex/adapter.ts",
+    'import "../../credentials/codex-dotenv.js";',
+    "codex-credential-boundary",
+  ],
+  [
+    "src/adapters/node/production.ts",
+    'import "../../credentials/codex-dotenv-projection.js";',
+    "codex-credential-wiring",
+  ],
+  [
+    "src/credentials/bridge.ts",
+    'export { createCodexDotenvProjectionAdapter } from "./codex-dotenv-projection.js";',
+    "codex-credential-wiring",
+  ],
+  [
+    "src/example.ts",
+    'import "./credentials/codex-dotenv-contracts.js";',
+    "codex-credential-wiring",
+  ],
+  [
     "src/adapters/node/production.ts",
     'import "./native-credential-store.jsx";',
     "native-credential-wiring",
@@ -1003,6 +1055,18 @@ const positiveFixtures = [
   [
     "src/hosts/claude-code/headers-helper.ts",
     'Object.getOwnPropertyDescriptor({}, "key");',
+  ],
+  [
+    "src/credentials/codex-dotenv-projection.ts",
+    'Object.getOwnPropertyDescriptor({}, "key"); Object.getPrototypeOf({});',
+  ],
+  [
+    "src/hosts/codex/output.ts",
+    'Object.getOwnPropertyDescriptor({}, "key"); Object.getPrototypeOf({}); Reflect.ownKeys({});',
+  ],
+  [
+    "src/hosts/codex/adapter.ts",
+    'Object.getOwnPropertyDescriptor({}, "key"); Object.getPrototypeOf({});',
   ],
   [
     "src/data/uint8-array.ts",
