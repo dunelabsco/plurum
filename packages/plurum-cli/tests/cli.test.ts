@@ -109,7 +109,13 @@ describe("CLI surface", () => {
     });
 
     const result = await runCli(
-      ["setup", "--client", "codex", "--api-key-stdin"],
+      [
+        "setup",
+        "--client",
+        "codex",
+        "--api-key-stdin",
+        "--yes",
+      ],
       harness.runtime,
       handlers,
     );
@@ -119,9 +125,31 @@ describe("CLI surface", () => {
       client: "codex",
       apiKeyStdin: true,
       dryRun: false,
+      yes: true,
     });
     expect(harness.stdout()).toBe("");
     expect(harness.stderr()).toBe("");
+  });
+
+  it("defaults setup apply to an unapproved invocation", async () => {
+    const harness = createHarness();
+    let captured: SetupOptions | undefined;
+    const handlers = createHandlers({
+      setup({ options }) {
+        captured = options;
+        return ExitCode.Success;
+      },
+    });
+
+    expect(await runCli(["setup"], harness.runtime, handlers)).toBe(
+      ExitCode.Success,
+    );
+    expect(captured).toEqual({
+      client: "all",
+      apiKeyStdin: false,
+      dryRun: false,
+      yes: false,
+    });
   });
 
   it("parses dry-run without accepting a credential source", async () => {
@@ -141,6 +169,7 @@ describe("CLI surface", () => {
       client: "all",
       apiKeyStdin: false,
       dryRun: true,
+      yes: false,
     });
   });
 
@@ -186,21 +215,35 @@ describe("CLI surface", () => {
     expect(receivedStdin).toEqual([false, false, false]);
   });
 
-  it("provides stdin only to setup apply", async () => {
+  it("withholds raw stdin and mutation authority from setup apply preflight", async () => {
     const harness = createHarness();
     let receivedStdin = false;
     const handlers = createHandlers({
       setup({ runtime }) {
         expect(Object.isFrozen(runtime)).toBe(true);
         receivedStdin = "stdin" in runtime;
+        expect(Object.keys(runtime.system).sort()).toEqual([
+          "hosts",
+          "platform",
+        ]);
+        expect("mutation" in runtime.system.hosts).toBe(false);
+        for (const adapter of Object.values(
+          runtime.system.hosts.inspection,
+        )) {
+          expect(Object.keys(adapter)).toEqual(["inspect"]);
+          expect("apply" in adapter).toBe(false);
+          expect("rollback" in adapter).toBe(false);
+        }
         return ExitCode.Success;
       },
     });
 
-    expect(await runCli(["setup"], harness.runtime, handlers)).toBe(
+    expect(
+      await runCli(["setup", "--yes"], harness.runtime, handlers),
+    ).toBe(
       ExitCode.Success,
     );
-    expect(receivedStdin).toBe(true);
+    expect(receivedStdin).toBe(false);
   });
 
   it.each([
@@ -231,12 +274,47 @@ describe("CLI surface", () => {
     ["status", "--api-key-stdin"],
     ["doctor", "--dry-run"],
     ["setup", "--api-key-stdin", "--dry-run"],
+    ["setup", "--api-key-stdin"],
+    ["setup", "--yes", "--dry-run"],
+    ["setup", "--yes", "--yes"],
     ["setup", "--client", "codex", "--client", "all"],
   ])("rejects unsupported or duplicate options", async (...args) => {
     const harness = createHarness();
 
     expect(await runCli(args, harness.runtime, createHandlers())).toBe(ExitCode.Usage);
     expect(harness.stderr()).toContain("Invalid arguments");
+  });
+
+  it("rejects stdin credentials without --yes before reading input or invoking setup", async () => {
+    let readAttempted = false;
+    let invoked = false;
+    const stdin = new Readable({
+      read() {
+        readAttempted = true;
+        this.push(CANARY_KEY);
+        this.push(null);
+      },
+    });
+    const harness = createHarness(stdin);
+    const handlers = createHandlers({
+      setup() {
+        invoked = true;
+        return ExitCode.Success;
+      },
+    });
+
+    expect(
+      await runCli(
+        ["setup", "--api-key-stdin"],
+        harness.runtime,
+        handlers,
+      ),
+    ).toBe(ExitCode.Usage);
+    expect(readAttempted).toBe(false);
+    expect(invoked).toBe(false);
+    expect(`${harness.stdout()}${harness.stderr()}`).not.toContain(
+      CANARY_KEY,
+    );
   });
 
   it("never reflects rejected secret-bearing arguments", async () => {
@@ -305,6 +383,7 @@ describe("CLI surface", () => {
       ExitCode.Success,
     );
     expect(harness.stdout()).toContain("--api-key-stdin");
+    expect(harness.stdout()).toContain("--yes");
     expect(harness.stdout()).toContain("--dry-run");
     expect(harness.stderr()).toBe("");
   });
@@ -382,6 +461,32 @@ describe("development handlers", () => {
     expect(harness.stderr()).toContain("private development build");
     expect(harness.stderr()).not.toContain(CANARY_KEY);
   });
+
+  it.each([
+    ["setup", "--yes"],
+    ["setup", "--api-key-stdin", "--yes"],
+  ])(
+    "keeps unavailable apply from consuming stdin for %s",
+    async (...args) => {
+      let readAttempted = false;
+      const stdin = new Readable({
+        read() {
+          readAttempted = true;
+          this.push(CANARY_KEY);
+          this.push(null);
+        },
+      });
+      const harness = createHarness(stdin);
+
+      expect(await runCli(args, harness.runtime)).toBe(
+        ExitCode.Unavailable,
+      );
+      expect(readAttempted).toBe(false);
+      expect(harness.stdout()).toBe("");
+      expect(harness.stderr()).toContain("private development build");
+      expect(harness.stderr()).not.toContain(CANARY_KEY);
+    },
+  );
 
   it("does not consume stdin during setup --dry-run", async () => {
     let readAttempted = false;

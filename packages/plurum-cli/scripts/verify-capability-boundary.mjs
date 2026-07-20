@@ -584,6 +584,7 @@ function scanText(relativePath, text) {
         !(
           (([
               "src/adapters/node/native-credential-store.ts",
+              "src/commands/setup-approval.ts",
               "src/credentials/codex-dotenv-projection.ts",
               "src/data/uint8-array.ts",
               "src/hosts/claude-code/adapter.ts",
@@ -990,6 +991,36 @@ const negativeFixtures = [
     "dynamic-code",
   ],
   [
+    "src/commands/setup-approval.ts",
+    "Object['getPrototypeOf']({});",
+    "dynamic-code",
+  ],
+  [
+    "src/commands/setup-approval.ts",
+    "const getDescriptor = Object.getOwnPropertyDescriptor; getDescriptor({}, 'key');",
+    "dynamic-code",
+  ],
+  [
+    "src/commands/setup-approval.ts",
+    "const getPrototype = Object.getPrototypeOf; getPrototype({});",
+    "dynamic-code",
+  ],
+  [
+    "src/commands/setup-approval.ts",
+    "Object['getOwnPropertyDescriptor']({}, 'key');",
+    "dynamic-code",
+  ],
+  [
+    "src/commands/setup-approval.ts",
+    "Object.getOwnPropertyDescriptors({});",
+    "dynamic-code",
+  ],
+  [
+    "src/commands/setup-approval.ts",
+    "Object.setPrototypeOf({}, null);",
+    "dynamic-code",
+  ],
+  [
     "src/hosts/claude-code/headers-helper.ts",
     "Object.getPrototypeOf({});",
     "dynamic-code",
@@ -1042,6 +1073,10 @@ const positiveFixtures = [
   ],
   [
     "src/system/credential-environment.ts",
+    'Object.getOwnPropertyDescriptor({}, "key"); Object.getPrototypeOf({});',
+  ],
+  [
+    "src/commands/setup-approval.ts",
     'Object.getOwnPropertyDescriptor({}, "key"); Object.getPrototypeOf({});',
   ],
   [

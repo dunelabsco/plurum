@@ -37,6 +37,7 @@ const expectedFiles = [
   "dist/api/agent-validation.js",
   "dist/cli.js",
   "dist/commands/doctor.js",
+  "dist/commands/setup-approval.js",
   "dist/commands/setup-output.js",
   "dist/commands/setup-preflight.js",
   "dist/commands/setup.js",
@@ -285,6 +286,25 @@ try {
   assert.equal(invalid.stdout, "");
   assert.match(invalid.stderr, /Invalid arguments/);
 
+  const missingApproval = runInstalled(
+    ["setup", "--api-key-stdin"],
+    2,
+  );
+  assert.equal(missingApproval.stdout, "");
+  assert.match(missingApproval.stderr, /Invalid arguments/);
+
+  const dryRunApproval = runInstalled(
+    ["setup", "--dry-run", "--yes"],
+    2,
+  );
+  assert.equal(dryRunApproval.stdout, "");
+  assert.match(dryRunApproval.stderr, /Invalid arguments/);
+
+  const setupHelp = runInstalled(["setup", "--help"]);
+  assert.match(setupHelp.stdout, /--api-key-stdin\s+reserve stdin as the API-key source \(requires --yes\)/);
+  assert.match(setupHelp.stdout, /--yes\s+reserve noninteractive approval for the exact apply plan/);
+  assert.match(setupHelp.stdout, /apply is unavailable; these flags do not read input/);
+
   const groups = process.getgroups?.();
   const standardExecution =
     (process.platform === "darwin" || process.platform === "linux") &&
@@ -305,6 +325,18 @@ try {
     const setup = runInstalled(["setup"], 3);
     assert.equal(setup.stdout, "");
     assert.match(setup.stderr, /private development build/);
+
+    for (const approvedArgs of [
+      ["setup", "--yes"],
+      ["setup", "--api-key-stdin", "--yes"],
+    ]) {
+      const approvedSetup = runInstalled(approvedArgs, 3);
+      assert.equal(approvedSetup.stdout, "");
+      assert.match(
+        approvedSetup.stderr,
+        /private development build/,
+      );
+    }
 
     const dryRunCanary =
       "plrm_live_PACKAGE_VERIFY_CANARY_DO_NOT_PRINT";

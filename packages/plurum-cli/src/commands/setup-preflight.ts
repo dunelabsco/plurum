@@ -31,7 +31,7 @@ import {
   containsHostControlCharacter,
   containsHostSensitiveMaterial,
 } from "../hosts/privacy.js";
-import type { PlanningCapabilities } from "../system/contracts.js";
+import type { HostPreflightCapabilities } from "../system/contracts.js";
 
 const MAX_DISPLAY_CHARACTERS = 32_767;
 const UNSAFE_TERMINAL_FORMATTING = /[\p{Cf}\u2028\u2029]/u;
@@ -382,7 +382,7 @@ function readinessFor(
 
 async function inspectHost(
   host: HostId,
-  capabilities: PlanningCapabilities,
+  capabilities: HostPreflightCapabilities,
 ): Promise<Readonly<{
   host: SetupHostPreview;
   mutations: readonly SetupMutationPreview[];
@@ -423,7 +423,7 @@ async function inspectHost(
 
 export async function createSetupDryRunPreflight(
   target: ClientTarget,
-  capabilities: PlanningCapabilities,
+  capabilities: HostPreflightCapabilities,
 ): Promise<SetupDryRunPreflight> {
   const selected = selectedClients(target);
   const locations = resolveCredentialLocations(

@@ -19,9 +19,6 @@ export type CommandRuntime<Capabilities> = DiagnosticRuntime & {
   readonly system: Capabilities;
 };
 
-export type InteractiveCommandRuntime<Capabilities> =
-  CommandRuntime<Capabilities> & Pick<CliRuntime, "stdin">;
-
 export function scopeRuntime<Capabilities>(
   runtime: CliRuntime,
   system: Capabilities,
@@ -30,16 +27,6 @@ export function scopeRuntime<Capabilities>(
     stdout: runtime.stdout,
     stderr: runtime.stderr,
     system,
-  });
-}
-
-export function scopeInteractiveRuntime<Capabilities>(
-  runtime: CliRuntime,
-  system: Capabilities,
-): InteractiveCommandRuntime<Capabilities> {
-  return Object.freeze({
-    ...scopeRuntime(runtime, system),
-    stdin: runtime.stdin,
   });
 }
 

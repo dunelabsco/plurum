@@ -14,11 +14,11 @@ import {
 import { ExitCode } from "./exit-codes.js";
 import { writeCommandJsonError } from "./json-output.js";
 import type { CliRuntime } from "./runtime.js";
-import { scopeInteractiveRuntime, scopeRuntime } from "./runtime.js";
+import { scopeRuntime } from "./runtime.js";
 import {
   doctorScope,
   planningScope,
-  setupScope,
+  setupPreflightScope,
   statusScope,
 } from "./system/scopes.js";
 import { CLI_VERSION } from "./version.js";
@@ -26,7 +26,7 @@ import { CLI_VERSION } from "./version.js";
 const ROOT_HELP = `plurum — connect Claude Code and Codex to Plurum
 
 Usage:
-  plurum setup [--client <target>] [--api-key-stdin] [--dry-run]
+  plurum setup [--client <target>] [--api-key-stdin] [--yes] [--dry-run]
   plurum status [--client <target>] [--json]
   plurum doctor [--client <target>] [--json]
   plurum --version
@@ -42,13 +42,16 @@ Client targets:
 `;
 
 const SETUP_HELP = `Usage:
-  plurum setup [--client <target>] [--api-key-stdin] [--dry-run]
+  plurum setup [--client <target>] [--api-key-stdin] [--yes] [--dry-run]
 
 Options:
   --client <target>  claude-code, codex, or all (default: all)
-  --api-key-stdin    read an existing API key from stdin (not with --dry-run)
+  --api-key-stdin    reserve stdin as the API-key source (requires --yes)
+  --yes              reserve noninteractive approval for the exact apply plan
   --dry-run          inspect a plan without changing or reading credentials
   -h, --help         show this help
+
+Development build: apply is unavailable; these flags do not read input.
 `;
 
 const STATUS_HELP = `Usage:
@@ -126,6 +129,7 @@ function parseSetup(args: readonly string[]): SetupOptions | "help" {
         client: { type: "string" },
         "api-key-stdin": { type: "boolean" },
         "dry-run": { type: "boolean" },
+        yes: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -135,13 +139,17 @@ function parseSetup(args: readonly string[]): SetupOptions | "help" {
     }
     const apiKeyStdin = parsed.values["api-key-stdin"] === true;
     const dryRun = parsed.values["dry-run"] === true;
-    if (apiKeyStdin && dryRun) {
+    const yes = parsed.values.yes === true;
+    if ((apiKeyStdin || yes) && dryRun) {
+      throw new CliUsageError("setup");
+    }
+    if (apiKeyStdin && !yes) {
       throw new CliUsageError("setup");
     }
     const client = parseClient(parsed.values.client, "setup");
     return dryRun
-      ? { client, apiKeyStdin: false, dryRun: true }
-      : { client, apiKeyStdin, dryRun: false };
+      ? { client, apiKeyStdin: false, dryRun: true, yes: false }
+      : { client, apiKeyStdin, dryRun: false, yes };
   } catch {
     throw new CliUsageError("setup");
   }
@@ -278,7 +286,10 @@ export async function runCli(
             })
           : await handlers.setup({
               options,
-              runtime: scopeInteractiveRuntime(runtime, setupScope(runtime.system)),
+              runtime: scopeRuntime(
+                runtime,
+                setupPreflightScope(runtime.system),
+              ),
             });
       }
       case "status": {

@@ -209,11 +209,21 @@ export interface HostCapabilities {
   readonly mutation: HostAdapterMap<HostMutationAdapter>;
 }
 
-export interface PlanningCapabilities {
-  readonly filesystem: MetadataFileSystemAdapter;
-  readonly clock: ClockAdapter;
+export interface HostPreflightCapabilities {
   readonly platform: PlatformAdapter;
   readonly hosts: Pick<HostCapabilities, "inspection">;
+}
+
+declare const planningCapabilitiesBrand: unique symbol;
+declare const setupPreflightCapabilitiesBrand: unique symbol;
+
+export interface PlanningCapabilities extends HostPreflightCapabilities {
+  readonly [planningCapabilitiesBrand]: true;
+}
+
+export interface SetupPreflightCapabilities
+  extends HostPreflightCapabilities {
+  readonly [setupPreflightCapabilitiesBrand]: true;
 }
 
 export interface SetupCapabilities extends SystemCapabilities {}

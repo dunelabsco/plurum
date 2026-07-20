@@ -30,6 +30,7 @@ import type {
 import {
   doctorScope,
   planningScope,
+  setupPreflightScope,
   setupScope,
   statusScope,
 } from "../src/system/scopes.js";
@@ -102,14 +103,38 @@ describe("deny-by-default production ports", () => {
     );
   });
 
-  it("removes mutation and process capabilities from read-only command scopes", () => {
+  it("gives preflight only platform and semantic inspection", () => {
     const system = createTestSystem();
     const planning = planningScope(system);
+    const setupPreflight = setupPreflightScope(system);
     const status = statusScope(system);
     const doctor = doctorScope(system);
     const setup = setupScope(system);
 
-    for (const scoped of [planning, status, doctor]) {
+    for (const scoped of [planning, setupPreflight]) {
+      expect(Object.keys(scoped).sort()).toEqual([
+        "hosts",
+        "platform",
+      ]);
+      expect("processes" in scoped).toBe(false);
+      expect("random" in scoped).toBe(false);
+      expect("clock" in scoped).toBe(false);
+      expect("filesystem" in scoped).toBe(false);
+      expect("hash" in scoped).toBe(false);
+      expect("network" in scoped).toBe(false);
+      expect("credentialEnvironment" in scoped).toBe(false);
+      expect("inspection" in scoped.hosts).toBe(true);
+      expect("mutation" in scoped.hosts).toBe(false);
+      for (const adapter of Object.values(
+        scoped.hosts.inspection,
+      )) {
+        expect(Object.keys(adapter)).toEqual(["inspect"]);
+        expect("apply" in adapter).toBe(false);
+        expect("rollback" in adapter).toBe(false);
+      }
+    }
+
+    for (const scoped of [status, doctor]) {
       expect("processes" in scoped).toBe(false);
       expect("random" in scoped).toBe(false);
       expect("createDirectory" in scoped.filesystem).toBe(false);
@@ -119,14 +144,10 @@ describe("deny-by-default production ports", () => {
       expect("inspection" in scoped.hosts).toBe(true);
       expect("mutation" in scoped.hosts).toBe(false);
     }
-    expect("openReadOnly" in planning.filesystem).toBe(false);
     expect("openReadOnly" in status.filesystem).toBe(true);
     expect("openReadOnly" in doctor.filesystem).toBe(true);
-    expect("hash" in planning).toBe(false);
     expect("hash" in status).toBe(true);
     expect("hash" in doctor).toBe(true);
-    expect("network" in planning).toBe(false);
-    expect("credentialEnvironment" in planning).toBe(false);
     expect("network" in status).toBe(true);
     expect("network" in doctor).toBe(true);
     expect("credentialEnvironment" in status).toBe(true);
@@ -173,10 +194,18 @@ describe("deny-by-default production ports", () => {
       }),
     });
     const planning = planningScope(system);
+    const setupPreflight = setupPreflightScope(system);
     const setup = setupScope(system);
 
     await expect(
       planning.hosts.inspection["claude-code"].inspect({
+        host: "claude-code",
+        scope: "user",
+        excludedProjectDirectory: "/different/project",
+      }),
+    ).rejects.toBeInstanceOf(CapabilityPolicyError);
+    await expect(
+      setupPreflight.hosts.inspection["claude-code"].inspect({
         host: "claude-code",
         scope: "user",
         excludedProjectDirectory: "/different/project",
@@ -193,6 +222,16 @@ describe("deny-by-default production ports", () => {
 
     await expect(
       planning.hosts.inspection["claude-code"].inspect({
+        host: "claude-code",
+        scope: "user",
+        excludedProjectDirectory: base.platform.cwd,
+      }),
+    ).resolves.toEqual({
+      host: "claude-code",
+      status: "absent",
+    });
+    await expect(
+      setupPreflight.hosts.inspection["claude-code"].inspect({
         host: "claude-code",
         scope: "user",
         excludedProjectDirectory: base.platform.cwd,
@@ -222,6 +261,11 @@ describe("deny-by-default production ports", () => {
         scope: "user",
         excludedProjectDirectory: base.platform.cwd,
       },
+      {
+        host: "claude-code",
+        scope: "user",
+        excludedProjectDirectory: base.platform.cwd,
+      },
     ]);
     expect(delegatedRequests[0]).toEqual({
       host: "claude-code",
@@ -229,6 +273,80 @@ describe("deny-by-default production ports", () => {
       excludedProjectDirectory: base.platform.cwd,
     });
     expect(delegatedRequests.every(Object.isFrozen)).toBe(true);
+  });
+
+  it("derives apply preflight inspection from the mutation authority without exposing mutators", async () => {
+    const base = createTestSystem();
+    const calls = {
+      readOnlyInspect: 0,
+      mutationInspect: 0,
+      apply: 0,
+      rollback: 0,
+    };
+    const readOnly = Object.freeze({
+      async inspect() {
+        calls.readOnlyInspect += 1;
+        return Object.freeze({
+          host: "claude-code" as const,
+          status: "absent" as const,
+        });
+      },
+    });
+    const mutation = Object.freeze({
+      async inspect() {
+        calls.mutationInspect += 1;
+        return Object.freeze({
+          host: "claude-code" as const,
+          status: "absent" as const,
+        });
+      },
+      async apply() {
+        calls.apply += 1;
+        return Object.freeze({ status: "failed" as const });
+      },
+      async rollback() {
+        calls.rollback += 1;
+        return Object.freeze({ status: "failed" as const });
+      },
+    });
+    const system: SystemCapabilities = Object.freeze({
+      ...base,
+      hosts: Object.freeze({
+        inspection: Object.freeze({
+          ...base.hosts.inspection,
+          "claude-code": readOnly,
+        }),
+        mutation: Object.freeze({
+          ...base.hosts.mutation,
+          "claude-code": mutation,
+        }),
+      }),
+    });
+    const request = Object.freeze({
+      host: "claude-code" as const,
+      scope: "user" as const,
+      excludedProjectDirectory: base.platform.cwd,
+    });
+
+    await planningScope(system).hosts.inspection[
+      "claude-code"
+    ].inspect(request);
+    const preflight = setupPreflightScope(system);
+    await preflight.hosts.inspection[
+      "claude-code"
+    ].inspect(request);
+
+    expect(calls).toEqual({
+      readOnlyInspect: 1,
+      mutationInspect: 1,
+      apply: 0,
+      rollback: 0,
+    });
+    expect(
+      Object.keys(
+        preflight.hosts.inspection["claude-code"],
+      ),
+    ).toEqual(["inspect"]);
   });
 
   it("copies only the dedicated credential environment snapshot", () => {

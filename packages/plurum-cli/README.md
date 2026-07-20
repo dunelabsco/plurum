@@ -11,6 +11,11 @@ the exact future credential destinations and reversible host commands without
 reading credentials or changing state. Setup apply, status, and doctor remain
 unavailable and return an explicit nonzero result instead of pretending that
 registration or host configuration succeeded.
+The apply grammar now reserves `--yes` for approval of one exact displayed
+plan. `--yes` is invalid with `--dry-run`, and `--api-key-stdin` requires
+`--yes` so confirmation and credential input can never compete for stdin.
+While apply is unavailable, neither flag causes stdin to be read or grants
+mutation authority.
 
 The completed CLI will expose only:
 
@@ -44,6 +49,14 @@ Dry-run setup resolves credential destination names and uses only semantic host
 inspection. It cannot directly read arbitrary file contents, credential
 sources, stdin, authenticated network state, randomness, or host-mutation
 capabilities.
+The unavailable apply path receives only semantic inspection sourced from the
+future mutation authority. The command is not given raw stdin, filesystem,
+network, credential-environment, process, randomness, hashing, or host-mutation
+capabilities. A separate opaque approval core first creates an owned canonical
+deeply frozen plan, then binds one approval use to that exact snapshot. Caller
+objects, accessors, and proxies cannot survive into the approved plan. The core
+is not wired to a prompt or executor until the plan can also state the complete
+credential disposition.
 
 The test harness refuses unverifiable execution and unsafe identity changes,
 confines guarded fake operations to a unique private root, rejects lexical,
@@ -105,9 +118,10 @@ and Windows x64 runners, including the declared Rust 1.88 minimum. Older
 macOS/Linux floors, Linux musl, and Windows arm64 remain unvalidated release
 targets.
 
-API keys are accepted only through protected interactive input or
-`--api-key-stdin`. A value-bearing `--api-key` option does not exist, and invalid
-arguments are never reflected in diagnostics.
+The completed apply flow will accept API keys only through protected
+interactive input or explicit `--api-key-stdin --yes`. A value-bearing
+`--api-key` option does not exist, and invalid arguments are never reflected in
+diagnostics.
 
 ## Development
 

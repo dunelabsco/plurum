@@ -2,7 +2,6 @@ import type {
   CredentialEnvironmentAdapter,
   CredentialEnvironmentSnapshot,
   DoctorCapabilities,
-  MetadataFileSystemAdapter,
   PlanningCapabilities,
   ProcessAdapter,
   ProcessRequest,
@@ -10,6 +9,7 @@ import type {
   ReadOnlyNetworkAdapter,
   ReadOnlyNetworkRequest,
   SetupCapabilities,
+  SetupPreflightCapabilities,
   StatusCapabilities,
   SystemCapabilities,
 } from "./contracts.js";
@@ -32,16 +32,6 @@ import {
   copyCredentialEnvironmentSnapshot,
 } from "./credential-environment.js";
 import { CapabilityPolicyError } from "./errors.js";
-
-function metadataFileSystem(
-  filesystem: SystemCapabilities["filesystem"],
-): MetadataFileSystemAdapter {
-  return Object.freeze({
-    lstat: filesystem.lstat.bind(filesystem),
-    realpath: filesystem.realpath.bind(filesystem),
-    readDirectory: filesystem.readDirectory.bind(filesystem),
-  });
-}
 
 function readOnlyFileSystem(
   filesystem: SystemCapabilities["filesystem"],
@@ -218,6 +208,21 @@ function scopedHostInspection(
   >;
 }
 
+function inspectionOnlyHostMap(
+  adapters: HostAdapterMap<HostInspectionAdapter>,
+): HostAdapterMap<HostInspectionAdapter> {
+  const entries = HOST_IDS.map((host) => {
+    const adapter = adapters[host];
+    const scoped: HostInspectionAdapter = Object.freeze({
+      inspect: adapter.inspect.bind(adapter),
+    });
+    return [host, scoped] as const;
+  });
+  return Object.freeze(Object.fromEntries(entries)) as HostAdapterMap<
+    HostInspectionAdapter
+  >;
+}
+
 function scopedHostMutation(
   system: SystemCapabilities,
 ): HostAdapterMap<HostMutationAdapter> {
@@ -261,13 +266,28 @@ function scopedHostMutation(
 
 export function planningScope(system: SystemCapabilities): PlanningCapabilities {
   return Object.freeze({
-    filesystem: metadataFileSystem(system.filesystem),
-    clock: system.clock,
     platform: system.platform,
     hosts: Object.freeze({
       inspection: scopedHostInspection(system),
     }),
-  });
+  }) as PlanningCapabilities;
+}
+
+export function setupPreflightScope(
+  system: SystemCapabilities,
+): SetupPreflightCapabilities {
+  /*
+   * Apply preflight must observe through the exact authority that would later
+   * mutate, while exposing only its inspect method. No adapter object carrying
+   * apply/rollback crosses this scope.
+   */
+  const mutationAuthority = scopedHostMutation(system);
+  return Object.freeze({
+    platform: system.platform,
+    hosts: Object.freeze({
+      inspection: inspectionOnlyHostMap(mutationAuthority),
+    }),
+  }) as SetupPreflightCapabilities;
 }
 
 export function setupScope(system: SystemCapabilities): SetupCapabilities {

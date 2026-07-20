@@ -1,12 +1,9 @@
-import type {
-  CommandRuntime,
-  InteractiveCommandRuntime,
-} from "../runtime.js";
+import type { CommandRuntime } from "../runtime.js";
 import type { ExitCode } from "../exit-codes.js";
 import type {
   DoctorCapabilities,
   PlanningCapabilities,
-  SetupCapabilities,
+  SetupPreflightCapabilities,
   StatusCapabilities,
 } from "../system/contracts.js";
 
@@ -21,11 +18,13 @@ interface SetupBaseOptions {
 export interface SetupDryRunOptions extends SetupBaseOptions {
   readonly apiKeyStdin: false;
   readonly dryRun: true;
+  readonly yes: false;
 }
 
 export interface SetupApplyOptions extends SetupBaseOptions {
   readonly apiKeyStdin: boolean;
   readonly dryRun: false;
+  readonly yes: boolean;
 }
 
 export type SetupOptions = SetupDryRunOptions | SetupApplyOptions;
@@ -49,7 +48,7 @@ export type SetupInvocation =
     }
   | {
       readonly options: SetupApplyOptions;
-      readonly runtime: InteractiveCommandRuntime<SetupCapabilities>;
+      readonly runtime: CommandRuntime<SetupPreflightCapabilities>;
     };
 
 export interface StatusInvocation {
