@@ -202,7 +202,7 @@ def _call_sql(
     call = (
         "SELECT disposition || '|' || COALESCE(agent_id::TEXT, '') "
         "FROM public.register_cli_agent("
-        f"1, '{request_id}'::UUID, '{name}', '{username}', "
+        f"1::SMALLINT, '{request_id}'::UUID, '{name}', '{username}', "
         f"'{_hash(api_key)}', '{_prefix(api_key)}'"
         ");"
     )
