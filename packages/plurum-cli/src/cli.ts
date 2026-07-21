@@ -147,9 +147,12 @@ function parseSetup(args: readonly string[]): SetupOptions | "help" {
       throw new CliUsageError("setup");
     }
     const client = parseClient(parsed.values.client, "setup");
-    return dryRun
-      ? { client, apiKeyStdin: false, dryRun: true, yes: false }
-      : { client, apiKeyStdin, dryRun: false, yes };
+    if (dryRun) {
+      return { client, apiKeyStdin: false, dryRun: true, yes: false };
+    }
+    return apiKeyStdin
+      ? { client, apiKeyStdin: true, dryRun: false, yes: true }
+      : { client, apiKeyStdin: false, dryRun: false, yes };
   } catch {
     throw new CliUsageError("setup");
   }

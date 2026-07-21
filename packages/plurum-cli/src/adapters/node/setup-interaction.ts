@@ -21,6 +21,11 @@ const UTF8_ENCODER = new TextEncoder();
 export interface SetupTerminalInput extends NodeJS.ReadableStream {
   readonly isTTY?: boolean;
   readonly readableFlowing?: boolean | null;
+  readonly readableEncoding?: BufferEncoding | null;
+  readonly readableObjectMode?: boolean;
+  readonly readableAborted?: boolean;
+  readonly readableDidRead?: boolean;
+  readonly errored?: Error | null;
   readonly destroyed?: boolean;
   readonly readableEnded?: boolean;
   readonly closed?: boolean;
@@ -29,6 +34,8 @@ export interface SetupTerminalInput extends NodeJS.ReadableStream {
 
 export interface SetupTerminalOutput extends NodeJS.WritableStream {
   readonly isTTY?: boolean;
+  readonly destroyed?: boolean;
+  readonly closed?: boolean;
 }
 
 function writeAndFlush(

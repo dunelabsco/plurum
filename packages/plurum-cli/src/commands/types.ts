@@ -21,11 +21,19 @@ export interface SetupDryRunOptions extends SetupBaseOptions {
   readonly yes: false;
 }
 
-export interface SetupApplyOptions extends SetupBaseOptions {
-  readonly apiKeyStdin: boolean;
-  readonly dryRun: false;
-  readonly yes: boolean;
-}
+export type SetupApplyOptions =
+  | (SetupBaseOptions &
+      Readonly<{
+        readonly apiKeyStdin: false;
+        readonly dryRun: false;
+        readonly yes: boolean;
+      }>)
+  | (SetupBaseOptions &
+      Readonly<{
+        readonly apiKeyStdin: true;
+        readonly dryRun: false;
+        readonly yes: true;
+      }>);
 
 export type SetupOptions = SetupDryRunOptions | SetupApplyOptions;
 

@@ -26,6 +26,10 @@ const allowedExternalImports = new Map([
     new Map([["node:timers", ["setImmediate"]]]),
   ],
   [
+    "src/adapters/node/setup-credential-input.ts",
+    new Map([["node:timers", ["setImmediate"]]]),
+  ],
+  [
     "src/adapters/node/credential-environment.ts",
     new Map([["node:process", ["default:process"]]]),
   ],
@@ -120,7 +124,36 @@ const restrictedCapabilityImports = Object.freeze([
     module: "src/commands/setup-confirmation",
     binding: "createSetupInteractiveSessionPorts",
     allowedFiles: new Set([
+      "src/adapters/node/setup-credential-input.ts",
       "src/adapters/node/setup-interaction.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-credential-input",
+    binding: "retainFramedSetupCredentialInput",
+    allowedFiles: new Set([
+      "src/adapters/node/setup-credential-input.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-credential-input",
+    binding: "claimSetupCredentialInputBytes",
+    allowedFiles: new Set([
+      "src/commands/setup-registration-execution.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/adapters/node/setup-credential-input",
+    binding: "createNodeSetupExplicitCredentialInput",
+    allowedFiles: new Set([
+      "src/adapters/node/production.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/adapters/node/setup-credential-input",
+    binding: "createNodeSetupProtectedInteractiveSession",
+    allowedFiles: new Set([
+      "src/adapters/node/production.ts",
     ]),
   }),
 ]);
@@ -1091,6 +1124,51 @@ const negativeFixtures = [
   [
     "src/commands/setup.ts",
     'import { createSetupConfirmationAttempt } from "./setup-confirmation.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'import { retainFramedSetupCredentialInput } from "./setup-credential-input.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/adapters/node/setup-interaction.ts",
+    'import { claimSetupCredentialInputBytes } from "../../commands/setup-credential-input.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'import * as input from "./setup-credential-input.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'export { claimSetupCredentialInputBytes } from "./setup-credential-input.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/adapters/node/setup-credential-input.ts",
+    'import { retainFramedSetupCredentialInput } from "../../commands/setup-credential-input.js"; const retain = retainFramedSetupCredentialInput;',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/adapters/node/setup-credential-input.ts",
+    'import { retainFramedSetupCredentialInput } from "../../commands/setup-credential-input.js"; retainFramedSetupCredentialInput.call(undefined, new Uint8Array(), "explicit-eof");',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/adapters/node/setup-interaction.ts",
+    'import { createNodeSetupExplicitCredentialInput } from "./setup-credential-input.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/adapters/node/setup-interaction.ts",
+    'import * as credentialInput from "./setup-credential-input.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/adapters/node/production.ts",
+    'import { createNodeSetupProtectedInteractiveSession } from "./setup-credential-input.js"; const createSession = createNodeSetupProtectedInteractiveSession;',
     "setup-authorization-boundary",
   ],
   [
