@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { createSetupApprovalAuthority } from "../src/commands/setup-approval.js";
+import {
+  createSetupApprovalAuthority,
+  mintSetupApproval,
+} from "../src/commands/setup-approval.js";
 import {
   SetupCredentialPlanError,
   planSetupCredential,
@@ -553,7 +556,7 @@ describe("setup credential plan", () => {
     const prepared = authority.prepare(
       Object.freeze({ schemaVersion: 1, credential: result }),
     );
-    const approval = authority.approve({
+    const approval = mintSetupApproval(authority, {
       plan: prepared,
       source: "interactive",
     });

@@ -55,13 +55,6 @@ export interface SetupApprovalAuthority {
   ): SetupPreparedPlan<Plan>;
 
   /*
-   * The command orchestrator may call this only after the complete public
-   * preview has been written successfully and the user has approved that exact
-   * immutable plan. `--yes` changes the source, never the plan.
-   */
-  approve(request: SetupApprovalRequest): SetupApprovalIdentity;
-
-  /*
    * The future executor must consume this synchronously before its first
    * mutation. A wrong plan consumes the approval and fails closed.
    */
@@ -104,6 +97,10 @@ const TOKEN_TO_JSON = Object.freeze(function tokenToJson(): undefined {
   return undefined;
 });
 const OWNED_APPROVAL_AUTHORITIES = new WeakSet<object>();
+const SETUP_APPROVAL_MINTERS = new WeakMap<
+  SetupApprovalAuthority,
+  (request: SetupApprovalRequest) => SetupApprovalIdentity
+>();
 
 class SetupApprovalError extends Error {
   constructor() {
@@ -374,40 +371,43 @@ function issueIdentity(): SetupApprovalIdentity {
 
 export function createSetupApprovalAuthority(): SetupApprovalAuthority {
   const preparedPlans = new WeakSet<SetupPreparedPlan>();
+  const approvedPlans = new WeakSet<SetupPreparedPlan>();
   const approvals = new WeakMap<
     SetupApprovalIdentity,
     ApprovalState
   >();
 
-  const authority = Object.freeze({
+  function mint(rawRequest: SetupApprovalRequest): SetupApprovalIdentity {
+    const request = snapshotRequest(rawRequest, ["plan", "source"]);
+    const plan = request.plan;
+    if (
+      typeof plan !== "object" ||
+      plan === null ||
+      !preparedPlans.has(plan as SetupPreparedPlan) ||
+      approvedPlans.has(plan as SetupPreparedPlan)
+    ) {
+      return invalidApproval();
+    }
+    const source = approvalSource(request.source);
+    approvedPlans.add(plan as SetupPreparedPlan);
+    const approval = issueIdentity();
+    approvals.set(
+      approval,
+      Object.freeze({
+        plan: plan as SetupPreparedPlan,
+        source,
+      }),
+    );
+    return approval;
+  }
+
+  const authority: SetupApprovalAuthority = Object.freeze({
     prepare<Plan extends object>(
       candidate: Plan,
     ): SetupPreparedPlan<Plan> {
       const plan = preparePlan(candidate) as SetupPreparedPlan<Plan>;
       preparedPlans.add(plan);
       return plan;
-    },
-
-    approve(rawRequest: SetupApprovalRequest): SetupApprovalIdentity {
-      const request = snapshotRequest(rawRequest, ["plan", "source"]);
-      const plan = request.plan;
-      if (
-        typeof plan !== "object" ||
-        plan === null ||
-        !preparedPlans.has(plan as SetupPreparedPlan)
-      ) {
-        return invalidApproval();
-      }
-      const source = approvalSource(request.source);
-      const approval = issueIdentity();
-      approvals.set(
-        approval,
-        Object.freeze({
-          plan: plan as SetupPreparedPlan,
-          source,
-        }),
-      );
-      return approval;
     },
 
     consume(
@@ -442,7 +442,23 @@ export function createSetupApprovalAuthority(): SetupApprovalAuthority {
     },
   });
   OWNED_APPROVAL_AUTHORITIES.add(authority);
+  SETUP_APPROVAL_MINTERS.set(authority, mint);
   return authority;
+}
+
+/*
+ * This function is the only approval-minting surface. The capability verifier
+ * permits production use only from the exact-plan confirmation boundary.
+ */
+export function mintSetupApproval(
+  authority: SetupApprovalAuthority,
+  request: SetupApprovalRequest,
+): SetupApprovalIdentity {
+  const mint = SETUP_APPROVAL_MINTERS.get(authority);
+  if (mint === undefined) {
+    return invalidApproval();
+  }
+  return mint(request);
 }
 
 export function isOwnedSetupApprovalAuthority(

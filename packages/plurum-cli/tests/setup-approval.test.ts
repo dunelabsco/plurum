@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createSetupApprovalAuthority,
+  mintSetupApproval,
   type SetupApprovalIdentity,
   type SetupApprovalSource,
   type SetupPreparedPlan,
@@ -35,7 +36,7 @@ function approve(
 }> {
   const authority = createSetupApprovalAuthority();
   const plan = authority.prepare(planCandidate());
-  const approval = authority.approve({ plan, source });
+  const approval = mintSetupApproval(authority, { plan, source });
   return { authority, approval, plan };
 }
 
@@ -78,6 +79,32 @@ describe("setup approval authority", () => {
       });
     },
   );
+
+  it("mints at most one approval identity for each prepared plan", () => {
+    const authority = createSetupApprovalAuthority();
+    const plan = authority.prepare(planCandidate());
+    const approval = mintSetupApproval(authority, {
+      plan,
+      source: "interactive",
+    });
+
+    expect(() =>
+      mintSetupApproval(authority, {
+        plan,
+        source: "assume-yes",
+      }),
+    ).toThrow("The setup approval could not be created safely.");
+    expect(authority.consume({ approval, plan })).toEqual({
+      status: "approved",
+      source: "interactive",
+    });
+    expect(() =>
+      mintSetupApproval(authority, {
+        plan,
+        source: "interactive",
+      }),
+    ).toThrow("The setup approval could not be created safely.");
+  });
 
   it("consumes an approval when a structurally equal but different plan is supplied", () => {
     const { authority, approval, plan } = approve();
@@ -128,7 +155,7 @@ describe("setup approval authority", () => {
 
     for (const rejected of [unprepared, cloned, foreignPlan]) {
       expect(() =>
-        authority.approve({
+        mintSetupApproval(authority, {
           plan: rejected,
           source: "interactive",
         }),
@@ -138,7 +165,7 @@ describe("setup approval authority", () => {
     }
 
     expect(() =>
-      foreign.approve({
+      mintSetupApproval(foreign, {
         plan,
         source: "interactive",
       }),
@@ -181,7 +208,7 @@ describe("setup approval authority", () => {
     ).toBeUndefined();
     expect(getCalls).toBe(0);
 
-    const approval = authority.approve({
+    const approval = mintSetupApproval(authority, {
       plan,
       source: "interactive",
     });
@@ -194,7 +221,7 @@ describe("setup approval authority", () => {
   it("never serializes a canary retained only by the approved plan", () => {
     const authority = createSetupApprovalAuthority();
     const plan = authority.prepare(planCandidate(CANARY));
-    const approval = authority.approve({
+    const approval = mintSetupApproval(authority, {
       plan,
       source: "assume-yes",
     });
@@ -258,7 +285,7 @@ describe("setup approval authority", () => {
     );
 
     try {
-      authority.approve(request as never);
+      mintSetupApproval(authority, request as never);
       throw new Error("hostile approval unexpectedly succeeded");
     } catch (error) {
       expect(String(error)).toBe(
@@ -309,7 +336,7 @@ describe("setup approval authority", () => {
     expect(plan.first).toEqual(plan.second);
     expect(plan.first).not.toBe(plan.second);
     expect(plan.first).not.toBe(shared);
-    const approval = authority.approve({
+    const approval = mintSetupApproval(authority, {
       plan,
       source: "interactive",
     });
@@ -426,7 +453,7 @@ describe("setup approval authority", () => {
       },
     );
 
-    expect(() => authority.approve(request)).toThrow(
+    expect(() => mintSetupApproval(authority, request)).toThrow(
       "The setup approval could not be created safely.",
     );
   });
@@ -439,7 +466,7 @@ describe("setup approval authority", () => {
     for (const operation of [
       () => authority.prepare(proxy.proxy),
       () =>
-        authority.approve({
+        mintSetupApproval(authority, {
           plan: authority.prepare(planCandidate()),
           source: CANARY,
         } as never),

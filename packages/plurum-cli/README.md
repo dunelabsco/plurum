@@ -31,8 +31,23 @@ credential paths, discovery, and project exclusion. It binds the private key,
 transaction evidence, and native revision to the exact immutable apply plan
 through opaque one-use identities. None of that evidence enters the plan or
 renderer.
-This core still has no production/native adapter or command wiring, so normal
-setup apply remains explicitly unavailable.
+
+An isolated one-use confirmation coordinator now captures that exact plan and
+sidecar, renders the public plan once, waits for complete presentation, and
+only then converts either literal interactive `yes` or explicit `--yes` into
+an opaque execution grant. The interactive adapter requires input and output
+terminals, refuses already buffered or consumed input, reads one
+newline-terminated line within a 16-byte bound, and never returns the entered
+bytes. Input and output success remain provisional through a bounded I/O
+checkpoint so nearby trailing data, stream failure, or cleanup failure cancels
+the operation. Factory provenance prevents `--yes` and no-op plans from
+receiving an input-bearing presenter at all. Decline, malformed input,
+unavailable interaction, output failure, replay, abandonment, and no-op plans
+mint no approval and release their private sidecar. `--yes` still displays the
+plan. The terminal adapter is tested only with isolated in-memory streams and
+is not wired to the process runtime. This core still has no production/native
+credential adapter or command wiring, so normal setup apply remains explicitly
+unavailable.
 
 The completed CLI will expose only:
 
@@ -72,20 +87,23 @@ network, credential-environment, process, randomness, hashing, or host-mutation
 capabilities. A separate opaque approval core first creates an owned canonical
 deeply frozen plan, then binds one approval use to that exact snapshot. Caller
 objects, accessors, and proxies cannot survive into the approved plan. The core
-is not wired to a prompt or executor. A separate pure planner now defines the
-secret-free credential dispositions that the eventual plan must show: reuse,
-adopt, register, replace, or block. Selection and registration-input states are
-explicitly non-approvable. This planner has no credential reader, secret,
-network, prompt, registration, filesystem, or mutation capability; execution
-remains gated on an exact compare-and-swap observation of canonical credential
-and recovery state. The apply-plan composer rejects unresolved credentials and
-blocked host preflights. Its projection planner distinguishes create,
-unchanged, replace, ambiguous, unsafe, and unavailable Codex states relative
-to the exact selected credential without receiving a key. Complete host
-reconciliation evidence stays outside the rendered preview, and composition
-cannot re-inspect hosts or perform changes. It remains unreachable from the CLI
-until native projection and credential-observation adapters, confirmation,
-secret input, and conditional persistence boundaries are wired.
+permits at most one approval identity per plan, and an AST gate restricts
+approval minting to the one-use exact-plan confirmation coordinator. That
+coordinator remains unreachable from the command runtime. A separate pure
+planner defines the secret-free credential dispositions that the eventual plan
+must show: reuse, adopt, register, replace, or block. Selection and
+registration-input states are explicitly non-approvable. This planner has no
+credential reader, secret, network, prompt, registration, filesystem, or
+mutation capability; execution remains gated on an exact compare-and-swap
+observation of canonical credential and recovery state. The apply-plan composer
+rejects unresolved credentials and blocked host preflights. Its projection
+planner distinguishes create, unchanged, replace, ambiguous, unsafe, and
+unavailable Codex states relative to the exact selected credential without
+receiving a key. Complete host reconciliation evidence stays outside the
+rendered preview, and composition cannot re-inspect hosts or perform changes.
+It remains unreachable from the CLI until native credential/projection
+composition, protected secret input, conditional persistence, and the final
+execution boundary are wired.
 
 The test harness refuses unverifiable execution and unsafe identity changes,
 confines guarded fake operations to a unique private root, rejects lexical,

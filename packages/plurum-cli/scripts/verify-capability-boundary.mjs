@@ -22,6 +22,10 @@ const allowedExternalImports = new Map([
     new Map([["node:timers", ["clearTimeout", "setTimeout"]]]),
   ],
   [
+    "src/adapters/node/setup-interaction.ts",
+    new Map([["node:timers", ["setImmediate"]]]),
+  ],
+  [
     "src/adapters/node/credential-environment.ts",
     new Map([["node:process", ["default:process"]]]),
   ],
@@ -87,6 +91,63 @@ const sourceModuleExtensions = Object.freeze([
   ".mts",
   ".cts",
 ]);
+const restrictedCapabilityImports = Object.freeze([
+  Object.freeze({
+    module: "src/commands/setup-approval",
+    binding: "mintSetupApproval",
+    allowedFiles: new Set(["src/commands/setup-confirmation.ts"]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-execution-authority",
+    binding: "claimSetupExecutionSidecar",
+    allowedFiles: new Set(["src/commands/setup-confirmation.ts"]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-confirmation",
+    binding: "createSetupConfirmationAttempt",
+    allowedFiles: new Set([
+      "src/credentials/codex-dotenv-setup-observation.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-confirmation",
+    binding: "createSetupInputFreePlanPresenter",
+    allowedFiles: new Set([
+      "src/adapters/node/setup-interaction.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-confirmation",
+    binding: "createSetupInteractiveSessionPorts",
+    allowedFiles: new Set([
+      "src/adapters/node/setup-interaction.ts",
+    ]),
+  }),
+]);
+
+function resolvedRelativeModule(relativePath, specifier) {
+  if (!specifier.startsWith(".")) {
+    return undefined;
+  }
+  return posix.normalize(
+    posix.join(posix.dirname(relativePath), specifier),
+  );
+}
+
+function moduleMatchesStem(resolvedModule, stem) {
+  return sourceModuleExtensions.some(
+    (extension) => resolvedModule === `${stem}${extension}`,
+  );
+}
+
+function restrictionsForModule(resolvedModule) {
+  if (resolvedModule === undefined) {
+    return [];
+  }
+  return restrictedCapabilityImports.filter(({ module }) =>
+    moduleMatchesStem(resolvedModule, module),
+  );
+}
 
 function isUnwiredNativeBoundaryModule(resolvedModule) {
   return sourceModuleExtensions.some(
@@ -311,6 +372,7 @@ function scanText(relativePath, text) {
   }
   const findings = [];
   const seen = new Set();
+  const restrictedLocalBindings = new Map();
 
   function location(offset) {
     let low = 0;
@@ -334,6 +396,95 @@ function scanText(relativePath, text) {
     }
     seen.add(key);
     findings.push({ file: relativePath, ...position, rule, reason });
+  }
+
+  function validateRestrictedImport(node) {
+    const restrictions = restrictionsForModule(
+      resolvedRelativeModule(relativePath, node.source.value),
+    );
+    if (restrictions.length === 0 || node.importKind === "type") {
+      return;
+    }
+    for (const specifier of node.specifiers) {
+      if (specifier.type === "ImportNamespaceSpecifier") {
+        report(
+          specifier,
+          "setup-authorization-boundary",
+          "authorization capabilities require exact reviewed imports",
+        );
+        continue;
+      }
+      if (
+        specifier.type !== "ImportSpecifier" ||
+        specifier.importKind === "type"
+      ) {
+        continue;
+      }
+      const imported =
+        specifier.imported.name ?? specifier.imported.value;
+      const restriction = restrictions.find(
+        ({ binding }) => binding === imported,
+      );
+      if (restriction === undefined) {
+        continue;
+      }
+      if (!restriction.allowedFiles.has(relativePath)) {
+        report(
+          specifier,
+          "setup-authorization-boundary",
+          "authorization capabilities may only enter their exact reviewed composition boundary",
+        );
+      } else {
+        restrictedLocalBindings.set(specifier.local.name, restriction);
+      }
+    }
+  }
+
+  function validateRestrictedReexport(node) {
+    if (node.source === null || node.source === undefined) {
+      if (node.type === "ExportNamedDeclaration") {
+        for (const specifier of node.specifiers) {
+          if (
+            specifier.exportKind !== "type" &&
+            restrictedLocalBindings.has(specifier.local.name)
+          ) {
+            report(
+              specifier,
+              "setup-authorization-boundary",
+              "authorization capabilities must not be re-exported",
+            );
+          }
+        }
+      }
+      return;
+    }
+    const restrictions = restrictionsForModule(
+      resolvedRelativeModule(relativePath, node.source.value),
+    );
+    if (restrictions.length === 0 || node.exportKind === "type") {
+      return;
+    }
+    if (node.type === "ExportAllDeclaration") {
+      report(
+        node,
+        "setup-authorization-boundary",
+        "authorization capability modules must not be wildcard re-exported",
+      );
+      return;
+    }
+    for (const specifier of node.specifiers) {
+      const imported = specifier.local.name ?? specifier.local.value;
+      if (
+        specifier.exportKind !== "type" &&
+        restrictions.some(({ binding }) => binding === imported)
+      ) {
+        report(
+          specifier,
+          "setup-authorization-boundary",
+          "authorization capabilities must not be re-exported",
+        );
+      }
+    }
   }
 
   function validateModule(node, specifier, importNode) {
@@ -452,6 +603,7 @@ function scanText(relativePath, text) {
   function visit(node, parent, key, ancestors) {
     if (node.type === "ImportDeclaration") {
       validateModule(node.source, node.source.value, node);
+      validateRestrictedImport(node);
       if (
         relativePath !== "src/index.ts" &&
         node.specifiers.some(
@@ -476,6 +628,9 @@ function scanText(relativePath, text) {
       node.source !== undefined
     ) {
       validateModule(node.source, node.source.value, undefined);
+      validateRestrictedReexport(node);
+    } else if (node.type === "ExportNamedDeclaration") {
+      validateRestrictedReexport(node);
     } else if (node.type === "TSImportEqualsDeclaration") {
       report(
         node,
@@ -652,7 +807,24 @@ function scanText(relativePath, text) {
     }
 
     if (node.type === "Identifier" && isIdentifierReference(node, parent, key)) {
-      if (node.name === "process") {
+      const restrictedCapability = restrictedLocalBindings.get(
+        node.name,
+      );
+      if (
+        restrictedCapability !== undefined &&
+        !(
+          parent?.type === "CallExpression" &&
+          key === "callee" &&
+          parent.callee === node &&
+          parent.optional === false
+        )
+      ) {
+        report(
+          node,
+          "setup-authorization-boundary",
+          "authorization capabilities may only be invoked directly in their reviewed boundary",
+        );
+      } else if (node.name === "process") {
         const member =
           parent?.type === "MemberExpression" &&
           parent.object === node &&
@@ -736,6 +908,46 @@ function scanText(relativePath, text) {
         }
       } else if (isNode(value)) {
         visit(value, node, childKey, [...ancestors, node]);
+      }
+    }
+  }
+
+  for (const statement of program.body) {
+    if (
+      statement.type !== "ImportDeclaration" ||
+      statement.importKind === "type"
+    ) {
+      continue;
+    }
+    const restrictions = restrictionsForModule(
+      resolvedRelativeModule(relativePath, statement.source.value),
+    );
+    for (const specifier of statement.specifiers) {
+      if (restrictions.length === 0) {
+        continue;
+      }
+      if (specifier.type === "ImportNamespaceSpecifier") {
+        restrictedLocalBindings.set(
+          specifier.local.name,
+          restrictions[0],
+        );
+        continue;
+      }
+      if (
+        specifier.type === "ImportSpecifier" &&
+        specifier.importKind !== "type"
+      ) {
+        const imported =
+          specifier.imported.name ?? specifier.imported.value;
+        const restriction = restrictions.find(
+          ({ binding }) => binding === imported,
+        );
+        if (restriction !== undefined) {
+          restrictedLocalBindings.set(
+            specifier.local.name,
+            restriction,
+          );
+        }
       }
     }
   }
@@ -860,6 +1072,66 @@ const negativeFixtures = [
     "src/adapters/node/production.ts",
     'export * from "./native-credential-store.mjs";',
     "native-credential-wiring",
+  ],
+  [
+    "src/commands/setup.ts",
+    'import { mintSetupApproval as mint } from "./setup-approval.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-confirmation.ts",
+    'import * as approval from "./setup-approval.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'import { claimSetupExecutionSidecar } from "./setup-execution-authority.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'import { createSetupConfirmationAttempt } from "./setup-confirmation.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
+    'import { createSetupInputFreePlanPresenter } from "../commands/setup-confirmation.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
+    'import { createSetupInteractiveSessionPorts } from "../commands/setup-confirmation.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'export { mintSetupApproval as mint } from "./setup-approval.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'export * from "./setup-approval.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-confirmation.ts",
+    'import { mintSetupApproval as mint } from "./setup-approval.js"; export { mint };',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-confirmation.ts",
+    'import { mintSetupApproval } from "./setup-approval.js"; export default mintSetupApproval;',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-confirmation.ts",
+    'import { mintSetupApproval } from "./setup-approval.js"; const leak = mintSetupApproval; export default leak;',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-confirmation.ts",
+    'import { mintSetupApproval } from "./setup-approval.js"; mintSetupApproval.call(undefined, {}, {});',
+    "setup-authorization-boundary",
   ],
   [
     "src/hosts/codex/adapter.ts",
@@ -1111,6 +1383,18 @@ const positiveFixtures = [
     'import { posix, win32 } from "node:path"; posix.join("/a", "b"); win32.join("C:\\\\a", "b");',
   ],
   ["src/adapters/node/clock.ts", "Date.now();"],
+  [
+    "src/commands/setup-confirmation.ts",
+    'import { mintSetupApproval as mint } from "./setup-approval.js"; import { claimSetupExecutionSidecar as claim } from "./setup-execution-authority.js"; mint({}, {}); claim({}, {}, {});',
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
+    'import { createSetupConfirmationAttempt as createAttempt } from "../commands/setup-confirmation.js"; createAttempt();',
+  ],
+  [
+    "src/adapters/node/setup-interaction.ts",
+    'import { createSetupInputFreePlanPresenter as createInputFreePresenter, createSetupInteractiveSessionPorts as createInteractivePorts } from "../../commands/setup-confirmation.js"; createInputFreePresenter(); createInteractivePorts();',
+  ],
   ["src/example.ts", "new Date(0); Date.parse('2026-01-01'); Date.UTC(2026, 0);"],
   [
     "src/adapters/node/native-credential-store.ts",

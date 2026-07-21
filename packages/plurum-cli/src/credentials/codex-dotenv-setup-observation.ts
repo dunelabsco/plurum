@@ -5,9 +5,15 @@ import {
 import {
   isOwnedSetupApprovalAuthority,
   type SetupApprovalAuthority,
-  type SetupApprovalIdentity,
   type SetupPreparedPlan,
 } from "../commands/setup-approval.js";
+import {
+  createSetupConfirmationAttempt,
+  type SetupConfirmationAttempt,
+  type SetupConfirmationMode,
+  type SetupInteractiveConfirmation,
+  type SetupPlanPresenter,
+} from "../commands/setup-confirmation.js";
 import {
   planSetupCodexProjection,
   type SetupCodexProjectionPlanningResult,
@@ -27,7 +33,6 @@ import {
 } from "../commands/setup-credential-plan.js";
 import {
   createSetupExecutionAuthority,
-  type SetupExecutionConsumeResult,
   type SetupExecutionDiscardResult,
   type SetupExecutionGrant,
   type SetupExecutionSidecarIdentity,
@@ -147,11 +152,13 @@ export interface CodexDotenvSetupObservationAuthority {
   prepare(
     request: CodexDotenvSetupPrepareRequest,
   ): Promise<CodexDotenvSetupPrepareResult>;
-  consume(
+  createConfirmation(
     plan: SetupPreparedPlan<SetupApplyPlan>,
-    approval: SetupApprovalIdentity,
     sidecar: SetupExecutionSidecarIdentity,
-  ): SetupExecutionConsumeResult;
+    mode: SetupConfirmationMode,
+    presenter: SetupPlanPresenter,
+    confirmation: SetupInteractiveConfirmation | null,
+  ): SetupConfirmationAttempt;
   discard(
     identity:
       | CodexDotenvSetupObservationIdentity
@@ -1026,12 +1033,22 @@ export function createCodexDotenvSetupObservationAuthority(
   return Object.freeze({
     inspect,
     prepare,
-    consume(
+    createConfirmation(
       plan: SetupPreparedPlan<SetupApplyPlan>,
-      approvalIdentity: SetupApprovalIdentity,
       sidecar: SetupExecutionSidecarIdentity,
-    ): SetupExecutionConsumeResult {
-      return execution.consume(plan, approvalIdentity, sidecar);
+      mode: SetupConfirmationMode,
+      presenter: SetupPlanPresenter,
+      confirmation: SetupInteractiveConfirmation | null,
+    ): SetupConfirmationAttempt {
+      return createSetupConfirmationAttempt(
+        plan,
+        sidecar,
+        approval,
+        execution,
+        mode,
+        presenter,
+        confirmation,
+      );
     },
     discard(
       identity:

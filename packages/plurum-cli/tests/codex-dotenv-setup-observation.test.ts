@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import { nodeHash } from "../src/adapters/node/hash.js";
 import { createSetupApprovalAuthority } from "../src/commands/setup-approval.js";
+import {
+  createSetupInteractiveSessionPorts,
+} from "../src/commands/setup-confirmation.js";
 import { createSetupPreflightSnapshot } from "../src/commands/setup-preflight.js";
 import type {
   CodexDotenvNativeAdapter,
@@ -322,15 +325,18 @@ describe("setup observation composition", () => {
     expect(serialized).not.toContain("projection-private-revision");
     expect(serialized).not.toContain(STORE_EVIDENCE_CANARY);
 
-    const approvalIdentity = approval.approve({
-      plan: prepared.plan,
-      source: "interactive",
-    });
-    const consumed = authority.consume(
-      prepared.plan,
-      approvalIdentity,
-      prepared.sidecar,
+    const ports = createSetupInteractiveSessionPorts(
+      async () => "presented",
+      async () => "confirmed",
     );
+    const confirmation = authority.createConfirmation(
+      prepared.plan,
+      prepared.sidecar,
+      "interactive",
+      ports.presenter,
+      ports.confirmation,
+    );
+    const consumed = await confirmation.authorize();
     expect(consumed).toMatchObject({
       status: "approved",
       source: "interactive",

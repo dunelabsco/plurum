@@ -6,6 +6,7 @@ import {
 } from "../src/commands/setup-apply-plan.js";
 import {
   createSetupApprovalAuthority,
+  mintSetupApproval,
   type SetupApprovalAuthority,
 } from "../src/commands/setup-approval.js";
 import {
@@ -873,7 +874,7 @@ describe("setup apply plan", () => {
 
     expect(equivalent).toEqual(first);
     expect(equivalent).not.toBe(first);
-    const mismatchedApproval = authority.approve({
+    const mismatchedApproval = mintSetupApproval(authority, {
       plan: first,
       source: "interactive",
     });
@@ -890,12 +891,22 @@ describe("setup apply plan", () => {
       }),
     ).toEqual({ status: "precondition-failed" });
 
-    const exactApproval = authority.approve({
-      plan: first,
+    expect(() =>
+      mintSetupApproval(authority, {
+        plan: first,
+        source: "assume-yes",
+      }),
+    ).toThrow("The setup approval could not be created safely.");
+
+    const exactApproval = mintSetupApproval(authority, {
+      plan: equivalent,
       source: "assume-yes",
     });
     expect(
-      authority.consume({ approval: exactApproval, plan: first }),
+      authority.consume({
+        approval: exactApproval,
+        plan: equivalent,
+      }),
     ).toEqual({ status: "approved", source: "assume-yes" });
   });
 

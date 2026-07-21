@@ -6,6 +6,7 @@ import {
 } from "../src/commands/setup-apply-plan.js";
 import {
   createSetupApprovalAuthority,
+  mintSetupApproval,
   type SetupApprovalAuthority,
   type SetupApprovalIdentity,
   type SetupPreparedPlan,
@@ -19,6 +20,7 @@ import {
   type SetupCredentialResolvedPlan,
 } from "../src/commands/setup-credential-plan.js";
 import {
+  claimSetupExecutionSidecar,
   createSetupExecutionAuthority,
   SetupExecutionAuthorityError,
   type SetupExecutionAuthority,
@@ -26,6 +28,7 @@ import {
 } from "../src/commands/setup-execution-authority.js";
 import {
   createSetupPreflightSnapshot,
+  type SetupPreflightSnapshot,
 } from "../src/commands/setup-preflight.js";
 import type { CredentialKeyFingerprint } from "../src/credentials/fingerprint.js";
 import { DEFAULT_API_ORIGIN } from "../src/credentials/origin.js";
@@ -44,6 +47,7 @@ import type { SystemCapabilities } from "../src/system/contracts.js";
 import { createTestSystem } from "./support/system.js";
 
 const OPERATION_ID = "123e4567-e89b-42d3-a456-426614174000";
+const SECOND_OPERATION_ID = "223e4567-e89b-42d3-a456-426614174000";
 const CREATED_AT = "2026-07-21T09:10:11.123Z";
 const AGENT_ID = "00000000-0000-4000-8000-000000000011";
 const FINGERPRINT =
@@ -57,6 +61,7 @@ interface SetupFixture {
   readonly credential: SetupCredentialResolvedPlan;
   readonly projection: SetupCodexProjectionResolvedPlan;
   readonly plan: SetupPreparedPlan<SetupApplyPlan>;
+  readonly snapshot: SetupPreflightSnapshot;
 }
 
 function absentConfiguration(): HostConfiguration {
@@ -194,6 +199,7 @@ async function setupFixture(): Promise<SetupFixture> {
     credential,
     projection,
     plan,
+    snapshot,
   };
 }
 
@@ -232,7 +238,7 @@ describe("setup execution authority", () => {
       fixture.projection,
       observation,
     );
-    const approval = fixture.approval.approve({
+    const approval = mintSetupApproval(fixture.approval, {
       plan: fixture.plan,
       source: "interactive",
     });
@@ -422,7 +428,7 @@ describe("setup execution authority", () => {
     expect(traps).toBe(0);
   });
 
-  it("burns exact approvals and bound sidecars on forged or proxied consume inputs", async () => {
+  it("burns approvals but preserves bound sidecars on forged or proxied sidecar inputs", async () => {
     const forgedFixture = await setupFixture();
     const forgedSidecar = forgedFixture.execution.bind(
       forgedFixture.plan,
@@ -430,7 +436,7 @@ describe("setup execution authority", () => {
       forgedFixture.projection,
       forgedFixture.execution.registerObservation(privateEvidence()),
     );
-    const forgedApproval = forgedFixture.approval.approve({
+    const forgedApproval = mintSetupApproval(forgedFixture.approval, {
       plan: forgedFixture.plan,
       source: "assume-yes",
     });
@@ -443,13 +449,9 @@ describe("setup execution authority", () => {
         fakeSidecar,
       ),
     ).toEqual({ status: "precondition-failed" });
-    expect(
-      forgedFixture.execution.consume(
-        forgedFixture.plan,
-        forgedApproval,
-        forgedSidecar,
-      ),
-    ).toEqual({ status: "precondition-failed" });
+    expect(forgedFixture.execution.discard(forgedSidecar)).toEqual({
+      status: "discarded",
+    });
 
     const proxyFixture = await setupFixture();
     const proxySidecar = proxyFixture.execution.bind(
@@ -458,7 +460,7 @@ describe("setup execution authority", () => {
       proxyFixture.projection,
       proxyFixture.execution.registerObservation(privateEvidence()),
     );
-    const proxyApproval = proxyFixture.approval.approve({
+    const proxyApproval = mintSetupApproval(proxyFixture.approval, {
       plan: proxyFixture.plan,
       source: "interactive",
     });
@@ -485,14 +487,79 @@ describe("setup execution authority", () => {
         sidecarProxy,
       ),
     ).toEqual({ status: "precondition-failed" });
+    expect(proxyFixture.execution.discard(proxySidecar)).toEqual({
+      status: "discarded",
+    });
+    expect(traps).toBe(0);
+  });
+
+  it("prevents a stale pre-claim sidecar from releasing its private replacement", async () => {
+    const fixture = await setupFixture();
+    const publicSidecar = fixture.execution.bind(
+      fixture.plan,
+      fixture.credential,
+      fixture.projection,
+      fixture.execution.registerObservation(privateEvidence()),
+    );
+    const claimedSidecar = claimSetupExecutionSidecar(
+      fixture.execution,
+      fixture.plan,
+      publicSidecar,
+    );
+    const forgedApproval = Object.freeze({}) as SetupApprovalIdentity;
+
     expect(
-      proxyFixture.execution.consume(
-        proxyFixture.plan,
-        proxyApproval,
-        proxySidecar,
+      fixture.execution.consume(
+        fixture.plan,
+        forgedApproval,
+        publicSidecar,
       ),
     ).toEqual({ status: "precondition-failed" });
-    expect(traps).toBe(0);
+    expect(fixture.execution.discard(publicSidecar)).toEqual({
+      status: "precondition-failed",
+    });
+    expect(fixture.execution.discard(claimedSidecar)).toEqual({
+      status: "discarded",
+    });
+  });
+
+  it("does not collateral-release another plan under the same execution authority", async () => {
+    const fixture = await setupFixture();
+    const secondPlan = prepareSetupApplyPlan(
+      fixture.approval,
+      fixture.snapshot,
+      fixture.credential,
+      fixture.projection,
+      SECOND_OPERATION_ID,
+      CREATED_AT,
+    );
+    const firstSidecar = fixture.execution.bind(
+      fixture.plan,
+      fixture.credential,
+      fixture.projection,
+      fixture.execution.registerObservation(privateEvidence()),
+    );
+    const secondSidecar = fixture.execution.bind(
+      secondPlan,
+      fixture.credential,
+      fixture.projection,
+      fixture.execution.registerObservation(privateEvidence()),
+    );
+    const forgedApproval = Object.freeze({}) as SetupApprovalIdentity;
+
+    expect(
+      fixture.execution.consume(
+        fixture.plan,
+        forgedApproval,
+        secondSidecar,
+      ),
+    ).toEqual({ status: "precondition-failed" });
+    expect(fixture.execution.discard(secondSidecar)).toEqual({
+      status: "precondition-failed",
+    });
+    expect(fixture.execution.discard(firstSidecar)).toEqual({
+      status: "discarded",
+    });
   });
 
   it("rejects plan and approval proxies during consume without invoking traps", async () => {
@@ -503,7 +570,7 @@ describe("setup execution authority", () => {
       planFixture.projection,
       planFixture.execution.registerObservation(privateEvidence()),
     );
-    const planApproval = planFixture.approval.approve({
+    const planApproval = mintSetupApproval(planFixture.approval, {
       plan: planFixture.plan,
       source: "interactive",
     });
@@ -546,7 +613,7 @@ describe("setup execution authority", () => {
       approvalFixture.projection,
       approvalFixture.execution.registerObservation(privateEvidence()),
     );
-    const exactApproval = approvalFixture.approval.approve({
+    const exactApproval = mintSetupApproval(approvalFixture.approval, {
       plan: approvalFixture.plan,
       source: "assume-yes",
     });
@@ -573,7 +640,7 @@ describe("setup execution authority", () => {
       first.projection,
       first.execution.registerObservation(privateEvidence()),
     );
-    const approval = first.approval.approve({
+    const approval = mintSetupApproval(first.approval, {
       plan: first.plan,
       source: "interactive",
     });
@@ -596,7 +663,7 @@ describe("setup execution authority", () => {
       third.projection,
       third.execution.registerObservation(privateEvidence()),
     );
-    const foreignApproval = second.approval.approve({
+    const foreignApproval = mintSetupApproval(second.approval, {
       plan: second.plan,
       source: "assume-yes",
     });
@@ -638,7 +705,7 @@ describe("setup execution authority", () => {
     expect(fixture.execution.discard(sidecar)).toEqual({
       status: "discarded",
     });
-    const approval = fixture.approval.approve({
+    const approval = mintSetupApproval(fixture.approval, {
       plan: fixture.plan,
       source: "interactive",
     });
@@ -670,7 +737,7 @@ describe("setup execution authority", () => {
       status: "precondition-failed",
     });
 
-    const approval = fixture.approval.approve({
+    const approval = mintSetupApproval(fixture.approval, {
       plan: fixture.plan,
       source: "assume-yes",
     });

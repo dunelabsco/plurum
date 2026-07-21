@@ -12,7 +12,8 @@ import {
 } from "./setup-apply-plan.js";
 import type { SetupPreparedPlan } from "./setup-approval.js";
 
-const MAX_PREFLIGHT_OUTPUT_CHARACTERS = 256 * 1024;
+const MAX_PREFLIGHT_OUTPUT_BYTES = 256 * 1024;
+const UTF8_ENCODER = new TextEncoder();
 
 function quoted(value: string): string {
   return JSON.stringify(setupDisplayText(value));
@@ -97,8 +98,8 @@ function appendHosts(
 
 function boundedOutput(lines: readonly string[]): string {
   const output = lines.join("\n");
-  if (output.length > MAX_PREFLIGHT_OUTPUT_CHARACTERS) {
-    throw new Error("Setup preflight output exceeded its safe bound.");
+  if (UTF8_ENCODER.encode(output).byteLength > MAX_PREFLIGHT_OUTPUT_BYTES) {
+    throw new Error("Setup plan output exceeded its safe bound.");
   }
   return output;
 }

@@ -401,6 +401,21 @@ export function isOwnedSetupApplyPlanForProvenance(
   );
 }
 
+/*
+ * Confirmation needs only an identity check against the authority that
+ * prepared the plan. It must not receive the credential or projection
+ * identities retained for the later execution-sidecar check.
+ */
+export function isOwnedSetupApplyPlanForApproval(
+  plan: unknown,
+  approval: unknown,
+): plan is SetupPreparedPlan<SetupApplyPlan> {
+  if (typeof plan !== "object" || plan === null) {
+    return false;
+  }
+  return OWNED_PREPARED_APPLY_PLANS.get(plan)?.approval === approval;
+}
+
 export function publicSetupApplyPreview(
   plan: unknown,
 ): SetupApplyPreview {

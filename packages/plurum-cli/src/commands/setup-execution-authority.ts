@@ -101,6 +101,11 @@ interface SidecarState {
   readonly evidence: object;
 }
 
+interface OwnedSidecarState {
+  readonly authority: SetupExecutionAuthority;
+  readonly plan: SetupPreparedPlan<SetupApplyPlan>;
+}
+
 const PRECONDITION_FAILED = Object.freeze({
   status: "precondition-failed",
 } as const);
@@ -108,6 +113,21 @@ const DISCARDED = Object.freeze({ status: "discarded" } as const);
 const TOKEN_TO_JSON = Object.freeze(function tokenToJson(): undefined {
   return undefined;
 });
+const OWNED_EXECUTION_AUTHORITIES = new WeakMap<
+  SetupExecutionAuthority,
+  SetupApprovalAuthority
+>();
+const OWNED_SIDECARS = new WeakMap<
+  SetupExecutionSidecarIdentity,
+  OwnedSidecarState
+>();
+const SETUP_EXECUTION_SIDECAR_CLAIMERS = new WeakMap<
+  SetupExecutionAuthority,
+  (
+    plan: SetupPreparedPlan<SetupApplyPlan>,
+    sidecar: SetupExecutionSidecarIdentity,
+  ) => SetupExecutionSidecarIdentity
+>();
 
 export class SetupExecutionAuthorityError extends Error {
   readonly code = "invalid_setup_execution_authority";
@@ -159,12 +179,47 @@ export function createSetupExecutionAuthority(
     state: SidecarState,
   ): void {
     sidecars.delete(identity);
+    OWNED_SIDECARS.delete(identity);
     if (sidecarByPlan.get(state.plan) === identity) {
       sidecarByPlan.delete(state.plan);
     }
   }
 
-  return Object.freeze({
+  function claimSidecar(
+    plan: SetupPreparedPlan<SetupApplyPlan>,
+    sidecar: SetupExecutionSidecarIdentity,
+  ): SetupExecutionSidecarIdentity {
+    const boundSidecar = sidecarByPlan.get(plan);
+    const boundState =
+      boundSidecar === undefined
+        ? undefined
+        : sidecars.get(boundSidecar);
+    const suppliedState = sidecars.get(sidecar);
+    if (suppliedState !== undefined) {
+      releaseSidecar(sidecar, suppliedState);
+    } else if (boundSidecar === sidecar) {
+      sidecarByPlan.delete(plan);
+    }
+    if (
+      boundSidecar !== sidecar ||
+      boundState === undefined ||
+      suppliedState !== boundState ||
+      boundState.plan !== plan
+    ) {
+      return invalidAuthority();
+    }
+
+    const claimed = issueIdentity<SetupExecutionSidecarIdentity>();
+    sidecars.set(claimed, boundState);
+    sidecarByPlan.set(plan, claimed);
+    OWNED_SIDECARS.set(
+      claimed,
+      Object.freeze({ authority, plan }),
+    );
+    return claimed;
+  }
+
+  const authority: SetupExecutionAuthority = Object.freeze({
     registerObservation(
       evidence: object,
     ): SetupExecutionObservationIdentity {
@@ -214,6 +269,10 @@ export function createSetupExecutionAuthority(
       const state = Object.freeze({ plan, evidence });
       sidecars.set(identity, state);
       sidecarByPlan.set(plan, identity);
+      OWNED_SIDECARS.set(
+        identity,
+        Object.freeze({ authority, plan }),
+      );
       return identity;
     },
 
@@ -223,33 +282,25 @@ export function createSetupExecutionAuthority(
       sidecar: SetupExecutionSidecarIdentity,
     ): SetupExecutionConsumeResult {
       const boundSidecar = sidecarByPlan.get(plan);
-      const boundState =
-        boundSidecar === undefined
-          ? undefined
-          : sidecars.get(boundSidecar);
-      if (boundSidecar !== undefined && boundState !== undefined) {
-        releaseSidecar(boundSidecar, boundState);
-      } else if (boundSidecar !== undefined) {
-        sidecarByPlan.delete(plan);
-      }
-
       const suppliedState = sidecars.get(sidecar);
       if (suppliedState !== undefined) {
         releaseSidecar(sidecar, suppliedState);
+      } else if (boundSidecar === sidecar) {
+        sidecarByPlan.delete(plan);
       }
 
       const approved = approvalAuthority.consume({ approval, plan });
       if (
         boundSidecar !== sidecar ||
-        boundState === undefined ||
-        boundState.plan !== plan ||
+        suppliedState === undefined ||
+        suppliedState.plan !== plan ||
         approved.status !== "approved"
       ) {
         return PRECONDITION_FAILED;
       }
 
       const grant = issueIdentity<SetupExecutionGrant>();
-      grants.set(grant, boundState);
+      grants.set(grant, suppliedState);
       return Object.freeze({
         status: "approved" as const,
         source: approved.source,
@@ -284,4 +335,58 @@ export function createSetupExecutionAuthority(
       return PRECONDITION_FAILED;
     },
   });
+  OWNED_EXECUTION_AUTHORITIES.set(authority, approvalAuthority);
+  SETUP_EXECUTION_SIDECAR_CLAIMERS.set(authority, claimSidecar);
+  return authority;
+}
+
+/*
+ * Confirmation atomically replaces the caller-held sidecar with a new private
+ * identity before any await. The original can no longer be discarded or
+ * consumed while the exact plan is being displayed.
+ */
+export function claimSetupExecutionSidecar(
+  authority: SetupExecutionAuthority,
+  plan: SetupPreparedPlan<SetupApplyPlan>,
+  sidecar: SetupExecutionSidecarIdentity,
+): SetupExecutionSidecarIdentity {
+  const claim = SETUP_EXECUTION_SIDECAR_CLAIMERS.get(authority);
+  if (claim === undefined) {
+    return invalidAuthority();
+  }
+  return claim(plan, sidecar);
+}
+
+export function isOwnedSetupExecutionAuthorityForApproval(
+  authority: unknown,
+  approval: unknown,
+): authority is SetupExecutionAuthority {
+  return (
+    typeof authority === "object" &&
+    authority !== null &&
+    OWNED_EXECUTION_AUTHORITIES.get(
+      authority as SetupExecutionAuthority,
+    ) === approval
+  );
+}
+
+export function isOwnedSetupExecutionSidecarForPlan(
+  authority: unknown,
+  sidecar: unknown,
+  plan: unknown,
+): sidecar is SetupExecutionSidecarIdentity {
+  if (
+    typeof authority !== "object" ||
+    authority === null ||
+    typeof sidecar !== "object" ||
+    sidecar === null ||
+    typeof plan !== "object" ||
+    plan === null
+  ) {
+    return false;
+  }
+  const state = OWNED_SIDECARS.get(
+    sidecar as SetupExecutionSidecarIdentity,
+  );
+  return state?.authority === authority && state.plan === plan;
 }
