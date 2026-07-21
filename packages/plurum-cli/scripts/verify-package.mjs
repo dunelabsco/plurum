@@ -38,6 +38,7 @@ const expectedFiles = [
   "dist/cli.js",
   "dist/commands/doctor.js",
   "dist/commands/setup-approval.js",
+  "dist/commands/setup-credential-plan.js",
   "dist/commands/setup-output.js",
   "dist/commands/setup-preflight.js",
   "dist/commands/setup.js",

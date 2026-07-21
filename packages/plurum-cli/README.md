@@ -55,8 +55,13 @@ network, credential-environment, process, randomness, hashing, or host-mutation
 capabilities. A separate opaque approval core first creates an owned canonical
 deeply frozen plan, then binds one approval use to that exact snapshot. Caller
 objects, accessors, and proxies cannot survive into the approved plan. The core
-is not wired to a prompt or executor until the plan can also state the complete
-credential disposition.
+is not wired to a prompt or executor. A separate pure planner now defines the
+secret-free credential dispositions that the eventual plan must show: reuse,
+adopt, register, replace, or block. Selection and registration-input states are
+explicitly non-approvable. This planner has no credential reader, secret,
+network, prompt, registration, filesystem, or mutation capability; execution
+remains gated on an exact compare-and-swap observation of canonical credential
+and recovery state.
 
 The test harness refuses unverifiable execution and unsafe identity changes,
 confines guarded fake operations to a unique private root, rejects lexical,
