@@ -2,6 +2,7 @@ import type {
   BoundedCredentialRead,
   CredentialFileAttestation,
   CredentialFileReadHandle,
+  CredentialStoreWholePassEvidence,
   PrivateDirectoryAttestation,
 } from "../../src/credentials/store-contracts.js";
 import type {
@@ -9,7 +10,6 @@ import type {
   CredentialTemporaryEntry,
 } from "../../src/credentials/store-mutation-contracts.js";
 import type {
-  CredentialStoreNativeObservationEvidence,
   CredentialStoreObservationAdapter,
   CredentialStoreObservationDirectoryHandle,
 } from "../../src/credentials/store-observation-contracts.js";
@@ -26,9 +26,9 @@ export type CredentialObservationFakeOperation =
   | "close-directory";
 
 export interface InMemoryCredentialObservationStoreOptions {
-  readonly directoryMissing?: boolean;
-  readonly credentialBytes?: Uint8Array;
-  readonly transactionBytes?: Uint8Array;
+  readonly directoryMissing?: boolean | (() => boolean);
+  readonly credentialBytes?: Uint8Array | (() => Uint8Array | undefined);
+  readonly transactionBytes?: Uint8Array | (() => Uint8Array | undefined);
   readonly temporaries?: readonly CredentialTemporaryEntry[];
   readonly missingTemporaryKeys?: readonly string[];
   readonly directoryAttestations?: readonly PrivateDirectoryAttestation[];
@@ -36,7 +36,7 @@ export interface InMemoryCredentialObservationStoreOptions {
   readonly endOfFile?: boolean;
   readonly listResult?: unknown;
   readonly openResult?: unknown;
-  readonly finishEvidence?: unknown;
+  readonly finishEvidence?: unknown | (() => unknown);
   readonly onOperation?: (operation: CredentialObservationFakeOperation) => void;
 }
 
@@ -137,12 +137,22 @@ export function createInMemoryCredentialObservationStore(
     }
   }
 
+  function current<T>(value: T | (() => T)): T {
+    return typeof value === "function"
+      ? (value as () => T)()
+      : value;
+  }
+
   function bytesFor(entry: CredentialManagedEntry): Uint8Array | undefined {
     if (entry.kind === "canonical" && entry.role === "credential") {
-      return options.credentialBytes;
+      return options.credentialBytes === undefined
+        ? undefined
+        : current(options.credentialBytes);
     }
     if (entry.kind === "canonical" && entry.role === "transaction") {
-      return options.transactionBytes;
+      return options.transactionBytes === undefined
+        ? undefined
+        : current(options.transactionBytes);
     }
     return temporaryByKey.has(entryKey(entry)) ? new Uint8Array() : undefined;
   }
@@ -210,8 +220,11 @@ export function createInMemoryCredentialObservationStore(
     },
     async finishObservation() {
       record("finish-observation");
-      const evidence = options.finishEvidence ?? Object.freeze({});
-      return evidence as CredentialStoreNativeObservationEvidence;
+      const evidence =
+        options.finishEvidence === undefined
+          ? Object.freeze({})
+          : current(options.finishEvidence);
+      return evidence as CredentialStoreWholePassEvidence;
     },
     async close() {
       record("close-directory");
@@ -229,10 +242,15 @@ export function createInMemoryCredentialObservationStore(
       if (options.openResult !== undefined) {
         return options.openResult as never;
       }
-      if (options.directoryMissing === true) {
+      if (
+        options.directoryMissing !== undefined &&
+        current(options.directoryMissing)
+      ) {
         return Object.freeze({
           status: "missing" as const,
-          evidence: Object.freeze({}) as CredentialStoreNativeObservationEvidence,
+          evidence: (options.finishEvidence === undefined
+            ? Object.freeze({})
+            : current(options.finishEvidence)) as CredentialStoreWholePassEvidence,
         });
       }
       return Object.freeze({ status: "opened" as const, directory });

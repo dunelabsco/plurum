@@ -15,6 +15,11 @@ import type {
 import type {
   SetupCredentialResolvedPlan,
 } from "./setup-credential-plan.js";
+import {
+  discardSetupSecretLease,
+  isOwnedSetupSecretLease,
+  type SetupSecretLease,
+} from "./setup-secret-lease.js";
 
 declare const setupExecutionObservationBrand: unique symbol;
 declare const setupExecutionSidecarBrand: unique symbol;
@@ -63,6 +68,7 @@ export interface SetupExecutionAuthority {
    */
   registerObservation(
     evidence: object,
+    secretLease?: SetupSecretLease,
   ): SetupExecutionObservationIdentity;
 
   /*
@@ -96,14 +102,23 @@ export interface SetupExecutionAuthority {
   ): SetupExecutionDiscardResult;
 }
 
-interface SidecarState {
-  readonly plan: SetupPreparedPlan<SetupApplyPlan>;
+interface ObservationState {
   readonly evidence: object;
+  readonly secretLease: SetupSecretLease | null;
+}
+
+interface SidecarState extends ObservationState {
+  readonly plan: SetupPreparedPlan<SetupApplyPlan>;
 }
 
 interface OwnedSidecarState {
   readonly authority: SetupExecutionAuthority;
   readonly plan: SetupPreparedPlan<SetupApplyPlan>;
+}
+
+interface OwnedGrantState {
+  readonly authority: SetupExecutionAuthority;
+  readonly state: SidecarState;
 }
 
 const PRECONDITION_FAILED = Object.freeze({
@@ -121,12 +136,20 @@ const OWNED_SIDECARS = new WeakMap<
   SetupExecutionSidecarIdentity,
   OwnedSidecarState
 >();
+const OWNED_GRANTS = new WeakMap<
+  SetupExecutionGrant,
+  OwnedGrantState
+>();
 const SETUP_EXECUTION_SIDECAR_CLAIMERS = new WeakMap<
   SetupExecutionAuthority,
   (
     plan: SetupPreparedPlan<SetupApplyPlan>,
     sidecar: SetupExecutionSidecarIdentity,
   ) => SetupExecutionSidecarIdentity
+>();
+const SETUP_EXECUTION_GRANT_BURNERS = new WeakMap<
+  SetupExecutionAuthority,
+  (grant: SetupExecutionGrant, dispose: boolean) => void
 >();
 
 export class SetupExecutionAuthorityError extends Error {
@@ -162,7 +185,7 @@ export function createSetupExecutionAuthority(
 
   const observations = new WeakMap<
     SetupExecutionObservationIdentity,
-    object
+    ObservationState
   >();
   const sidecars = new WeakMap<
     SetupExecutionSidecarIdentity,
@@ -174,6 +197,12 @@ export function createSetupExecutionAuthority(
   >();
   const grants = new WeakMap<SetupExecutionGrant, SidecarState>();
 
+  function disposeState(state: ObservationState | SidecarState): void {
+    if (state.secretLease !== null) {
+      discardSetupSecretLease(state.secretLease);
+    }
+  }
+
   function releaseSidecar(
     identity: SetupExecutionSidecarIdentity,
     state: SidecarState,
@@ -182,6 +211,17 @@ export function createSetupExecutionAuthority(
     OWNED_SIDECARS.delete(identity);
     if (sidecarByPlan.get(state.plan) === identity) {
       sidecarByPlan.delete(state.plan);
+    }
+  }
+
+  function releaseGrant(
+    identity: SetupExecutionGrant,
+    state: SidecarState,
+  ): void {
+    grants.delete(identity);
+    const owned = OWNED_GRANTS.get(identity);
+    if (owned?.authority === authority && owned.state === state) {
+      OWNED_GRANTS.delete(identity);
     }
   }
 
@@ -206,6 +246,9 @@ export function createSetupExecutionAuthority(
       suppliedState !== boundState ||
       boundState.plan !== plan
     ) {
+      if (suppliedState !== undefined) {
+        disposeState(suppliedState);
+      }
       return invalidAuthority();
     }
 
@@ -222,16 +265,30 @@ export function createSetupExecutionAuthority(
   const authority: SetupExecutionAuthority = Object.freeze({
     registerObservation(
       evidence: object,
+      secretLease?: SetupSecretLease,
     ): SetupExecutionObservationIdentity {
+      const retainedLease =
+        secretLease === undefined
+          ? null
+          : isOwnedSetupSecretLease(secretLease)
+            ? secretLease
+            : undefined;
       if (
-        (typeof evidence !== "object" || evidence === null) &&
-        typeof evidence !== "function"
+        ((typeof evidence !== "object" || evidence === null) &&
+          typeof evidence !== "function") ||
+        retainedLease === undefined
       ) {
+        if (retainedLease !== null && retainedLease !== undefined) {
+          discardSetupSecretLease(retainedLease);
+        }
         return invalidAuthority();
       }
       const identity =
         issueIdentity<SetupExecutionObservationIdentity>();
-      observations.set(identity, evidence);
+      observations.set(
+        identity,
+        Object.freeze({ evidence, secretLease: retainedLease }),
+      );
       return identity;
     },
 
@@ -241,7 +298,7 @@ export function createSetupExecutionAuthority(
       codexProjection: SetupCodexProjectionResolvedPlan | null,
       observation: SetupExecutionObservationIdentity,
     ): SetupExecutionSidecarIdentity {
-      const evidence = observations.get(observation);
+      const observationState = observations.get(observation);
       observations.delete(observation);
 
       const existing = sidecarByPlan.get(plan);
@@ -249,12 +306,15 @@ export function createSetupExecutionAuthority(
         if (sidecars.get(existing) === undefined) {
           sidecarByPlan.delete(plan);
         } else {
+          if (observationState !== undefined) {
+            disposeState(observationState);
+          }
           return invalidAuthority();
         }
       }
 
       if (
-        evidence === undefined ||
+        observationState === undefined ||
         !isOwnedSetupApplyPlanForProvenance(
           plan,
           approvalAuthority,
@@ -262,11 +322,14 @@ export function createSetupExecutionAuthority(
           codexProjection,
         )
       ) {
+        if (observationState !== undefined) {
+          disposeState(observationState);
+        }
         return invalidAuthority();
       }
 
       const identity = issueIdentity<SetupExecutionSidecarIdentity>();
-      const state = Object.freeze({ plan, evidence });
+      const state = Object.freeze({ plan, ...observationState });
       sidecars.set(identity, state);
       sidecarByPlan.set(plan, identity);
       OWNED_SIDECARS.set(
@@ -296,11 +359,18 @@ export function createSetupExecutionAuthority(
         suppliedState.plan !== plan ||
         approved.status !== "approved"
       ) {
+        if (suppliedState !== undefined) {
+          disposeState(suppliedState);
+        }
         return PRECONDITION_FAILED;
       }
 
       const grant = issueIdentity<SetupExecutionGrant>();
       grants.set(grant, suppliedState);
+      OWNED_GRANTS.set(
+        grant,
+        Object.freeze({ authority, state: suppliedState }),
+      );
       return Object.freeze({
         status: "approved" as const,
         source: approved.source,
@@ -314,11 +384,12 @@ export function createSetupExecutionAuthority(
         | SetupExecutionSidecarIdentity
         | SetupExecutionGrant,
     ): SetupExecutionDiscardResult {
-      if (
-        observations.delete(
-          identity as SetupExecutionObservationIdentity,
-        )
-      ) {
+      const observationIdentity =
+        identity as SetupExecutionObservationIdentity;
+      const observationState = observations.get(observationIdentity);
+      if (observationState !== undefined) {
+        observations.delete(observationIdentity);
+        disposeState(observationState);
         return DISCARDED;
       }
 
@@ -326,10 +397,15 @@ export function createSetupExecutionAuthority(
       const state = sidecars.get(sidecarIdentity);
       if (state !== undefined) {
         releaseSidecar(sidecarIdentity, state);
+        disposeState(state);
         return DISCARDED;
       }
 
-      if (grants.delete(identity as SetupExecutionGrant)) {
+      const grantIdentity = identity as SetupExecutionGrant;
+      const grantState = grants.get(grantIdentity);
+      if (grantState !== undefined) {
+        releaseGrant(grantIdentity, grantState);
+        disposeState(grantState);
         return DISCARDED;
       }
       return PRECONDITION_FAILED;
@@ -337,6 +413,15 @@ export function createSetupExecutionAuthority(
   });
   OWNED_EXECUTION_AUTHORITIES.set(authority, approvalAuthority);
   SETUP_EXECUTION_SIDECAR_CLAIMERS.set(authority, claimSidecar);
+  SETUP_EXECUTION_GRANT_BURNERS.set(authority, (grant, dispose) => {
+    const state = grants.get(grant);
+    if (state !== undefined) {
+      releaseGrant(grant, state);
+      if (dispose) {
+        disposeState(state);
+      }
+    }
+  });
   return authority;
 }
 
@@ -355,6 +440,32 @@ export function claimSetupExecutionSidecar(
     return invalidAuthority();
   }
   return claim(plan, sidecar);
+}
+
+/*
+ * Registration execution burns the supplied grant before validating its
+ * authority and exact prepared-plan identity. Only the reviewed, factory-owned
+ * executor may receive the retained private evidence; no caller callback is
+ * accepted and no evidence is copied into another serializable wrapper.
+ */
+export function claimSetupExecutionGrant(
+  authority: SetupExecutionAuthority,
+  plan: SetupPreparedPlan<SetupApplyPlan>,
+  grant: SetupExecutionGrant,
+): object {
+  const owned = OWNED_GRANTS.get(grant);
+  OWNED_GRANTS.delete(grant);
+  const valid =
+    owned !== undefined &&
+    owned.authority === authority &&
+    owned.state.plan === plan;
+  if (owned !== undefined) {
+    SETUP_EXECUTION_GRANT_BURNERS.get(owned.authority)?.(grant, !valid);
+  }
+  if (!valid || owned === undefined) {
+    return invalidAuthority();
+  }
+  return owned.state.evidence;
 }
 
 export function isOwnedSetupExecutionAuthorityForApproval(

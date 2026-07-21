@@ -12,6 +12,7 @@ import type { CredentialLocations } from "../credentials/paths.js";
 import {
   type ActiveCredentialV1,
   type AgentName,
+  type CanonicalTimestamp,
   type PendingCredentialV1,
   type RegistrationRequestId,
   type Username,
@@ -20,6 +21,7 @@ import {
 import {
   runExclusiveCredentialRegistration,
   type ExclusiveCredentialRegistrationSession,
+  type ExclusiveObservedCredentialSetupSession,
 } from "../credentials/store-writer.js";
 import type {
   ClockAdapter,
@@ -33,12 +35,16 @@ import {
 } from "./key-material.js";
 import type { CredentialStoreMutationAdapter } from "../credentials/store-mutation-contracts.js";
 
-export interface RecoverableRegistrationDependencies {
-  readonly storage: CredentialStoreMutationAdapter;
+export interface RecoverableRegistrationOperationDependencies {
   readonly network: NetworkAdapter;
   readonly clock: ClockAdapter;
   readonly random: RandomAdapter;
   readonly hash: HashAdapter;
+}
+
+export interface RecoverableRegistrationDependencies
+  extends RecoverableRegistrationOperationDependencies {
+  readonly storage: CredentialStoreMutationAdapter;
 }
 
 export interface UsernameConflictRetryDependencies {
@@ -101,10 +107,17 @@ export type UsernameConflictRetryResult =
   | Readonly<{ status: "busy" }>;
 
 interface PreparedRegistration {
-  readonly dependencies: RecoverableRegistrationDependencies;
-  readonly locations: Pick<CredentialLocations, "directory">;
+  readonly dependencies: RecoverableRegistrationOperationDependencies;
   readonly input: RecoverableRegistrationInput;
   readonly originPolicy: ApiOriginPolicy;
+}
+
+interface PreparedExclusiveRegistration {
+  readonly registration: PreparedRegistration;
+  readonly storage: CredentialStoreMutationAdapter;
+  readonly clock: ClockAdapter;
+  readonly random: RandomAdapter;
+  readonly locations: Pick<CredentialLocations, "directory">;
 }
 
 const BUSY: RecoverableRegistrationResult = Object.freeze({
@@ -166,9 +179,8 @@ const USERNAME_RETRY_BUSY: UsernameConflictRetryResult = Object.freeze({
   status: "busy",
 });
 
-function prepare(
-  dependencies: RecoverableRegistrationDependencies,
-  locations: Pick<CredentialLocations, "directory">,
+function prepareRegistration(
+  dependencies: RecoverableRegistrationOperationDependencies,
   input: RecoverableRegistrationInput,
   originPolicy: ApiOriginPolicy,
 ): PreparedRegistration {
@@ -180,19 +192,36 @@ function prepare(
   }
   return Object.freeze({
     dependencies: Object.freeze({
-      storage: dependencies.storage,
       network: dependencies.network,
       clock: dependencies.clock,
       random: dependencies.random,
       hash: dependencies.hash,
     }),
-    locations: Object.freeze({ directory: `${locations.directory}` }),
     input: Object.freeze({
       apiOrigin: input.apiOrigin,
       agentName: input.agentName,
       username: input.username,
     }),
     originPolicy,
+  });
+}
+
+function prepareExclusiveRegistration(
+  dependencies: RecoverableRegistrationDependencies,
+  locations: Pick<CredentialLocations, "directory">,
+  input: RecoverableRegistrationInput,
+  originPolicy: ApiOriginPolicy,
+): PreparedExclusiveRegistration {
+  return Object.freeze({
+    registration: prepareRegistration(
+      dependencies,
+      input,
+      originPolicy,
+    ),
+    storage: dependencies.storage,
+    clock: dependencies.clock,
+    random: dependencies.random,
+    locations: Object.freeze({ directory: `${locations.directory}` }),
   });
 }
 
@@ -243,11 +272,7 @@ function activeIdentityMatches(
   credential: ActiveCredentialV1,
   agent: ValidatedAgentIdentity,
 ): boolean {
-  return (
-    credential.agent_id === agent.id &&
-    credential.agent_name === agent.name &&
-    credential.username === agent.username
-  );
+  return credential.agent_id === agent.id;
 }
 
 async function activateVerified(
@@ -297,6 +322,40 @@ function pendingCredential(
     throw new CredentialError("invalid_credential_document");
   }
   return candidate;
+}
+
+function registrationTimestamp(clock: ClockAdapter): CanonicalTimestamp {
+  try {
+    const milliseconds = clock.now();
+    if (!Number.isFinite(milliseconds)) {
+      throw new CredentialError("credential_store_unavailable");
+    }
+    return new Date(milliseconds).toISOString() as CanonicalTimestamp;
+  } catch (error) {
+    if (error instanceof CredentialError) {
+      throw error;
+    }
+    throw new CredentialError("credential_store_unavailable");
+  }
+}
+
+function exactActiveCredentialMatches(
+  left: ActiveCredentialV1,
+  right: ActiveCredentialV1,
+): boolean {
+  return (
+    left.schema_version === right.schema_version &&
+    left.state === right.state &&
+    left.api_origin === right.api_origin &&
+    left.api_key === right.api_key &&
+    left.agent_id === right.agent_id &&
+    left.agent_name === right.agent_name &&
+    left.username === right.username &&
+    left.registration_request_id === right.registration_request_id &&
+    left.created_at === right.created_at &&
+    left.updated_at === right.updated_at &&
+    left.activated_at === right.activated_at
+  );
 }
 
 function conflictResult(
@@ -352,35 +411,11 @@ async function verifyAfterRegistration(
   );
 }
 
-async function operate(
+async function operatePending(
   prepared: PreparedRegistration,
   session: ExclusiveCredentialRegistrationSession,
+  pending: PendingCredentialV1,
 ): Promise<RecoverableRegistrationResult> {
-  const stored = await session.readOrCreatePending((createdAt) =>
-    pendingCredential(prepared, createdAt),
-  );
-  if (stored.status === "existing-active") {
-    const validation = await validateAgentCredential(
-      prepared.dependencies.network,
-      stored.credential.api_origin,
-      stored.credential.api_key,
-      prepared.originPolicy,
-    );
-    if (validation.status === "indeterminate") {
-      return VERIFICATION_UNAVAILABLE;
-    }
-    if (validation.status === "invalid") {
-      return ACTIVE_CREDENTIAL_INVALID;
-    }
-    return activeIdentityMatches(
-      stored.credential,
-      validation.agent,
-    )
-      ? activeResult("existing", validation.agent)
-      : IDENTITY_MISMATCH;
-  }
-
-  const pending = stored.credential;
   const initialValidation = await validateAgentCredential(
     prepared.dependencies.network,
     pending.api_origin,
@@ -423,15 +458,143 @@ async function operate(
   );
 }
 
+async function operateActive(
+  prepared: PreparedRegistration,
+  credential: ActiveCredentialV1,
+): Promise<RecoverableRegistrationResult> {
+  const validation = await validateAgentCredential(
+    prepared.dependencies.network,
+    credential.api_origin,
+    credential.api_key,
+    prepared.originPolicy,
+  );
+  if (validation.status === "indeterminate") {
+    return VERIFICATION_UNAVAILABLE;
+  }
+  if (validation.status === "invalid") {
+    return ACTIVE_CREDENTIAL_INVALID;
+  }
+  return activeIdentityMatches(credential, validation.agent)
+    ? activeResult("existing", validation.agent)
+    : IDENTITY_MISMATCH;
+}
+
+async function operate(
+  prepared: PreparedRegistration,
+  session: ExclusiveCredentialRegistrationSession,
+): Promise<RecoverableRegistrationResult> {
+  const stored = await session.readOrCreatePending((createdAt) =>
+    pendingCredential(prepared, createdAt),
+  );
+  if (stored.status === "existing-active") {
+    return operateActive(prepared, stored.credential);
+  }
+
+  return operatePending(prepared, session, stored.credential);
+}
+
+async function operateApprovedActiveReplacement(
+  prepared: PreparedRegistration,
+  session: ExclusiveObservedCredentialSetupSession,
+  approvedActiveReplacement: ActiveCredentialV1,
+): Promise<RecoverableRegistrationResult> {
+  const expected = validateCredentialDocument(
+    approvedActiveReplacement,
+    prepared.originPolicy,
+  );
+  if (expected.state !== "active") {
+    throw new CredentialError("credential_store_conflict");
+  }
+
+  const observed = await session.readExactCredential(expected);
+  if (observed === null) {
+    throw new CredentialError("credential_store_conflict");
+  }
+  const validatedObserved = validateCredentialDocument(
+    observed,
+    prepared.originPolicy,
+  );
+  if (
+    validatedObserved.state !== "active" ||
+    !exactActiveCredentialMatches(expected, validatedObserved)
+  ) {
+    throw new CredentialError("credential_store_conflict");
+  }
+
+  const pending = pendingCredential(
+    prepared,
+    registrationTimestamp(prepared.dependencies.clock),
+  );
+  const write = await session.writeExactCredential(expected, pending);
+  if (write.status !== "written") {
+    throw new CredentialError("credential_store_conflict");
+  }
+  return operatePending(prepared, session, pending);
+}
+
+function registrationErrorResult(
+  error: unknown,
+): RecoverableRegistrationResult {
+  if (
+    error instanceof CredentialError &&
+    error.code === "credential_store_busy"
+  ) {
+    return BUSY;
+  }
+  if (
+    error instanceof CredentialError &&
+    error.code === "credential_store_conflict"
+  ) {
+    return LOCAL_CREDENTIAL_CONFLICT;
+  }
+  if (error instanceof CredentialError) {
+    return STORE_UNAVAILABLE;
+  }
+  return REGISTRATION_UNAVAILABLE;
+}
+
+/*
+ * This entry point is deliberately storage-free: its caller already owns the
+ * approval-bound observed credential-store lease. Supplying an exact active
+ * credential is the caller's explicit authority to replace only that state.
+ */
+export async function runRecoverableAgentRegistrationInSession(
+  dependencies: RecoverableRegistrationOperationDependencies,
+  session: ExclusiveObservedCredentialSetupSession,
+  input: RecoverableRegistrationInput,
+  approvedActiveReplacement?: ActiveCredentialV1 | null,
+  originPolicy: ApiOriginPolicy = "https-only",
+): Promise<RecoverableRegistrationResult> {
+  let prepared: PreparedRegistration;
+  try {
+    prepared = prepareRegistration(dependencies, input, originPolicy);
+  } catch {
+    return REGISTRATION_UNAVAILABLE;
+  }
+
+  try {
+    return approvedActiveReplacement === undefined ||
+      approvedActiveReplacement === null
+      ? await operate(prepared, session)
+      : await operateApprovedActiveReplacement(
+          prepared,
+          session,
+          approvedActiveReplacement,
+        );
+  } catch (error) {
+    return registrationErrorResult(error);
+  }
+}
+
 export async function runRecoverableAgentRegistration(
   dependencies: RecoverableRegistrationDependencies,
   locations: Pick<CredentialLocations, "directory">,
   input: RecoverableRegistrationInput,
   originPolicy: ApiOriginPolicy = "https-only",
 ): Promise<RecoverableRegistrationResult> {
-  let prepared: PreparedRegistration;
+  let prepared: PreparedExclusiveRegistration;
   try {
-    prepared = prepare(
+    prepared = prepareExclusiveRegistration(
       dependencies,
       locations,
       input,
@@ -444,31 +607,16 @@ export async function runRecoverableAgentRegistration(
   try {
     return await runExclusiveCredentialRegistration(
       {
-        storage: prepared.dependencies.storage,
-        random: prepared.dependencies.random,
-        clock: prepared.dependencies.clock,
+        storage: prepared.storage,
+        random: prepared.random,
+        clock: prepared.clock,
       },
       prepared.locations,
-      (session) => operate(prepared, session),
-      prepared.originPolicy,
+      (session) => operate(prepared.registration, session),
+      prepared.registration.originPolicy,
     );
   } catch (error) {
-    if (
-      error instanceof CredentialError &&
-      error.code === "credential_store_busy"
-    ) {
-      return BUSY;
-    }
-    if (
-      error instanceof CredentialError &&
-      error.code === "credential_store_conflict"
-    ) {
-      return LOCAL_CREDENTIAL_CONFLICT;
-    }
-    if (error instanceof CredentialError) {
-      return STORE_UNAVAILABLE;
-    }
-    return REGISTRATION_UNAVAILABLE;
+    return registrationErrorResult(error);
   }
 }
 

@@ -17,11 +17,13 @@ import {
   validateCredentialTransactionId,
 } from "../src/credentials/store-transaction.js";
 import {
+  claimCredentialStoreObservationEvidence,
   createCredentialStoreObservationAuthority,
   isOwnedCredentialStoreObservationAuthority,
 } from "../src/credentials/store-observer.js";
 import type {
   CredentialStoreObservationAdapter,
+  CredentialStoreObservationEvidence,
   CredentialStoreObservationIdentity,
 } from "../src/credentials/store-observation-contracts.js";
 import {
@@ -259,6 +261,51 @@ describe("credential-store observation authority", () => {
     expect(
       authority.redeem({ identity: inspected.identity, directory: DIRECTORY }),
     ).toEqual({ status: "precondition-failed" });
+  });
+
+  it("burns private whole-pass evidence before checking its authority", async () => {
+    const rawEvidence = Object.freeze({ source: "whole-pass" });
+    const fake = createInMemoryCredentialObservationStore({
+      finishEvidence: rawEvidence,
+    });
+    const authority = createCredentialStoreObservationAuthority(fake.adapter);
+    const other = createCredentialStoreObservationAuthority(fake.adapter);
+
+    async function redeemEvidence() {
+      const inspected = await authority.inspect({ directory: DIRECTORY });
+      if (inspected.status !== "available") {
+        throw new Error("expected available observation");
+      }
+      const redeemed = authority.redeem({
+        identity: inspected.identity,
+        directory: DIRECTORY,
+      });
+      if (redeemed.status !== "redeemed") {
+        throw new Error("expected redeemed observation");
+      }
+      return redeemed.evidence;
+    }
+
+    const wrongAuthority = await redeemEvidence();
+    expect(
+      claimCredentialStoreObservationEvidence(other, wrongAuthority),
+    ).toBeUndefined();
+    expect(
+      claimCredentialStoreObservationEvidence(authority, wrongAuthority),
+    ).toBeUndefined();
+
+    const genuine = await redeemEvidence();
+    expect(
+      claimCredentialStoreObservationEvidence(authority, genuine),
+    ).toBe(rawEvidence);
+    expect(
+      claimCredentialStoreObservationEvidence(authority, genuine),
+    ).toBeUndefined();
+
+    const forgery = Object.freeze({}) as CredentialStoreObservationEvidence;
+    expect(
+      claimCredentialStoreObservationEvidence(authority, forgery),
+    ).toBeUndefined();
   });
 
   it("treats a valid transaction as recovery-required and retains it only in redemption", async () => {

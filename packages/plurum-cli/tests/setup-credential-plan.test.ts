@@ -271,6 +271,77 @@ describe("setup credential plan", () => {
     },
   );
 
+  it("requires a fresh username decision for an authoritative pending conflict", () => {
+    const observation = setupObservation({
+      canonical: {
+        status: "pending",
+        apiOrigin: DEFAULT_API_ORIGIN,
+        fingerprint: FINGERPRINT_A,
+        agent: { name: "Codex", username: "codex-agent" },
+        sources: ["canonical"],
+        resumeEvidence: "username-conflict",
+      },
+      invalidSources: ["canonical"],
+    });
+
+    expect(plan(observation)).toEqual({
+      status: "registration-input-required",
+      reason: "username-conflict",
+      apiOrigin: DEFAULT_API_ORIGIN,
+      canonicalEffect: "resume",
+      invalidSources: ["canonical"],
+    });
+    expect(
+      plan(
+        observation,
+        setupDecision({
+          registration: {
+            agentName: "Codex",
+            username: "codex-agent-2",
+          },
+        }),
+      ),
+    ).toEqual({
+      status: "resolved",
+      disposition: "register",
+      acquisition: "username-conflict-retry",
+      canonicalEffect: "resume",
+      reason: "canonical-registration-username-conflict",
+      apiOrigin: DEFAULT_API_ORIGIN,
+      registration: {
+        mode: "username-retry",
+        fingerprint: FINGERPRINT_A,
+        previousUsername: "codex-agent",
+        agent: { name: "Codex", username: "codex-agent-2" },
+        sources: ["canonical"],
+      },
+      invalidSources: ["canonical"],
+    });
+
+    expect(() =>
+      plan(
+        observation,
+        setupDecision({
+          registration: {
+            agentName: "Codex",
+            username: "codex-agent",
+          },
+        }),
+      ),
+    ).toThrow(FIXED_ERROR);
+    expect(() =>
+      plan(
+        observation,
+        setupDecision({
+          registration: {
+            agentName: "Renamed",
+            username: "codex-agent-2",
+          },
+        }),
+      ),
+    ).toThrow(FIXED_ERROR);
+  });
+
   it.each([
     [
       "identity-mismatch",

@@ -68,6 +68,18 @@ function encodePreimage(apiOrigin: ApiOrigin, apiKey: ApiKey): Uint8Array {
   const origin = encoder.encode(apiOrigin);
   const key = encoder.encode(apiKey);
   try {
+    return encodePreimageBytes(origin, key);
+  } finally {
+    wipe(origin);
+    wipe(key);
+  }
+}
+
+function encodePreimageBytes(
+  origin: Uint8Array,
+  key: Uint8Array,
+): Uint8Array {
+  try {
     const length = DOMAIN.length + 1 + 4 + origin.length + 4 + key.length;
     if (
       origin.length > 0xffff_ffff ||
@@ -91,9 +103,45 @@ function encodePreimage(apiOrigin: ApiOrigin, apiKey: ApiKey): Uint8Array {
     offset += 4;
     preimage.set(key, offset);
     return preimage;
-  } finally {
-    wipe(origin);
-    wipe(key);
+  } catch {
+    return failure();
+  }
+}
+
+function validApiKeyBytes(value: Uint8Array): boolean {
+  const prefix = "plrm_live_";
+  try {
+    if (
+      !(value instanceof Uint8Array) ||
+      value.length < 20 ||
+      value.length > 210
+    ) {
+      return false;
+    }
+    for (let index = 0; index < value.length; index += 1) {
+      const byte = value[index];
+      if (byte === undefined) {
+        return false;
+      }
+      if (index < prefix.length) {
+        if (byte !== prefix.charCodeAt(index)) {
+          return false;
+        }
+        continue;
+      }
+      if (
+        (byte < 0x30 || byte > 0x39) &&
+        (byte < 0x41 || byte > 0x5a) &&
+        byte !== 0x5f &&
+        (byte < 0x61 || byte > 0x7a) &&
+        byte !== 0x2d
+      ) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -151,6 +199,42 @@ function hashCredentialKey(
   }
 }
 
+function hashCredentialKeyBytes(
+  apiOrigin: ApiOrigin,
+  apiKey: Uint8Array,
+  hash: HashAdapter,
+): IdentifiedCredentialKey {
+  let digest: Uint8Array | undefined;
+  let origin: Uint8Array | undefined;
+  let preimage: Uint8Array | undefined;
+  try {
+    if (!validApiKeyBytes(apiKey)) {
+      return failure();
+    }
+    origin = new TextEncoder().encode(apiOrigin);
+    preimage = encodePreimageBytes(origin, apiKey);
+    const adapterDigest = hash.sha256(preimage);
+    if (
+      !(adapterDigest instanceof Uint8Array) ||
+      adapterDigest.length !== SHA256_DIGEST_BYTES
+    ) {
+      return failure();
+    }
+    digest = new Uint8Array(SHA256_DIGEST_BYTES);
+    setBytes.call(digest, adapterDigest);
+    return Object.freeze({
+      identity: fullDigest(digest),
+      fingerprint: displayDigest(digest),
+    });
+  } catch {
+    return failure();
+  } finally {
+    wipe(digest);
+    wipe(origin);
+    wipe(preimage);
+  }
+}
+
 export function identifyCredentialKey(
   apiOrigin: unknown,
   apiKey: unknown,
@@ -166,6 +250,22 @@ export function identifyCredentialKey(
   const normalizedOrigin = normalizeApiOrigin(apiOrigin, originPolicy);
   const parsedApiKey = parseApiKey(apiKey);
   return hashCredentialKey(normalizedOrigin, parsedApiKey, hash);
+}
+
+export function identifyCredentialKeyBytes(
+  apiOrigin: unknown,
+  apiKey: Uint8Array,
+  originPolicy: ApiOriginPolicy,
+  hash: HashAdapter,
+): IdentifiedCredentialKey {
+  if (
+    originPolicy !== "https-only" &&
+    originPolicy !== "explicit-loopback-development"
+  ) {
+    throw new CredentialError("invalid_api_origin");
+  }
+  const normalizedOrigin = normalizeApiOrigin(apiOrigin, originPolicy);
+  return hashCredentialKeyBytes(normalizedOrigin, apiKey, hash);
 }
 
 export function fingerprintCredentialKey(

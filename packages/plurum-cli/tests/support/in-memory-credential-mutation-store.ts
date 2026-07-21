@@ -7,8 +7,8 @@ import type {
   CredentialMissingEntrySnapshot,
   CredentialPresentEntrySnapshot,
   CredentialSetupLeaseNonce,
-  CredentialStoreMutationAdapter,
   CredentialStoreMutationLease,
+  CredentialStoreObservedMutationAdapter,
   CredentialTemporaryEntry,
 } from "../../src/credentials/store-mutation-contracts.js";
 import {
@@ -24,6 +24,7 @@ import {
   type CredentialFileAttestation,
   type CredentialFileReadHandle,
   type CredentialObjectIdentity,
+  type CredentialStoreWholePassEvidence,
   type PrivateDirectoryAttestation,
 } from "../../src/credentials/store-contracts.js";
 
@@ -52,6 +53,7 @@ export interface InMemoryCredentialMutationStoreEntry {
 }
 
 export interface InMemoryCredentialMutationStoreControl {
+  observeWholePass(): CredentialStoreWholePassEvidence;
   seedCredential(bytes: Uint8Array): void;
   seedTransaction(bytes: Uint8Array): void;
   seedTemporary(entry: CredentialTemporaryEntry, bytes: Uint8Array): void;
@@ -67,7 +69,7 @@ export interface InMemoryCredentialMutationStoreTrace {
 }
 
 export interface InMemoryCredentialMutationStore {
-  readonly adapter: CredentialStoreMutationAdapter;
+  readonly adapter: CredentialStoreObservedMutationAdapter;
   readonly control: InMemoryCredentialMutationStoreControl;
   readonly trace: InMemoryCredentialMutationStoreTrace;
 }
@@ -93,6 +95,11 @@ interface LeaseState {
   readonly id: number;
   readonly nonce: CredentialSetupLeaseNonce;
   state: "held" | "released" | "abandoned" | "crashed";
+}
+
+interface WholePassEvidenceRecord {
+  readonly directoryExists: boolean;
+  readonly directoryRevision: number;
 }
 
 const DIRECTORY_IDENTITY = Object.freeze({
@@ -228,6 +235,10 @@ export function createInMemoryCredentialMutationStore(
 
   const generations = new Map<string, number>();
   const snapshotRecords = new WeakMap<object, SnapshotRecord>();
+  const wholePassEvidenceRecords = new WeakMap<
+    object,
+    WholePassEvidenceRecord
+  >();
   const operationLog: string[] = [];
   const startedOperationCounts = new Map<string, number>();
 
@@ -789,7 +800,31 @@ export function createInMemoryCredentialMutationStore(
     });
   }
 
-  const adapter: CredentialStoreMutationAdapter = Object.freeze({
+  function acquireLease(nonce: CredentialSetupLeaseNonce) {
+    const directory: "existing" | "created" = directoryExists
+      ? "existing"
+      : "created";
+    directoryExists = true;
+    durableDirectoryExists = true;
+    const priorLease = abandonedLeaseEvidence
+      ? "proven-abandoned" as const
+      : "absent" as const;
+    abandonedLeaseEvidence = false;
+    const leaseState: LeaseState = {
+      id: nextLeaseId++,
+      nonce,
+      state: "held",
+    };
+    activeLease = leaseState;
+    return Object.freeze({
+      status: "acquired" as const,
+      priorLease,
+      directory,
+      lease: makeLease(leaseState),
+    });
+  }
+
+  const adapter: CredentialStoreObservedMutationAdapter = Object.freeze({
     async acquireSetupLease(
       _directory: string,
       acquireOptions: Readonly<{
@@ -810,29 +845,57 @@ export function createInMemoryCredentialMutationStore(
       if (activeLease?.state === "held") {
         return Object.freeze({ status: "busy" as const });
       }
-      const directory = directoryExists ? "existing" : "created";
-      directoryExists = true;
-      durableDirectoryExists = true;
-      const priorLease = abandonedLeaseEvidence
-        ? "proven-abandoned"
-        : "absent";
-      abandonedLeaseEvidence = false;
-      const leaseState: LeaseState = {
-        id: nextLeaseId++,
-        nonce: acquireOptions.nonce,
-        state: "held",
-      };
-      activeLease = leaseState;
-      return Object.freeze({
-        status: "acquired" as const,
-        priorLease,
-        directory,
-        lease: makeLease(leaseState),
-      });
+      return acquireLease(acquireOptions.nonce);
+    },
+    async acquireObservedSetupLease(
+      _directory: string,
+      acquireOptions: Readonly<{
+        noFollow: true;
+        createDirectory: true;
+        evidence: CredentialStoreWholePassEvidence;
+      }>,
+    ) {
+      record("acquire-observed-lease");
+      if (
+        acquireOptions.noFollow !== true ||
+        acquireOptions.createDirectory !== true ||
+        acquireOptions.evidence === null ||
+        typeof acquireOptions.evidence !== "object"
+      ) {
+        throw new Error("invalid in-memory observed lease acquisition");
+      }
+      const retained = wholePassEvidenceRecords.get(
+        acquireOptions.evidence,
+      );
+      wholePassEvidenceRecords.delete(acquireOptions.evidence);
+      if (activeLease?.state === "held") {
+        return Object.freeze({ status: "busy" as const });
+      }
+      if (
+        retained === undefined ||
+        retained.directoryExists !== directoryExists ||
+        retained.directoryRevision !== directoryRevision
+      ) {
+        return Object.freeze({
+          status: "precondition-failed" as const,
+        });
+      }
+      return acquireLease(
+        "ffffffff-ffff-4fff-8fff-ffffffffffff" as CredentialSetupLeaseNonce,
+      );
     },
   });
 
   const control: InMemoryCredentialMutationStoreControl = Object.freeze({
+    observeWholePass() {
+      record("control:observe-whole-pass");
+      const evidence = Object.freeze({});
+      wholePassEvidenceRecords.set(
+        evidence,
+        Object.freeze({ directoryExists, directoryRevision }),
+      );
+      return evidence as CredentialStoreWholePassEvidence;
+    },
     seedCredential(bytes: Uint8Array) {
       replaceCredential(bytes, "control:seed-credential");
     },

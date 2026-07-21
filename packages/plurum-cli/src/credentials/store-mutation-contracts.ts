@@ -2,6 +2,7 @@ import {
   CREDENTIAL_STORE_ENTRY,
   type CredentialFileAttestation,
   type CredentialFileReadHandle,
+  type CredentialStoreWholePassEvidence,
   type PrivateDirectoryAttestation,
 } from "./store-contracts.js";
 
@@ -267,4 +268,38 @@ export interface CredentialStoreMutationAdapter {
       nonce: CredentialSetupLeaseNonce;
     }>,
   ): Promise<CredentialSetupLeaseAcquireResult>;
+}
+
+export type CredentialObservedSetupLeaseAcquireResult =
+  | Readonly<{ status: "busy" }>
+  | Readonly<{ status: "precondition-failed" }>
+  | Readonly<{
+      status: "acquired";
+      priorLease: "absent" | "proven-abandoned";
+      directory: "created" | "existing";
+      lease: CredentialStoreMutationLease;
+    }>;
+
+/*
+ * This extension is the only mutation entrypoint that may consume whole-pass
+ * observation evidence. The adapter must burn `evidence`, acquire native
+ * exclusion, and revalidate the complete observed state under that exclusion
+ * before returning `acquired`. A mismatch returns `precondition-failed`
+ * without creating a directory, repairing state, or performing any other
+ * credential mutation.
+ *
+ * Lease ownership entropy is native-owned for this operation so portable
+ * registration randomness remains untouched until observation revalidation
+ * has succeeded.
+ */
+export interface CredentialStoreObservedMutationAdapter
+  extends CredentialStoreMutationAdapter {
+  acquireObservedSetupLease(
+    directory: string,
+    options: Readonly<{
+      noFollow: true;
+      createDirectory: true;
+      evidence: CredentialStoreWholePassEvidence;
+    }>,
+  ): Promise<CredentialObservedSetupLeaseAcquireResult>;
 }

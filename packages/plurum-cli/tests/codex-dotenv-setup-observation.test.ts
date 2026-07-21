@@ -5,6 +5,10 @@ import { createSetupApprovalAuthority } from "../src/commands/setup-approval.js"
 import {
   createSetupInteractiveSessionPorts,
 } from "../src/commands/setup-confirmation.js";
+import {
+  discardSetupCredentialInput,
+  retainFramedSetupCredentialInput,
+} from "../src/commands/setup-credential-input.js";
 import { createSetupPreflightSnapshot } from "../src/commands/setup-preflight.js";
 import type {
   CodexDotenvNativeAdapter,
@@ -269,6 +273,241 @@ async function preflight() {
 }
 
 describe("setup observation composition", () => {
+  it("validates protected input before planning and retains the key only in private evidence", async () => {
+    const store = storeAuthority(null);
+    const projection = projectionAdapter("absent");
+    const authority = createCodexDotenvSetupObservationAuthority({
+      approval: createSetupApprovalAuthority(),
+      store: store.authority,
+      discovery: discoveryDependencies(),
+      codexProjection: projection.adapter,
+      preflight: await preflight(),
+    });
+    const inspected = await authority.inspect();
+    if (inspected.status !== "available") {
+      throw new Error("expected available observation");
+    }
+    expect(inspected.initial.status).toBe("registration-input-required");
+    const framed = new TextEncoder().encode(`${KEY_B}\n`);
+    const credential = retainFramedSetupCredentialInput(
+      framed,
+      "interactive-line",
+    );
+    if (credential === undefined) {
+      throw new Error("expected retained protected input");
+    }
+
+    const resolved = await authority.resolveCredentialInput({
+      identity: inspected.identity,
+      credential,
+    });
+
+    expect(resolved.status).toBe("available");
+    if (resolved.status !== "available") {
+      throw new Error("expected resolved protected input");
+    }
+    expect(resolved.initial).toMatchObject({
+      status: "resolved",
+      acquisition: "existing",
+      disposition: "adopt",
+      credential: {
+        agent: {
+          id: AGENT_B,
+          name: "Claude Code",
+          username: "agent-beta",
+        },
+        sources: ["protected-input"],
+      },
+    });
+    expect(JSON.stringify(resolved)).not.toContain(KEY_B);
+    expect(JSON.stringify(resolved.identity)).toBeUndefined();
+    expect(discardSetupCredentialInput(credential)).toEqual({
+      status: "precondition-failed",
+    });
+    await expect(
+      authority.resolveCredentialInput({
+        identity: inspected.identity,
+        credential,
+      }),
+    ).resolves.toEqual({ status: "precondition-failed" });
+
+    const prepared = await authority.prepare({
+      identity: resolved.identity,
+      decision: { selectedCandidateId: null, registration: null },
+      operationId: OPERATION_ID,
+      createdAt: CREATED_AT,
+    });
+    expect(prepared.status).toBe("prepared");
+    if (prepared.status !== "prepared") {
+      throw new Error("expected prepared protected-input plan");
+    }
+    expect(projection.observations[0]?.expectation).toEqual({
+      kind: "known",
+      apiKey: KEY_B,
+    });
+    expect(JSON.stringify(prepared)).not.toContain(KEY_B);
+    expect(authority.discard(prepared.sidecar)).toEqual({
+      status: "discarded",
+    });
+  });
+
+  it("merges a duplicate protected key without dropping private key identity when profile labels change", async () => {
+    const base = discoveryDependencies();
+    let validations = 0;
+    const projection = projectionAdapter("exact");
+    const authority = createCodexDotenvSetupObservationAuthority({
+      approval: createSetupApprovalAuthority(),
+      store: storeAuthority(activeCredential()).authority,
+      discovery: Object.freeze({
+        ...base,
+        network: Object.freeze({
+          async request() {
+            validations += 1;
+            return jsonResponse({
+              id: AGENT_A,
+              name: validations === 1 ? "Codex" : "Renamed Codex",
+              username:
+                validations === 1 ? "agent-alpha" : "agent-renamed",
+              is_active: true,
+            });
+          },
+        }),
+      }),
+      codexProjection: projection.adapter,
+      preflight: await preflight(),
+    });
+    const inspected = await authority.inspect();
+    if (inspected.status !== "available") {
+      throw new Error("expected available observation");
+    }
+    const credential = retainFramedSetupCredentialInput(
+      new TextEncoder().encode(`${KEY_A}\n`),
+      "interactive-line",
+    );
+    if (credential === undefined) {
+      throw new Error("expected retained protected input");
+    }
+
+    const resolved = await authority.resolveCredentialInput({
+      identity: inspected.identity,
+      credential,
+    });
+    if (resolved.status !== "available") {
+      throw new Error("expected merged protected input");
+    }
+    expect(resolved.observation.candidates).toEqual([
+      expect.objectContaining({
+        selectionId: "credential-1",
+        agent: {
+          id: AGENT_A,
+          name: "Renamed Codex",
+          username: "agent-renamed",
+        },
+        sources: ["canonical", "protected-input"],
+      }),
+    ]);
+    const prepared = await authority.prepare({
+      identity: resolved.identity,
+      decision: { selectedCandidateId: null, registration: null },
+      operationId: OPERATION_ID,
+      createdAt: CREATED_AT,
+    });
+    expect(prepared.status).toBe("prepared");
+    if (prepared.status !== "prepared") {
+      throw new Error("expected prepared merged credential");
+    }
+    expect(projection.observations[0]?.expectation).toEqual({
+      kind: "known",
+      apiKey: KEY_A,
+    });
+    expect(JSON.stringify(prepared)).not.toContain(KEY_A);
+    expect(authority.discard(prepared.sidecar)).toEqual({
+      status: "discarded",
+    });
+  });
+
+  it("records invalid protected input without exposing or adopting it", async () => {
+    const base = discoveryDependencies();
+    const authority = createCodexDotenvSetupObservationAuthority({
+      approval: createSetupApprovalAuthority(),
+      store: storeAuthority(null).authority,
+      discovery: Object.freeze({
+        ...base,
+        network: Object.freeze({
+          async request() {
+            return Object.freeze({
+              status: 401,
+              headers: Object.freeze({}),
+              body: new TextEncoder().encode(KEY_B),
+            });
+          },
+        }),
+      }),
+      codexProjection: projectionAdapter("absent").adapter,
+      preflight: await preflight(),
+    });
+    const inspected = await authority.inspect();
+    if (inspected.status !== "available") {
+      throw new Error("expected available observation");
+    }
+    const credential = retainFramedSetupCredentialInput(
+      new TextEncoder().encode(`${KEY_B}\n`),
+      "interactive-line",
+    );
+    if (credential === undefined) {
+      throw new Error("expected retained input");
+    }
+
+    const resolved = await authority.resolveCredentialInput({
+      identity: inspected.identity,
+      credential,
+    });
+
+    expect(resolved.status).toBe("available");
+    if (resolved.status !== "available") {
+      throw new Error("expected available invalid-input observation");
+    }
+    expect(resolved.observation.invalidSources).toContain(
+      "protected-input",
+    );
+    expect(resolved.initial).toMatchObject({
+      status: "blocked",
+      reason: "explicit-credential-invalid",
+    });
+    expect(JSON.stringify(resolved)).not.toContain(KEY_B);
+  });
+
+  it("refuses protected input while an exact pending registration must be resumed", async () => {
+    const authority = createCodexDotenvSetupObservationAuthority({
+      approval: createSetupApprovalAuthority(),
+      store: storeAuthority(pendingCredential()).authority,
+      discovery: discoveryDependencies(),
+      codexProjection: projectionAdapter("absent").adapter,
+      preflight: await preflight(),
+    });
+    const inspected = await authority.inspect();
+    if (inspected.status !== "available") {
+      throw new Error("expected available observation");
+    }
+    const credential = retainFramedSetupCredentialInput(
+      new TextEncoder().encode(`${KEY_B}\n`),
+      "interactive-line",
+    );
+    if (credential === undefined) {
+      throw new Error("expected retained input");
+    }
+
+    await expect(
+      authority.resolveCredentialInput({
+        identity: inspected.identity,
+        credential,
+      }),
+    ).resolves.toEqual({ status: "precondition-failed" });
+    expect(discardSetupCredentialInput(credential)).toEqual({
+      status: "precondition-failed",
+    });
+  });
+
   it("prepares one selected-key-relative plan and binds private evidence to one sidecar", async () => {
     const store = storeAuthority(activeCredential());
     const projection = projectionAdapter("exact");

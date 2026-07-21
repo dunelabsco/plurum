@@ -72,7 +72,8 @@ export type SetupCanonicalCredentialObservation =
         | "authenticated-match"
         | "definitively-inactive"
         | "identity-mismatch"
-        | "validation-unavailable";
+        | "validation-unavailable"
+        | "username-conflict";
     }>
   | Readonly<{
       readonly status: "unavailable";
@@ -181,6 +182,23 @@ export type SetupCredentialResolvedPlan =
           }>;
           readonly sources: readonly SetupCredentialSource[];
         }>;
+      }>)
+  | (SetupCredentialResolvedCommon &
+      Readonly<{
+        readonly disposition: "register";
+        readonly acquisition: "username-conflict-retry";
+        readonly canonicalEffect: "resume";
+        readonly reason: "canonical-registration-username-conflict";
+        readonly registration: Readonly<{
+          readonly mode: "username-retry";
+          readonly fingerprint: CredentialKeyFingerprint;
+          readonly previousUsername: string;
+          readonly agent: Readonly<{
+            readonly name: string;
+            readonly username: string;
+          }>;
+          readonly sources: readonly SetupCredentialSource[];
+        }>;
       }>);
 
 export type SetupCredentialPlanningResult =
@@ -196,9 +214,10 @@ export type SetupCredentialPlanningResult =
       readonly reason:
         | "credential-not-found"
         | "all-discovered-credentials-invalid"
-        | "canonical-credential-invalid";
+        | "canonical-credential-invalid"
+        | "username-conflict";
       readonly apiOrigin: ApiOrigin;
-      readonly canonicalEffect: "create" | "replace";
+      readonly canonicalEffect: "create" | "replace" | "resume";
       readonly invalidSources: readonly SetupCredentialSource[];
     }>
   | Readonly<{
@@ -683,7 +702,8 @@ function canonicalObservation(
       record.resumeEvidence !== "authenticated-match" &&
       record.resumeEvidence !== "definitively-inactive" &&
       record.resumeEvidence !== "identity-mismatch" &&
-      record.resumeEvidence !== "validation-unavailable"
+      record.resumeEvidence !== "validation-unavailable" &&
+      record.resumeEvidence !== "username-conflict"
     ) {
       return invalidPlan();
     }
@@ -754,7 +774,8 @@ function normalizeObservation(
       if (
         assignedSources.has(source) ||
         (invalidSources.includes(source) &&
-          canonical.resumeEvidence !== "definitively-inactive")
+          canonical.resumeEvidence !== "definitively-inactive" &&
+          canonical.resumeEvidence !== "username-conflict")
       ) {
         contradictorySource = true;
       }
@@ -781,7 +802,8 @@ function normalizeObservation(
           canonical.candidateSelectionId)) ||
     (canonical.status === "pending" &&
       (canonicalCandidates.length !== 0 ||
-        (canonical.resumeEvidence === "definitively-inactive"
+        (canonical.resumeEvidence === "definitively-inactive" ||
+        canonical.resumeEvidence === "username-conflict"
           ? !canonical.sources.every((source) =>
               invalidSources.includes(source),
             )
@@ -1037,10 +1059,48 @@ function createPlan(
   }
 
   if (observation.canonical.status === "pending") {
-    if (
-      decision.selectedCandidateId !== null ||
-      decision.registration !== null
-    ) {
+    if (decision.selectedCandidateId !== null) {
+      return invalidPlan();
+    }
+    if (observation.canonical.resumeEvidence === "username-conflict") {
+      if (decision.registration === null) {
+        return Object.freeze({
+          status: "registration-input-required" as const,
+          reason: "username-conflict" as const,
+          apiOrigin: observation.canonical.apiOrigin,
+          canonicalEffect: "resume" as const,
+          invalidSources: observation.invalidSources,
+        });
+      }
+      if (
+        decision.registration.agentName !==
+          observation.canonical.agent.name ||
+        decision.registration.username ===
+          observation.canonical.agent.username
+      ) {
+        return invalidPlan();
+      }
+      return Object.freeze({
+        status: "resolved" as const,
+        disposition: "register" as const,
+        acquisition: "username-conflict-retry" as const,
+        canonicalEffect: "resume" as const,
+        reason: "canonical-registration-username-conflict" as const,
+        apiOrigin: observation.canonical.apiOrigin,
+        registration: Object.freeze({
+          mode: "username-retry" as const,
+          fingerprint: observation.canonical.fingerprint,
+          previousUsername: observation.canonical.agent.username,
+          agent: Object.freeze({
+            name: decision.registration.agentName,
+            username: decision.registration.username,
+          }),
+          sources: observation.canonical.sources,
+        }),
+        invalidSources: observation.invalidSources,
+      });
+    }
+    if (decision.registration !== null) {
       return invalidPlan();
     }
     if (

@@ -1,22 +1,32 @@
 import { describe, expect, it } from "vitest";
 
 import { nodeHash } from "../src/adapters/node/hash.js";
+import { CredentialError } from "../src/credentials/errors.js";
 import { DEFAULT_API_ORIGIN } from "../src/credentials/origin.js";
 import {
   parseApiKey,
   parseCredentialDocument,
   serializeCredentialDocument,
+  type ActiveCredentialV1,
   type AgentName,
+  type CanonicalTimestamp,
   type CredentialV1,
+  type PendingCredentialV1,
   type Username,
   validateCredentialDocument,
 } from "../src/credentials/schema.js";
+import type {
+  ExclusiveObservedCredentialSetupSession,
+  VerifiedRegistrationAgent,
+} from "../src/credentials/store-writer.js";
 import { deriveRegistrationKeyCommitment } from "../src/registration/key-material.js";
 import {
   prepareUsernameConflictRetry,
   runRecoverableAgentRegistration,
+  runRecoverableAgentRegistrationInSession,
   type RecoverableRegistrationDependencies,
   type RecoverableRegistrationInput,
+  type RecoverableRegistrationOperationDependencies,
 } from "../src/registration/state-machine.js";
 import type {
   NetworkAdapter,
@@ -84,6 +94,7 @@ interface RegistrationServer {
     postBodies(): readonly Readonly<Record<string, unknown>>[];
     deactivate(): void;
     setPostMode(mode: PostMode): void;
+    setAgentProfile(name: string, username: string | null): void;
   }>;
 }
 
@@ -191,6 +202,8 @@ function createRegistrationServer(
   let committedKey: string | undefined;
   let committedBody: Readonly<Record<string, unknown>> | undefined;
   let active = true;
+  let currentAgentName = options.agentName;
+  let currentUsername = options.username;
   const postBodies: Readonly<Record<string, unknown>>[] = [];
   const unavailableGetCalls = new Set(options.unavailableGetCalls ?? []);
 
@@ -216,12 +229,12 @@ function createRegistrationServer(
         return jsonResponse(200, {
           id: agentId,
           name:
-            options.agentName ??
+            currentAgentName ??
             committedBody?.name ??
             INPUT.agentName,
           username:
-            options.username !== undefined
-              ? options.username
+            currentUsername !== undefined
+              ? currentUsername
               : committedBody?.username ?? INPUT.username,
           api_key_prefix: "not-consumed",
           is_active: true,
@@ -304,6 +317,10 @@ function createRegistrationServer(
       setPostMode(mode: PostMode): void {
         postMode = mode;
       },
+      setAgentProfile(name: string, username: string | null): void {
+        currentAgentName = name;
+        currentUsername = username;
+      },
     }),
   });
 }
@@ -362,6 +379,206 @@ function sameCredential(
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function pendingCredentialForSession(): PendingCredentialV1 {
+  const credential = validateCredentialDocument({
+    schema_version: 1,
+    state: "pending",
+    api_origin: DEFAULT_API_ORIGIN,
+    api_key: `plrm_live_${"A".repeat(43)}`,
+    agent_id: null,
+    agent_name: INPUT.agentName,
+    username: INPUT.username,
+    registration_request_id:
+      "5d18e9ab-23e1-4d22-8dd7-1f65530fc92c",
+    created_at: "2026-07-20T11:00:00.000Z",
+    updated_at: "2026-07-20T11:00:00.000Z",
+    activated_at: null,
+  });
+  if (credential.state !== "pending") {
+    throw new Error("expected pending test credential");
+  }
+  return credential;
+}
+
+function activeCredentialForSession(): ActiveCredentialV1 {
+  const credential = validateCredentialDocument({
+    ...pendingCredentialForSession(),
+    state: "active",
+    agent_id: OTHER_AGENT_ID,
+    registration_request_id:
+      "5d18e9ab-23e1-4d22-8dd7-1f65530fc92c",
+    updated_at: "2026-07-20T11:00:01.000Z",
+    activated_at: "2026-07-20T11:00:01.000Z",
+  });
+  if (credential.state !== "active") {
+    throw new Error("expected active test credential");
+  }
+  return credential;
+}
+
+interface InSessionCredentialStore {
+  readonly session: ExclusiveObservedCredentialSetupSession;
+  readonly control: Readonly<{
+    credential(): CredentialV1 | null;
+    readExactCalls(): number;
+    readOrCreateCalls(): number;
+    writeExactCalls(): number;
+    activationCalls(): number;
+  }>;
+}
+
+function createInSessionCredentialStore(
+  initial: CredentialV1 | null,
+  onReadExact?: () => void,
+  onWriteExact?: (
+    expected: CredentialV1 | null,
+    replacement: CredentialV1,
+  ) => void,
+): InSessionCredentialStore {
+  let credential = initial;
+  let readExactCalls = 0;
+  let readOrCreateCalls = 0;
+  let writeExactCalls = 0;
+  let activationCalls = 0;
+
+  function requireExact(expected: CredentialV1 | null): void {
+    if (
+      expected === null
+        ? credential !== null
+        : credential === null || !sameCredential(expected, credential)
+    ) {
+      throw new CredentialError("credential_store_conflict");
+    }
+  }
+
+  const session: ExclusiveObservedCredentialSetupSession =
+    Object.freeze({
+      async readActiveCredential(): Promise<ActiveCredentialV1> {
+        if (credential?.state !== "active") {
+          throw new CredentialError("credential_store_conflict");
+        }
+        return credential;
+      },
+      async readExactCredential(
+        expected: CredentialV1 | null,
+      ): Promise<CredentialV1 | null> {
+        readExactCalls += 1;
+        onReadExact?.();
+        requireExact(expected);
+        return credential;
+      },
+      async writeExactCredential(
+        expected: CredentialV1 | null,
+        replacement: CredentialV1,
+      ) {
+        writeExactCalls += 1;
+        onWriteExact?.(expected, replacement);
+        requireExact(expected);
+        const validated = validateCredentialDocument(replacement);
+        if (
+          credential !== null &&
+          sameCredential(credential, validated)
+        ) {
+          return Object.freeze({ status: "unchanged" as const });
+        }
+        credential = validated;
+        return Object.freeze({ status: "written" as const });
+      },
+      async readOrCreatePending(
+        factory: (
+          createdAt: CanonicalTimestamp,
+        ) => PendingCredentialV1,
+      ) {
+        readOrCreateCalls += 1;
+        if (credential?.state === "active") {
+          return Object.freeze({
+            status: "existing-active" as const,
+            credential,
+          });
+        }
+        if (credential?.state === "pending") {
+          return Object.freeze({
+            status: "pending-resumed" as const,
+            credential,
+          });
+        }
+        const createdAt =
+          "2026-07-20T12:00:00.000Z" as CanonicalTimestamp;
+        const created = validateCredentialDocument(factory(createdAt));
+        if (
+          created.state !== "pending" ||
+          created.created_at !== createdAt ||
+          created.updated_at !== createdAt
+        ) {
+          throw new CredentialError("credential_store_unavailable");
+        }
+        credential = created;
+        return Object.freeze({
+          status: "pending-created" as const,
+          credential: created,
+        });
+      },
+      async activateExactPending(
+        expected: PendingCredentialV1,
+        verifiedAgent: VerifiedRegistrationAgent,
+      ) {
+        activationCalls += 1;
+        requireExact(expected);
+        if (
+          credential?.state !== "pending" ||
+          verifiedAgent.name !== credential.agent_name ||
+          verifiedAgent.username !== credential.username
+        ) {
+          throw new CredentialError("credential_store_conflict");
+        }
+        const activatedAt =
+          "2026-07-20T12:00:01.000Z" as CanonicalTimestamp;
+        const active = validateCredentialDocument({
+          ...credential,
+          state: "active",
+          agent_id: verifiedAgent.id,
+          updated_at: activatedAt,
+          activated_at: activatedAt,
+        });
+        if (active.state !== "active") {
+          throw new CredentialError("credential_store_unavailable");
+        }
+        credential = active;
+        return Object.freeze({
+          status: "activated" as const,
+          credential: active,
+        });
+      },
+      async replaceUsernameAfterConflict() {
+        throw new Error("unexpected username replacement");
+      },
+    });
+
+  return Object.freeze({
+    session,
+    control: Object.freeze({
+      credential: () => credential,
+      readExactCalls: () => readExactCalls,
+      readOrCreateCalls: () => readOrCreateCalls,
+      writeExactCalls: () => writeExactCalls,
+      activationCalls: () => activationCalls,
+    }),
+  });
+}
+
+function inSessionDependencies(
+  server: RegistrationServer,
+  random: RandomAdapter = createDeterministicRandom(),
+  clock = createClock(),
+): RecoverableRegistrationOperationDependencies {
+  return Object.freeze({
+    network: server.network,
+    clock,
+    random,
+    hash: nodeHash,
+  });
+}
+
 function mutationBoundaries(
   operations: readonly string[],
 ): readonly MutationBoundary[] {
@@ -384,6 +601,284 @@ function mutationBoundaries(
       }),
   );
 }
+
+describe("recoverable registration inside an observed setup session", () => {
+  it("preserves the missing-credential registration flow without storage dependencies", async () => {
+    const store = createInSessionCredentialStore(null);
+    const server = createRegistrationServer();
+    const random = createDeterministicRandom();
+
+    await expect(
+      runRecoverableAgentRegistrationInSession(
+        inSessionDependencies(server, random),
+        store.session,
+        INPUT,
+      ),
+    ).resolves.toEqual({
+      status: "active",
+      source: "created",
+      agent: {
+        id: AGENT_ID,
+        name: "Codex",
+        username: "codex-42",
+      },
+    });
+
+    expect(store.control.credential()?.state).toBe("active");
+    expect(store.control.readOrCreateCalls()).toBe(1);
+    expect(store.control.readExactCalls()).toBe(0);
+    expect(store.control.writeExactCalls()).toBe(0);
+    expect(store.control.activationCalls()).toBe(1);
+    expect(server.control.getCalls()).toBe(2);
+    expect(server.control.postCalls()).toBe(1);
+    expect(random.counters.bytes()).toBe(1);
+  });
+
+  it("resumes an exact pending credential without generating replacement material", async () => {
+    const pending = pendingCredentialForSession();
+    const store = createInSessionCredentialStore(pending);
+    const server = createRegistrationServer();
+    const random = createDeterministicRandom();
+
+    await expect(
+      runRecoverableAgentRegistrationInSession(
+        inSessionDependencies(server, random),
+        store.session,
+        INPUT,
+      ),
+    ).resolves.toMatchObject({
+      status: "active",
+      source: "created",
+    });
+
+    const active = store.control.credential();
+    expect(active?.state).toBe("active");
+    expect(active?.api_key).toBe(pending.api_key);
+    expect(active?.registration_request_id).toBe(
+      pending.registration_request_id,
+    );
+    expect(store.control.readOrCreateCalls()).toBe(1);
+    expect(store.control.readExactCalls()).toBe(0);
+    expect(store.control.writeExactCalls()).toBe(0);
+    expect(random.counters.bytes()).toBe(0);
+    expect(random.counters.uuids()).toBe(0);
+  });
+
+  it("re-attests an approved active credential before replacing it with recoverable pending state", async () => {
+    const approved = activeCredentialForSession();
+    const server = createRegistrationServer();
+    const random = createDeterministicRandom();
+    let clockCalls = 0;
+    const clock = Object.freeze({
+      now(): number {
+        clockCalls += 1;
+        return BASE_TIME;
+      },
+    });
+    const store = createInSessionCredentialStore(
+      approved,
+      () => {
+        expect(clockCalls).toBe(0);
+        expect(random.counters.bytes()).toBe(0);
+        expect(random.counters.uuids()).toBe(0);
+        expect(server.control.getCalls()).toBe(0);
+        expect(server.control.postCalls()).toBe(0);
+      },
+      (expected, replacement) => {
+        expect(expected).toEqual(approved);
+        expect(replacement).toMatchObject({
+          state: "pending",
+          api_origin: INPUT.apiOrigin,
+          agent_name: INPUT.agentName,
+          username: INPUT.username,
+          created_at: "2026-07-20T12:00:00.000Z",
+          updated_at: "2026-07-20T12:00:00.000Z",
+        });
+        expect(clockCalls).toBe(1);
+        expect(random.counters.bytes()).toBe(1);
+        expect(random.counters.uuids()).toBe(1);
+        expect(server.control.getCalls()).toBe(0);
+        expect(server.control.postCalls()).toBe(0);
+      },
+    );
+
+    await expect(
+      runRecoverableAgentRegistrationInSession(
+        inSessionDependencies(server, random, clock),
+        store.session,
+        INPUT,
+        approved,
+      ),
+    ).resolves.toEqual({
+      status: "active",
+      source: "created",
+      agent: {
+        id: AGENT_ID,
+        name: "Codex",
+        username: "codex-42",
+      },
+    });
+
+    const active = store.control.credential();
+    expect(active?.state).toBe("active");
+    expect(active?.agent_id).toBe(AGENT_ID);
+    expect(active?.api_key).not.toBe(approved.api_key);
+    expect(store.control.readExactCalls()).toBe(1);
+    expect(store.control.writeExactCalls()).toBe(1);
+    expect(store.control.readOrCreateCalls()).toBe(0);
+    expect(store.control.activationCalls()).toBe(1);
+    expect(clockCalls).toBe(1);
+    expect(random.counters.bytes()).toBe(1);
+    expect(random.counters.uuids()).toBe(1);
+    expect(server.control.getCalls()).toBe(2);
+    expect(server.control.postCalls()).toBe(1);
+  });
+
+  it("retains one approved replacement key for a later in-session retry", async () => {
+    const approved = activeCredentialForSession();
+    const store = createInSessionCredentialStore(approved);
+    const server = createRegistrationServer({ postMode: "rate-limit" });
+    const random = createDeterministicRandom();
+    const operationDependencies = inSessionDependencies(
+      server,
+      random,
+    );
+
+    await expect(
+      runRecoverableAgentRegistrationInSession(
+        operationDependencies,
+        store.session,
+        INPUT,
+        approved,
+      ),
+    ).resolves.toEqual({
+      status: "retryable",
+      reason: "rate_limit",
+    });
+    const pending = store.control.credential();
+    expect(pending?.state).toBe("pending");
+    expect(store.control.writeExactCalls()).toBe(1);
+    expect(store.control.activationCalls()).toBe(0);
+    expect(random.counters.bytes()).toBe(1);
+
+    server.control.setPostMode("normal");
+    await expect(
+      runRecoverableAgentRegistrationInSession(
+        operationDependencies,
+        store.session,
+        INPUT,
+      ),
+    ).resolves.toMatchObject({
+      status: "active",
+      source: "created",
+    });
+
+    const active = store.control.credential();
+    expect(active?.state).toBe("active");
+    expect(active?.api_key).toBe(pending?.api_key);
+    expect(active?.registration_request_id).toBe(
+      pending?.registration_request_id,
+    );
+    expect(store.control.readExactCalls()).toBe(1);
+    expect(store.control.writeExactCalls()).toBe(1);
+    expect(store.control.readOrCreateCalls()).toBe(1);
+    expect(random.counters.bytes()).toBe(1);
+  });
+
+  it("fails closed before randomness or network when approved active state is stale", async () => {
+    const approved = activeCredentialForSession();
+    const current = validateCredentialDocument({
+      ...approved,
+      api_key: `plrm_live_${"B".repeat(43)}`,
+    });
+    const server = createRegistrationServer();
+    const random = createDeterministicRandom();
+    let clockCalls = 0;
+    const store = createInSessionCredentialStore(current, () => {
+      expect(clockCalls).toBe(0);
+      expect(random.counters.bytes()).toBe(0);
+      expect(random.counters.uuids()).toBe(0);
+      expect(server.control.getCalls()).toBe(0);
+      expect(server.control.postCalls()).toBe(0);
+    });
+
+    await expect(
+      runRecoverableAgentRegistrationInSession(
+        inSessionDependencies(server, random, {
+          now(): number {
+            clockCalls += 1;
+            return BASE_TIME;
+          },
+        }),
+        store.session,
+        INPUT,
+        approved,
+      ),
+    ).resolves.toEqual({
+      status: "blocked",
+      reason: "local_credential_conflict",
+    });
+
+    expect(store.control.readExactCalls()).toBe(1);
+    expect(store.control.writeExactCalls()).toBe(0);
+    expect(store.control.readOrCreateCalls()).toBe(0);
+    expect(store.control.activationCalls()).toBe(0);
+    expect(clockCalls).toBe(0);
+    expect(random.counters.bytes()).toBe(0);
+    expect(random.counters.uuids()).toBe(0);
+    expect(server.control.getCalls()).toBe(0);
+    expect(server.control.postCalls()).toBe(0);
+  });
+
+  it("keeps existing-active validation on the normal in-session path", async () => {
+    const active = activeCredentialForSession();
+    const store = createInSessionCredentialStore(active);
+    const random = createDeterministicRandom();
+    let networkCalls = 0;
+    const network: NetworkAdapter = Object.freeze({
+      async request(request: NetworkRequest): Promise<NetworkResponse> {
+        networkCalls += 1;
+        expect(request.method).toBe("GET");
+        expect(bearerKey(request)).toBe(active.api_key);
+        return jsonResponse(200, {
+          id: active.agent_id,
+          name: active.agent_name,
+          username: active.username,
+          api_key_prefix: "not-consumed",
+          is_active: true,
+        });
+      },
+    });
+
+    await expect(
+      runRecoverableAgentRegistrationInSession(
+        Object.freeze({
+          network,
+          clock: createClock(),
+          random,
+          hash: nodeHash,
+        }),
+        store.session,
+        INPUT,
+      ),
+    ).resolves.toEqual({
+      status: "active",
+      source: "existing",
+      agent: {
+        id: OTHER_AGENT_ID,
+        name: "Codex",
+        username: "codex-42",
+      },
+    });
+
+    expect(networkCalls).toBe(1);
+    expect(store.control.readOrCreateCalls()).toBe(1);
+    expect(store.control.readExactCalls()).toBe(0);
+    expect(store.control.writeExactCalls()).toBe(0);
+    expect(random.counters.bytes()).toBe(0);
+    expect(random.counters.uuids()).toBe(0);
+  });
+});
 
 describe("recoverable registration state machine", () => {
   it("persists pending before POST, verifies the key, and activates it", async () => {
@@ -798,6 +1293,44 @@ describe("recoverable registration state machine", () => {
     expect(server.control.getCalls()).toBe(calls.gets + 1);
     expect(server.control.postCalls()).toBe(calls.posts);
     expect(random.counters.bytes()).toBe(calls.bytes);
+  });
+
+  it("keeps active identity bound to stable agent ID when owners edit profile labels", async () => {
+    const store = createInMemoryCredentialMutationStore();
+    const server = createRegistrationServer();
+    const sharedDependencies = dependencies(store, server);
+
+    await expect(
+      runRecoverableAgentRegistration(
+        sharedDependencies,
+        LOCATIONS,
+        INPUT,
+      ),
+    ).resolves.toMatchObject({ status: "active", source: "created" });
+    const stored = readCredential(store);
+    server.control.setAgentProfile("Renamed Codex", "renamed-agent");
+
+    await expect(
+      runRecoverableAgentRegistration(
+        sharedDependencies,
+        LOCATIONS,
+        INPUT,
+      ),
+    ).resolves.toEqual({
+      status: "active",
+      source: "existing",
+      agent: {
+        id: AGENT_ID,
+        name: "Renamed Codex",
+        username: "renamed-agent",
+      },
+    });
+    const after = readCredential(store);
+    expect(
+      stored !== undefined &&
+        after !== undefined &&
+        sameCredential(stored, after),
+    ).toBe(true);
   });
 
   it("never hands a deactivated active credential to host reconciliation", async () => {

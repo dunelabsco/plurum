@@ -107,6 +107,13 @@ const restrictedCapabilityImports = Object.freeze([
     allowedFiles: new Set(["src/commands/setup-confirmation.ts"]),
   }),
   Object.freeze({
+    module: "src/commands/setup-execution-authority",
+    binding: "claimSetupExecutionGrant",
+    allowedFiles: new Set([
+      "src/commands/setup-registration-execution.ts",
+    ]),
+  }),
+  Object.freeze({
     module: "src/commands/setup-confirmation",
     binding: "createSetupConfirmationAttempt",
     allowedFiles: new Set([
@@ -138,6 +145,86 @@ const restrictedCapabilityImports = Object.freeze([
   Object.freeze({
     module: "src/commands/setup-credential-input",
     binding: "claimSetupCredentialInputBytes",
+    allowedFiles: new Set([
+      "src/commands/setup-registration-execution.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-registration-execution",
+    binding: "transferSetupProtectedCredentialInput",
+    allowedFiles: new Set([
+      "src/credentials/codex-dotenv-setup-observation.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-registration-execution",
+    binding: "claimSetupUsernameConflictContinuation",
+    allowedFiles: new Set([
+      "src/credentials/codex-dotenv-setup-observation.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-registration-execution",
+    binding: "discardSetupUsernameConflictContinuation",
+    allowedFiles: new Set([
+      "src/credentials/codex-dotenv-setup-observation.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-secret-lease",
+    binding: "createSetupSecretLease",
+    allowedFiles: new Set([
+      "src/commands/setup-registration-execution.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-secret-lease",
+    binding: "copySetupSecretLeaseBytes",
+    allowedFiles: new Set([
+      "src/credentials/codex-dotenv-setup-observation.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-secret-lease",
+    binding: "claimSetupSecretLeaseBytes",
+    allowedFiles: new Set([
+      "src/commands/setup-registration-execution.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-secret-lease",
+    binding: "discardSetupSecretLease",
+    allowedFiles: new Set([
+      "src/commands/setup-execution-authority.ts",
+      "src/commands/setup-registration-execution.ts",
+      "src/credentials/codex-dotenv-setup-observation.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-secret-lease",
+    binding: "isOwnedSetupSecretLease",
+    allowedFiles: new Set([
+      "src/commands/setup-execution-authority.ts",
+      "src/credentials/codex-dotenv-setup-observation.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-registration-execution",
+    binding: "createSetupRegistrationExecutionAttempt",
+    allowedFiles: new Set([
+      "src/credentials/codex-dotenv-setup-observation.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/credentials/store-observer",
+    binding: "claimCredentialStoreObservationEvidence",
+    allowedFiles: new Set([
+      "src/commands/setup-registration-execution.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/credentials/store-writer",
+    binding: "runExclusiveObservedCredentialSetup",
     allowedFiles: new Set([
       "src/commands/setup-registration-execution.ts",
     ]),
@@ -774,6 +861,7 @@ function scanText(relativePath, text) {
               "src/adapters/node/native-credential-store.ts",
               "src/commands/setup-approval.ts",
               "src/commands/setup-credential-plan.ts",
+              "src/commands/setup-registration-execution.ts",
               "src/credentials/codex-dotenv-projection.ts",
               "src/credentials/codex-dotenv-setup-observation.ts",
               "src/credentials/store-observer.ts",
@@ -1123,6 +1211,31 @@ const negativeFixtures = [
   ],
   [
     "src/commands/setup.ts",
+    'import { claimSetupExecutionGrant } from "./setup-execution-authority.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-registration-execution.ts",
+    'import * as execution from "./setup-execution-authority.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-registration-execution.ts",
+    'import { claimSetupExecutionGrant } from "./setup-execution-authority.js"; const claim = claimSetupExecutionGrant;',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-registration-execution.ts",
+    'import { claimSetupExecutionGrant } from "./setup-execution-authority.js"; claimSetupExecutionGrant.call(undefined, {}, {}, {});',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'export { claimSetupExecutionGrant } from "./setup-execution-authority.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
     'import { createSetupConfirmationAttempt } from "./setup-confirmation.js";',
     "setup-authorization-boundary",
   ],
@@ -1159,6 +1272,136 @@ const negativeFixtures = [
   [
     "src/adapters/node/setup-interaction.ts",
     'import { createNodeSetupExplicitCredentialInput } from "./setup-credential-input.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'import { transferSetupProtectedCredentialInput } from "./setup-registration-execution.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
+    'import * as registration from "../commands/setup-registration-execution.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
+    'import { transferSetupProtectedCredentialInput } from "../commands/setup-registration-execution.js"; const transfer = transferSetupProtectedCredentialInput;',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
+    'import { transferSetupProtectedCredentialInput } from "../commands/setup-registration-execution.js"; transferSetupProtectedCredentialInput.call(undefined, {}, {}, {});',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'export { transferSetupProtectedCredentialInput } from "./setup-registration-execution.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'import { claimSetupUsernameConflictContinuation } from "./setup-registration-execution.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
+    'import { claimSetupUsernameConflictContinuation } from "../commands/setup-registration-execution.js"; const claim = claimSetupUsernameConflictContinuation;',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
+    'import { claimSetupUsernameConflictContinuation } from "../commands/setup-registration-execution.js"; claimSetupUsernameConflictContinuation.call(undefined, {}, {});',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
+    'import { claimSetupUsernameConflictContinuation } from "../commands/setup-registration-execution.js"; claimSetupUsernameConflictContinuation.apply(undefined, [{}, {}]);',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
+    'import { claimSetupUsernameConflictContinuation } from "../commands/setup-registration-execution.js"; claimSetupUsernameConflictContinuation?.({}, {});',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'export { discardSetupUsernameConflictContinuation } from "./setup-registration-execution.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'import { claimSetupSecretLeaseBytes } from "./setup-secret-lease.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-registration-execution.ts",
+    'import * as secretLease from "./setup-secret-lease.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-registration-execution.ts",
+    'import { claimSetupSecretLeaseBytes } from "./setup-secret-lease.js"; const claim = claimSetupSecretLeaseBytes;',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-registration-execution.ts",
+    'import { claimSetupSecretLeaseBytes } from "./setup-secret-lease.js"; claimSetupSecretLeaseBytes.call(undefined, {});',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-registration-execution.ts",
+    'import { claimSetupSecretLeaseBytes } from "./setup-secret-lease.js"; claimSetupSecretLeaseBytes.apply(undefined, [{}]);',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'export { copySetupSecretLeaseBytes } from "./setup-secret-lease.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'import { createSetupSecretLease, copySetupSecretLeaseBytes, discardSetupSecretLease, isOwnedSetupSecretLease } from "./setup-secret-lease.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'import { createSetupRegistrationExecutionAttempt } from "./setup-registration-execution.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
+    'import { createSetupRegistrationExecutionAttempt } from "../commands/setup-registration-execution.js"; const create = createSetupRegistrationExecutionAttempt;',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'import { claimCredentialStoreObservationEvidence } from "../credentials/store-observer.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-registration-execution.ts",
+    'import * as observer from "../credentials/store-observer.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-registration-execution.ts",
+    'import { claimCredentialStoreObservationEvidence } from "../credentials/store-observer.js"; const claim = claimCredentialStoreObservationEvidence;',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup.ts",
+    'import { runExclusiveObservedCredentialSetup } from "../credentials/store-writer.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-registration-execution.ts",
+    'import * as writer from "../credentials/store-writer.js";',
+    "setup-authorization-boundary",
+  ],
+  [
+    "src/commands/setup-registration-execution.ts",
+    'import { runExclusiveObservedCredentialSetup } from "../credentials/store-writer.js"; const run = runExclusiveObservedCredentialSetup;',
     "setup-authorization-boundary",
   ],
   [
@@ -1496,6 +1739,10 @@ const positiveFixtures = [
   ],
   [
     "src/commands/setup-credential-plan.ts",
+    'Object.getOwnPropertyDescriptor({}, "key"); Object.getPrototypeOf({});',
+  ],
+  [
+    "src/commands/setup-registration-execution.ts",
     'Object.getOwnPropertyDescriptor({}, "key"); Object.getPrototypeOf({});',
   ],
   [

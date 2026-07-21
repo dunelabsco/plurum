@@ -21,6 +21,7 @@ import {
   type CredentialFileAttestation,
   type CredentialFileReadHandle,
   type CredentialObjectIdentity,
+  type CredentialStoreWholePassEvidence,
 } from "./store-contracts.js";
 import {
   CREDENTIAL_TRANSACTION_ENTRY,
@@ -33,6 +34,7 @@ import {
   type CredentialSetupLeaseNonce,
   type CredentialStoreMutationAdapter,
   type CredentialStoreMutationLease,
+  type CredentialStoreObservedMutationAdapter,
   type CredentialTemporaryEntry,
   type CredentialTemporaryEntryRole,
 } from "./store-mutation-contracts.js";
@@ -57,6 +59,12 @@ export interface CredentialStoreRecoveryDependencies {
 
 export interface CredentialStoreWriterDependencies
   extends CredentialStoreRecoveryDependencies {
+  readonly clock: ClockAdapter;
+}
+
+export interface ObservedCredentialStoreWriterDependencies {
+  readonly storage: CredentialStoreObservedMutationAdapter;
+  readonly random: Pick<RandomAdapter, "uuid">;
   readonly clock: ClockAdapter;
 }
 
@@ -123,6 +131,35 @@ export interface ExclusiveCredentialRegistrationSession {
   ): Promise<CredentialRegistrationUsernameReplacementResult>;
 }
 
+export interface ExclusiveObservedCredentialSetupSession
+  extends ExclusiveCredentialRegistrationSession {
+  /* Re-attest the canonical entry and return only a validated active state. */
+  readActiveCredential(): Promise<ActiveCredentialV1>;
+
+  /* Re-attest and return only this exact expected canonical state. */
+  readExactCredential(
+    expected: CredentialV1 | null,
+  ): Promise<CredentialV1 | null>;
+
+  /* Replace only this exact expected state through the canonical journal. */
+  writeExactCredential(
+    expected: CredentialV1 | null,
+    credential: CredentialV1,
+  ): Promise<CredentialStoreWriteResult>;
+}
+
+export interface CleanCredentialStoreObservation {
+  readonly credential: CredentialV1 | null;
+  readonly transaction: null;
+  readonly temporaryEntries: "empty";
+  readonly evidence: CredentialStoreWholePassEvidence;
+}
+
+export type ExclusiveObservedCredentialSetupResult<T> =
+  | Readonly<{ status: "completed"; value: T }>
+  | Readonly<{ status: "busy" }>
+  | Readonly<{ status: "precondition-failed" }>;
+
 interface DirectorySnapshot {
   readonly identity: CredentialObjectIdentity;
 }
@@ -154,6 +191,14 @@ interface PreparedLease {
   readonly storage: CredentialStoreMutationAdapter;
   readonly directory: string;
   readonly nonce: CredentialSetupLeaseNonce;
+}
+
+interface PreparedObservedSetup {
+  readonly storage: CredentialStoreObservedMutationAdapter;
+  readonly directory: string;
+  readonly evidence: CredentialStoreWholePassEvidence;
+  readonly credential: CredentialV1 | null;
+  readonly credentialBytes: Uint8Array | null;
 }
 
 interface PreparedWrite {
@@ -188,6 +233,9 @@ const UUID_V4 =
 const MAX_OPAQUE_CHARACTERS = 512;
 const OPAQUE_CONTROL = /[\u0000-\u001f\u007f-\u009f]/u;
 const LEASE_LOST = Object.freeze({ kind: "credential-lease-lost" as const });
+const OBSERVED_PRECONDITION_FAILED = Object.freeze({
+  kind: "credential-observation-precondition-failed" as const,
+});
 
 const CLEAN: CredentialStoreRecoveryResult = Object.freeze({
   status: "clean",
@@ -200,6 +248,10 @@ const WRITTEN: CredentialStoreWriteResult = Object.freeze({
 });
 const UNCHANGED: CredentialStoreWriteResult = Object.freeze({
   status: "unchanged",
+});
+const OBSERVED_BUSY = Object.freeze({ status: "busy" as const });
+const OBSERVED_PRECONDITION = Object.freeze({
+  status: "precondition-failed" as const,
 });
 
 function storeUnavailable(): never {
@@ -484,6 +536,20 @@ function isMutationAdapter(
 ): value is CredentialStoreMutationAdapter {
   try {
     return isRecord(value) && isCallable(value.acquireSetupLease);
+  } catch {
+    return false;
+  }
+}
+
+function isObservedMutationAdapter(
+  value: unknown,
+): value is CredentialStoreObservedMutationAdapter {
+  try {
+    return (
+      isMutationAdapter(value) &&
+      isRecord(value) &&
+      isCallable(value.acquireObservedSetupLease)
+    );
   } catch {
     return false;
   }
@@ -1070,7 +1136,9 @@ async function removeEntry(
   }
 }
 
-async function cleanupTemporaryEntries(session: LeaseSession): Promise<void> {
+async function listVerifiedTemporaryEntries(
+  session: LeaseSession,
+): Promise<readonly CredentialTemporaryEntry[]> {
   await assertLeaseHeld(session);
   const rawEntries = await callAdapter(() =>
     session.lease.listTemporaryEntries(),
@@ -1098,6 +1166,12 @@ async function cleanupTemporaryEntries(session: LeaseSession): Promise<void> {
   } catch {
     return storeUnavailable();
   }
+
+  return entries;
+}
+
+async function cleanupTemporaryEntries(session: LeaseSession): Promise<void> {
+  const entries = await listVerifiedTemporaryEntries(session);
 
   let removed = false;
   for (const entry of entries) {
@@ -1284,6 +1358,51 @@ async function verifyCredentialState(
   } finally {
     wipeBytes(current.bytes);
   }
+}
+
+function observedPreconditionFailed(): never {
+  throw OBSERVED_PRECONDITION_FAILED;
+}
+
+async function verifyCleanObservedState(
+  session: LeaseSession,
+  prepared: PreparedObservedSetup,
+  originPolicy: ApiOriginPolicy,
+): Promise<void> {
+  const temporaries = await listVerifiedTemporaryEntries(session);
+  if (temporaries.length !== 0) {
+    return observedPreconditionFailed();
+  }
+
+  const transaction = await readManagedEntry(
+    session,
+    TRANSACTION_ENTRY,
+    MAX_CREDENTIAL_TRANSACTION_BYTES,
+  );
+  if (transaction.status === "loaded") {
+    wipeBytes(transaction.bytes);
+    return observedPreconditionFailed();
+  }
+
+  const current = await readCredential(session, originPolicy);
+  if (prepared.credentialBytes === null) {
+    if (current.status === "loaded") {
+      wipeBytes(current.bytes);
+      return observedPreconditionFailed();
+    }
+  } else {
+    if (current.status === "missing") {
+      return observedPreconditionFailed();
+    }
+    try {
+      if (!bytesEqual(current.bytes, prepared.credentialBytes)) {
+        return observedPreconditionFailed();
+      }
+    } finally {
+      wipeBytes(current.bytes);
+    }
+  }
+  await assertLeaseHeld(session);
 }
 
 async function rollbackInstalledCredential(
@@ -1516,6 +1635,83 @@ function prepareLease(
   }
 }
 
+function prepareObservedSetup(
+  dependencies: ObservedCredentialStoreWriterDependencies,
+  locations: Pick<CredentialLocations, "directory">,
+  input: CleanCredentialStoreObservation,
+  originPolicy: ApiOriginPolicy,
+): PreparedObservedSetup {
+  let credentialBytesValue: Uint8Array | null = null;
+  let succeeded = false;
+  try {
+    if (
+      originPolicy !== "https-only" &&
+      originPolicy !== "explicit-loopback-development"
+    ) {
+      return storeUnavailable();
+    }
+    const storage = dependencies.storage;
+    const random = dependencies.random;
+    const clock = dependencies.clock;
+    if (
+      !isObservedMutationAdapter(storage) ||
+      !isRecord(random) ||
+      !isCallable(random.uuid) ||
+      !isRecord(clock) ||
+      !isCallable(clock.now)
+    ) {
+      return storeUnavailable();
+    }
+    if (
+      !isRecord(input) ||
+      !hasExactKeys(input, [
+        "credential",
+        "transaction",
+        "temporaryEntries",
+        "evidence",
+      ])
+    ) {
+      return storeUnavailable();
+    }
+    const record = input;
+    if (
+      record.transaction !== null ||
+      record.temporaryEntries !== "empty" ||
+      (record.evidence === null ||
+        (typeof record.evidence !== "object" &&
+          typeof record.evidence !== "function"))
+    ) {
+      return storeUnavailable();
+    }
+    const credential =
+      record.credential === null
+        ? null
+        : validateCredentialDocument(record.credential, originPolicy);
+    credentialBytesValue =
+      credential === null
+        ? null
+        : credentialBytes(credential, originPolicy);
+    const prepared = Object.freeze({
+      storage,
+      directory: prepareDirectory(locations),
+      evidence: record.evidence as CredentialStoreWholePassEvidence,
+      credential,
+      credentialBytes: credentialBytesValue,
+    });
+    succeeded = true;
+    return prepared;
+  } catch (error) {
+    if (error instanceof CredentialError) {
+      throw error;
+    }
+    return storeUnavailable();
+  } finally {
+    if (!succeeded && credentialBytesValue !== null) {
+      wipeBytes(credentialBytesValue);
+    }
+  }
+}
+
 function prepareTimestamp(clock: ClockAdapter): CanonicalTimestamp {
   try {
     const milliseconds = clock.now();
@@ -1608,6 +1804,47 @@ function inspectAcquireResult(value: unknown):
       hasExactKeys(value, ["status"])
     ) {
       return Object.freeze({ status: "busy" });
+    }
+    if (
+      value.status === "acquired" &&
+      hasExactKeys(value, [
+        "status",
+        "priorLease",
+        "directory",
+        "lease",
+      ]) &&
+      (value.priorLease === "absent" ||
+        value.priorLease === "proven-abandoned") &&
+      (value.directory === "created" || value.directory === "existing") &&
+      isLease(possibleLease)
+    ) {
+      return Object.freeze({ status: "acquired", lease: possibleLease });
+    }
+    return Object.freeze({ status: "invalid", possibleLease });
+  } catch {
+    return Object.freeze({ status: "invalid", possibleLease });
+  }
+}
+
+function inspectObservedAcquireResult(value: unknown):
+  | Readonly<{ status: "busy" }>
+  | Readonly<{ status: "precondition-failed" }>
+  | Readonly<{
+      status: "acquired";
+      lease: CredentialStoreMutationLease;
+    }>
+  | Readonly<{ status: "invalid"; possibleLease: unknown }> {
+  const possibleLease = possibleProperty(value, "lease");
+  try {
+    if (!isRecord(value)) {
+      return Object.freeze({ status: "invalid", possibleLease });
+    }
+    if (
+      (value.status === "busy" ||
+        value.status === "precondition-failed") &&
+      hasExactKeys(value, ["status"])
+    ) {
+      return Object.freeze({ status: value.status });
     }
     if (
       value.status === "acquired" &&
@@ -1788,6 +2025,72 @@ async function withLease<T>(
     return storeUnavailable();
   }
   return result as T;
+}
+
+async function withObservedLease<T>(
+  prepared: PreparedObservedSetup,
+  originPolicy: ApiOriginPolicy,
+  operation: (session: LeaseSession) => Promise<T>,
+): Promise<ExclusiveObservedCredentialSetupResult<T>> {
+  const rawAcquire = await callAdapter(() =>
+    prepared.storage.acquireObservedSetupLease(
+      prepared.directory,
+      Object.freeze({
+        noFollow: true as const,
+        createDirectory: true as const,
+        evidence: prepared.evidence,
+      }),
+    ),
+  );
+  const acquired = inspectObservedAcquireResult(rawAcquire);
+  if (acquired.status === "invalid") {
+    return abandonMalformedLease(acquired.possibleLease);
+  }
+  if (acquired.status === "busy") {
+    return OBSERVED_BUSY;
+  }
+  if (acquired.status === "precondition-failed") {
+    return OBSERVED_PRECONDITION;
+  }
+
+  let operationError: unknown;
+  let result: T | undefined;
+  try {
+    const directory = await attestDirectory(acquired.lease);
+    const session = Object.freeze({ lease: acquired.lease, directory });
+    await assertLeaseHeld(session);
+    await verifyCleanObservedState(session, prepared, originPolicy);
+    result = await operation(session);
+  } catch (error) {
+    operationError = error;
+  }
+
+  try {
+    if (operationError === LEASE_LOST) {
+      await callAdapter(() => acquired.lease.abandon());
+    } else {
+      await callAdapter(() => acquired.lease.release());
+    }
+  } catch (releaseError) {
+    operationError = releaseError;
+  }
+
+  if (operationError === OBSERVED_PRECONDITION_FAILED) {
+    return OBSERVED_PRECONDITION;
+  }
+  if (operationError !== undefined) {
+    if (operationError === LEASE_LOST) {
+      return recoveryRequired();
+    }
+    if (operationError instanceof CredentialError) {
+      throw operationError;
+    }
+    return storeUnavailable();
+  }
+  return Object.freeze({
+    status: "completed" as const,
+    value: result as T,
+  });
 }
 
 function preparePendingCredential(
@@ -2139,6 +2442,284 @@ async function replaceUsernameAfterConflictWithinLease(
   }
 }
 
+function preparedExpectedCredential(
+  input: CredentialV1 | null,
+  originPolicy: ApiOriginPolicy,
+): Readonly<{ bytes: Uint8Array | null }> {
+  if (input === null) {
+    return Object.freeze({ bytes: null });
+  }
+  const credential = validateCredentialDocument(input, originPolicy);
+  return Object.freeze({
+    bytes: credentialBytes(credential, originPolicy),
+  });
+}
+
+function exactCurrentMatches(
+  current: Awaited<ReturnType<typeof readCredential>>,
+  expectedBytes: Uint8Array | null,
+): boolean {
+  return expectedBytes === null
+    ? current.status === "missing"
+    : current.status === "loaded" &&
+        bytesEqual(current.bytes, expectedBytes);
+}
+
+async function readExactCredentialWithinLease(
+  session: LeaseSession,
+  expectedInput: CredentialV1 | null,
+  originPolicy: ApiOriginPolicy,
+): Promise<CredentialV1 | null> {
+  const expected = preparedExpectedCredential(expectedInput, originPolicy);
+  let current: Awaited<ReturnType<typeof readCredential>> | undefined;
+  try {
+    current = await readCredential(session, originPolicy);
+    if (!exactCurrentMatches(current, expected.bytes)) {
+      return storeConflict();
+    }
+    return current.status === "missing" ? null : current.credential;
+  } finally {
+    if (expected.bytes !== null) {
+      wipeBytes(expected.bytes);
+    }
+    if (current?.status === "loaded") {
+      wipeBytes(current.bytes);
+    }
+  }
+}
+
+async function readActiveCredentialWithinLease(
+  session: LeaseSession,
+  originPolicy: ApiOriginPolicy,
+): Promise<ActiveCredentialV1> {
+  const current = await readCredential(session, originPolicy);
+  if (current.status === "missing") {
+    return storeConflict();
+  }
+  try {
+    return current.credential.state === "active"
+      ? current.credential
+      : storeConflict();
+  } finally {
+    wipeBytes(current.bytes);
+  }
+}
+
+async function writeExactCredentialWithinLease(
+  session: LeaseSession,
+  dependencies: ObservedCredentialStoreWriterDependencies,
+  expectedInput: CredentialV1 | null,
+  credentialInput: CredentialV1,
+  originPolicy: ApiOriginPolicy,
+): Promise<CredentialStoreWriteResult> {
+  const expected = preparedExpectedCredential(expectedInput, originPolicy);
+  const credential = validateCredentialDocument(
+    credentialInput,
+    originPolicy,
+  );
+  const desiredBytes = credentialBytes(credential, originPolicy);
+  let current: Awaited<ReturnType<typeof readCredential>> | undefined;
+  try {
+    current = await readCredential(session, originPolicy);
+    if (!exactCurrentMatches(current, expected.bytes)) {
+      return storeConflict();
+    }
+    if (
+      current.status === "loaded" &&
+      bytesEqual(current.bytes, desiredBytes)
+    ) {
+      return UNCHANGED;
+    }
+    if (current.status === "loaded") {
+      wipeBytes(current.bytes);
+    }
+
+    const transactionId = validateCredentialTransactionId(
+      prepareUuid(dependencies.random),
+    );
+    const createdAt = prepareTimestamp(dependencies.clock);
+    const prepared = prepareWriteAt(
+      dependencies,
+      credential,
+      originPolicy,
+      createdAt,
+      transactionId,
+    );
+    try {
+      return await runTransactionalWrite(
+        session,
+        prepared,
+        originPolicy,
+        current,
+      );
+    } finally {
+      wipeBytes(prepared.credentialBytes);
+    }
+  } finally {
+    if (expected.bytes !== null) {
+      wipeBytes(expected.bytes);
+    }
+    wipeBytes(desiredBytes);
+    if (current?.status === "loaded") {
+      wipeBytes(current.bytes);
+    }
+  }
+}
+
+async function runObservedSetupCallback<T>(
+  leaseSession: LeaseSession,
+  dependencies: ObservedCredentialStoreWriterDependencies,
+  operation: (
+    session: ExclusiveObservedCredentialSetupSession,
+  ) => Promise<T>,
+  originPolicy: ApiOriginPolicy,
+): Promise<T> {
+  let active = true;
+  let inFlight: Promise<unknown> | undefined;
+  let terminalError: unknown;
+
+  function invoke<R>(task: () => Promise<R>): Promise<R> {
+    if (!active) {
+      return Promise.reject(
+        new CredentialError("credential_store_unavailable"),
+      );
+    }
+    if (inFlight !== undefined) {
+      terminalError ??= new CredentialError(
+        "credential_store_unavailable",
+      );
+      return Promise.reject(terminalError);
+    }
+    const pending = (async () => {
+      try {
+        return await task();
+      } catch (error) {
+        const safeError =
+          error === LEASE_LOST || error instanceof CredentialError
+            ? error
+            : new CredentialError("credential_store_unavailable");
+        terminalError ??= safeError;
+        throw safeError;
+      }
+    })();
+    inFlight = pending;
+    void pending.then(
+      () => {
+        if (inFlight === pending) {
+          inFlight = undefined;
+        }
+      },
+      () => {
+        if (inFlight === pending) {
+          inFlight = undefined;
+        }
+      },
+    );
+    return pending;
+  }
+
+  const setupSession: ExclusiveObservedCredentialSetupSession =
+    Object.freeze({
+      readActiveCredential() {
+        return invoke(() =>
+          readActiveCredentialWithinLease(
+            leaseSession,
+            originPolicy,
+          ),
+        );
+      },
+      readExactCredential(expected: CredentialV1 | null) {
+        return invoke(() =>
+          readExactCredentialWithinLease(
+            leaseSession,
+            expected,
+            originPolicy,
+          ),
+        );
+      },
+      writeExactCredential(
+        expected: CredentialV1 | null,
+        credential: CredentialV1,
+      ) {
+        return invoke(() =>
+          writeExactCredentialWithinLease(
+            leaseSession,
+            dependencies,
+            expected,
+            credential,
+            originPolicy,
+          ),
+        );
+      },
+      readOrCreatePending(
+        factory: (createdAt: CanonicalTimestamp) => PendingCredentialV1,
+      ) {
+        return invoke(() =>
+          readOrCreatePendingWithinLease(
+            leaseSession,
+            dependencies,
+            factory,
+            originPolicy,
+          ),
+        );
+      },
+      activateExactPending(
+        expected: PendingCredentialV1,
+        verifiedAgent: VerifiedRegistrationAgent,
+      ) {
+        return invoke(() =>
+          activateExactPendingWithinLease(
+            leaseSession,
+            dependencies,
+            expected,
+            verifiedAgent,
+            originPolicy,
+          ),
+        );
+      },
+      replaceUsernameAfterConflict(
+        username: Username,
+        requestIdFactory: () => RegistrationRequestId,
+      ) {
+        return invoke(() =>
+          replaceUsernameAfterConflictWithinLease(
+            leaseSession,
+            dependencies,
+            username,
+            requestIdFactory,
+            originPolicy,
+          ),
+        );
+      },
+    });
+
+  let callbackError: unknown;
+  let result: T | undefined;
+  try {
+    result = await operation(setupSession);
+  } catch (error) {
+    callbackError = error;
+  }
+  active = false;
+
+  const abandonedOperation = inFlight;
+  if (abandonedOperation !== undefined) {
+    try {
+      await abandonedOperation;
+    } catch (error) {
+      callbackError ??= error;
+    }
+    callbackError = terminalError ?? callbackError;
+    callbackError ??= new CredentialError("credential_store_unavailable");
+  }
+
+  callbackError = terminalError ?? callbackError;
+  if (callbackError !== undefined) {
+    throw callbackError;
+  }
+  return result as T;
+}
+
 async function runRegistrationCallback<T>(
   leaseSession: LeaseSession,
   dependencies: CredentialStoreWriterDependencies,
@@ -2329,4 +2910,43 @@ export async function runExclusiveCredentialRegistration<T>(
       originPolicy,
     );
   });
+}
+
+/*
+ * Activate one approval-bound whole-store observation. Unlike the general
+ * writer, this path never performs recovery before proving the exact retained
+ * clean state under the observed native lease.
+ */
+export async function runExclusiveObservedCredentialSetup<T>(
+  dependencies: ObservedCredentialStoreWriterDependencies,
+  locations: Pick<CredentialLocations, "directory">,
+  observation: CleanCredentialStoreObservation,
+  operation: (
+    session: ExclusiveObservedCredentialSetupSession,
+  ) => Promise<T>,
+  originPolicy: ApiOriginPolicy = "https-only",
+): Promise<ExclusiveObservedCredentialSetupResult<T>> {
+  const prepared = prepareObservedSetup(
+    dependencies,
+    locations,
+    observation,
+    originPolicy,
+  );
+  try {
+    return await withObservedLease(
+      prepared,
+      originPolicy,
+      (session) =>
+        runObservedSetupCallback(
+          session,
+          dependencies,
+          operation,
+          originPolicy,
+        ),
+    );
+  } finally {
+    if (prepared.credentialBytes !== null) {
+      wipeBytes(prepared.credentialBytes);
+    }
+  }
 }

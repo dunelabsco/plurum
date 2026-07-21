@@ -1,5 +1,21 @@
 export const CREDENTIAL_STORE_ENTRY = "credentials.json" as const;
 
+declare const credentialStoreWholePassEvidenceBrand: unique symbol;
+
+/*
+ * Opaque evidence minted only after one stable semantic pass over the
+ * credential directory, both canonical entries, and the exact recognized
+ * managed-temporary set. An observed mutation adapter may consume this token
+ * only under the same native authority that minted it.
+ *
+ * This base contract deliberately has no dependency on either the observation
+ * or mutation protocols so both can share the evidence type without an import
+ * cycle.
+ */
+export interface CredentialStoreWholePassEvidence {
+  readonly [credentialStoreWholePassEvidenceBrand]: never;
+}
+
 export interface CredentialObjectIdentity {
   readonly volume: string;
   readonly object: string;

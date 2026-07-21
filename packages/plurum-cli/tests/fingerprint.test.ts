@@ -5,6 +5,7 @@ import { CredentialError } from "../src/credentials/errors.js";
 import {
   fingerprintCredentialKey,
   identifyCredentialKey,
+  identifyCredentialKeyBytes,
 } from "../src/credentials/fingerprint.js";
 import {
   type CredentialV1,
@@ -78,6 +79,97 @@ describe("API key parsing", () => {
 });
 
 describe("credential key identity", () => {
+  it.each([
+    `plrm_live_${"A".repeat(10)}`,
+    `plrm_live_${"a0_-".repeat(50)}`,
+  ])("derives the same identity directly from valid mutable bytes", (key) => {
+    const bytes = new TextEncoder().encode(key);
+    const before = bytes.slice();
+
+    expect(
+      identifyCredentialKeyBytes(
+        "HTTPS://API.PLURUM.AI:443/",
+        bytes,
+        "https-only",
+        nodeHash,
+      ),
+    ).toEqual(
+      identifyCredentialKey(
+        "https://api.plurum.ai",
+        key,
+        "https-only",
+        nodeHash,
+      ),
+    );
+    expect(bytes).toEqual(before);
+    before.fill(0);
+    bytes.fill(0);
+  });
+
+  it("rejects invalid credential bytes before hashing without altering the caller buffer", () => {
+    const bytes = new TextEncoder().encode("plrm_live_ABCDEFGHI!");
+    const before = bytes.slice();
+    let called = false;
+    const hash: HashAdapter = Object.freeze({
+      sha256(): Uint8Array {
+        called = true;
+        return new Uint8Array(32);
+      },
+    });
+
+    expect(() =>
+      identifyCredentialKeyBytes(
+        "https://api.plurum.ai",
+        bytes,
+        "https-only",
+        hash,
+      ),
+    ).toThrowError(
+      expect.objectContaining({ code: "credential_fingerprint_failed" }),
+    );
+    expect(called).toBe(false);
+    expect(bytes).toEqual(before);
+    before.fill(0);
+    bytes.fill(0);
+  });
+
+  it("never exposes or mutates the caller key buffer through a hostile hash adapter", () => {
+    const bytes = new TextEncoder().encode(API_KEY);
+    const before = bytes.slice();
+    let retainedPreimage: Uint8Array | undefined;
+    let receivedCallerBuffer = false;
+    const hash: HashAdapter = Object.freeze({
+      sha256(data: Uint8Array): Uint8Array {
+        receivedCallerBuffer = data === bytes;
+        retainedPreimage = data;
+        const digest = nodeHash.sha256(data);
+        data.fill(0xa5);
+        return digest;
+      },
+    });
+
+    expect(
+      identifyCredentialKeyBytes(
+        "https://api.plurum.ai",
+        bytes,
+        "https-only",
+        hash,
+      ),
+    ).toEqual(
+      identifyCredentialKey(
+        "https://api.plurum.ai",
+        API_KEY,
+        "https-only",
+        nodeHash,
+      ),
+    );
+    expect(receivedCallerBuffer).toBe(false);
+    expect(bytes).toEqual(before);
+    expect(retainedPreimage?.every((byte) => byte === 0)).toBe(true);
+    before.fill(0);
+    bytes.fill(0);
+  });
+
   it("returns the full audited digest and compatible display fingerprint", () => {
     let preimage: Uint8Array | undefined;
     let adapterDigest: Uint8Array | undefined;

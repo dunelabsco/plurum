@@ -181,6 +181,12 @@ function appendCredential(
         `  fingerprint: ${quoted(resolution.registration.fingerprint)}`,
         `  sources: ${stringArray(resolution.registration.sources)}`,
       );
+    } else if (resolution.acquisition === "username-conflict-retry") {
+      lines.push(
+        `  previous username: ${quoted(resolution.registration.previousUsername)}`,
+        `  fingerprint: ${quoted(resolution.registration.fingerprint)}`,
+        `  sources: ${stringArray(resolution.registration.sources)}`,
+      );
     }
   }
 

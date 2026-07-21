@@ -22,6 +22,7 @@ import {
 } from "../commands/setup-codex-projection-plan.js";
 import {
   planSetupCredential,
+  SETUP_CREDENTIAL_SOURCES,
   type SetupCanonicalCredentialObservation,
   type SetupCredentialCandidate,
   type SetupCredentialPlanningBlocker,
@@ -31,6 +32,25 @@ import {
   type SetupCredentialResolvedPlan,
   type SetupCredentialSource,
 } from "../commands/setup-credential-plan.js";
+import {
+  discardSetupCredentialInput,
+  type SetupCredentialInputIdentity,
+} from "../commands/setup-credential-input.js";
+import {
+  claimSetupUsernameConflictContinuation,
+  createSetupRegistrationExecutionAttempt,
+  discardSetupUsernameConflictContinuation,
+  transferSetupProtectedCredentialInput,
+  type SetupRegistrationExecutionAttempt,
+  type SetupRegistrationExecutionDependencies,
+  type SetupRegistrationExecutionEvidence,
+  type SetupRegistrationProjectionEvidence,
+  type SetupRegistrationResolvedCredential,
+  type SetupRegistrationSelectedEvidence,
+  type SetupProtectedCredential,
+  type SetupUsernameConflictContinuation,
+  type SetupUsernameConflictContinuationClaim,
+} from "../commands/setup-registration-execution.js";
 import {
   createSetupExecutionAuthority,
   type SetupExecutionDiscardResult,
@@ -43,13 +63,18 @@ import {
   type SetupPreflightSnapshot,
 } from "../commands/setup-preflight.js";
 import {
+  copySetupSecretLeaseBytes,
+  discardSetupSecretLease,
+  isOwnedSetupSecretLease,
+  type SetupSecretLease,
+} from "../commands/setup-secret-lease.js";
+import {
   discoverCredentialsFromCanonicalObservation,
   type CredentialCandidateSummary,
   type CredentialDiscoveryBlocker,
   type CredentialDiscoveryResult,
   type CredentialDiscoverySource,
   type ObservedCredentialDiscoveryDependencies,
-  type ResolvedCredential,
 } from "./discovery.js";
 import {
   identifyCredentialKey,
@@ -58,13 +83,17 @@ import {
 import type {
   CodexDotenvCredentialExpectation,
   CodexDotenvProjectionAdapter,
-  CodexDotenvProjectionIdentity,
   CodexDotenvProjectionStatus,
 } from "./codex-dotenv-contracts.js";
 import {
   isOwnedCodexDotenvProjectionAdapter,
 } from "./codex-dotenv-projection.js";
-import type { CredentialV1, PendingCredentialV1 } from "./schema.js";
+import {
+  parseApiKey,
+  type ApiKey,
+  type CredentialV1,
+  type PendingCredentialV1,
+} from "./schema.js";
 import type { CredentialStoreReadResult } from "./store.js";
 import type {
   CredentialStoreObservationAuthority,
@@ -78,6 +107,7 @@ import {
   containsHostControlCharacter,
   containsHostSensitiveMaterial,
 } from "../hosts/privacy.js";
+import { wipeUint8Array } from "../data/uint8-array.js";
 
 declare const codexDotenvSetupObservationBrand: unique symbol;
 
@@ -94,6 +124,12 @@ export interface CodexDotenvSetupObservationOptions {
   readonly approval: SetupApprovalAuthority;
   readonly store: CredentialStoreObservationAuthority;
   readonly discovery: CodexDotenvSetupDiscoveryDependencies;
+  /*
+   * Optional only for read-only planning authorities. Executable setup binds
+   * this complete adapter set before inspection; it is never caller-supplied
+   * after approval.
+   */
+  readonly execution?: SetupRegistrationExecutionDependencies;
   readonly codexProjection?: CodexDotenvProjectionAdapter;
   readonly preflight: SetupPreflightSnapshot;
 }
@@ -117,6 +153,11 @@ export interface CodexDotenvSetupPrepareRequest {
   readonly decision: SetupCredentialPlanningDecision;
   readonly operationId: string;
   readonly createdAt: string;
+}
+
+export interface CodexDotenvSetupCredentialInputRequest {
+  readonly identity: CodexDotenvSetupObservationIdentity;
+  readonly credential: SetupCredentialInputIdentity;
 }
 
 export type CodexDotenvSetupPrepareResult =
@@ -145,6 +186,21 @@ export type CodexDotenvSetupPrepareResult =
 export interface CodexDotenvSetupObservationAuthority {
   inspect(): Promise<CodexDotenvSetupInspectionResult>;
   /*
+   * Add or replace one protected-input candidate before the apply plan is
+   * prepared. The observation identity and credential identity are both
+   * consumed on every attempt; success returns a fresh observation identity.
+   */
+  resolveCredentialInput(
+    request: CodexDotenvSetupCredentialInputRequest,
+  ): Promise<CodexDotenvSetupInspectionResult>;
+  /*
+   * Consume one authoritative registration-conflict continuation and bind a
+   * fresh exact store observation to a new username decision and approval.
+   */
+  inspectUsernameConflict(
+    continuation: SetupUsernameConflictContinuation,
+  ): Promise<CodexDotenvSetupInspectionResult>;
+  /*
    * The caller must resolve any selection or registration input reported by
    * inspect().initial before this single prepare attempt. Incomplete decisions
    * fail closed and consume the observation rather than minting a continuation.
@@ -159,11 +215,16 @@ export interface CodexDotenvSetupObservationAuthority {
     presenter: SetupPlanPresenter,
     confirmation: SetupInteractiveConfirmation | null,
   ): SetupConfirmationAttempt;
+  createRegistrationExecution(
+    plan: SetupPreparedPlan<SetupApplyPlan>,
+    grant: SetupExecutionGrant,
+  ): SetupRegistrationExecutionAttempt;
   discard(
     identity:
       | CodexDotenvSetupObservationIdentity
       | SetupExecutionSidecarIdentity
-      | SetupExecutionGrant,
+      | SetupExecutionGrant
+      | SetupUsernameConflictContinuation,
   ): SetupExecutionDiscardResult;
 }
 
@@ -175,44 +236,15 @@ interface RetainedStoreObservation {
 
 interface RetainedSetupObservation {
   readonly observation: SetupCredentialPlanningObservation;
-  readonly candidates: ReadonlyMap<string, ResolvedCredential>;
+  readonly candidates: ReadonlyMap<string, RetainedResolvedCredential>;
   readonly pendingIdentity: CredentialKeyIdentity | null;
+  readonly usernameConflict: SetupUsernameConflictContinuationClaim | null;
   readonly store: RetainedStoreObservation;
 }
 
-type SelectedCredentialEvidence =
-  | Readonly<{
-      readonly kind: "existing";
-      readonly credential: ResolvedCredential;
-    }>
-  | Readonly<{
-      readonly kind: "resume-registration";
-      readonly credential: PendingCredentialV1;
-      readonly identity: CredentialKeyIdentity;
-    }>
-  | Readonly<{
-      readonly kind: "new-registration";
-      readonly credential: null;
-      readonly registration: Extract<
-        SetupCredentialResolvedPlan,
-        { acquisition: "new-registration" }
-      >["registration"];
-    }>;
-
-interface ProjectionEvidence {
-  readonly adapter: CodexDotenvProjectionAdapter;
-  readonly identity: CodexDotenvProjectionIdentity;
-  readonly deferred: boolean;
-}
-
-interface PrivateExecutionEvidence {
-  readonly canonicalDirectory: string;
-  readonly cwd: string;
-  readonly storeAuthority: CredentialStoreObservationAuthority;
-  readonly store: RetainedStoreObservation;
-  readonly selected: SelectedCredentialEvidence;
-  readonly projection: ProjectionEvidence | null;
-}
+type RetainedResolvedCredential =
+  | SetupRegistrationResolvedCredential
+  | SetupProtectedCredential;
 
 const TOKEN_TO_JSON = Object.freeze(function tokenToJson(): undefined {
   return undefined;
@@ -313,6 +345,7 @@ interface NormalizedSetupObservationOptions {
   readonly approval: SetupApprovalAuthority;
   readonly store: CredentialStoreObservationAuthority;
   readonly discovery: CodexDotenvSetupDiscoveryDependencies;
+  readonly execution?: SetupRegistrationExecutionDependencies;
   readonly codexProjection?: CodexDotenvProjectionAdapter;
   readonly preflight: SetupPreflightSnapshot;
 }
@@ -323,7 +356,7 @@ function normalizeOptions(
   const object = exactDataObject(
     value,
     ["approval", "store", "discovery", "preflight"],
-    ["codexProjection"],
+    ["codexProjection", "execution"],
   );
   const discovery = exactDataObject(object.discovery, [
     "credentialEnvironment",
@@ -332,6 +365,15 @@ function normalizeOptions(
     "hash",
     "platform",
   ]);
+  const execution = Object.hasOwn(object, "execution")
+    ? exactDataObject(object.execution, [
+        "storage",
+        "network",
+        "clock",
+        "random",
+        "hash",
+      ])
+    : undefined;
   return Object.freeze({
     approval: object.approval as SetupApprovalAuthority,
     store: object.store as CredentialStoreObservationAuthority,
@@ -346,6 +388,22 @@ function normalizeOptions(
       platform:
         discovery.platform as CodexDotenvSetupDiscoveryDependencies["platform"],
     }),
+    ...(execution === undefined
+      ? {}
+      : {
+          execution: Object.freeze({
+            storage:
+              execution.storage as SetupRegistrationExecutionDependencies["storage"],
+            network:
+              execution.network as SetupRegistrationExecutionDependencies["network"],
+            clock:
+              execution.clock as SetupRegistrationExecutionDependencies["clock"],
+            random:
+              execution.random as SetupRegistrationExecutionDependencies["random"],
+            hash:
+              execution.hash as SetupRegistrationExecutionDependencies["hash"],
+          }),
+        }),
     ...(Object.hasOwn(object, "codexProjection")
       ? {
           codexProjection:
@@ -370,6 +428,16 @@ function normalizePrepareRequest(
     decision: object.decision as SetupCredentialPlanningDecision,
     operationId: object.operationId as string,
     createdAt: object.createdAt as string,
+  });
+}
+
+function normalizeCredentialInputRequest(
+  value: unknown,
+): CodexDotenvSetupCredentialInputRequest {
+  const object = exactDataObject(value, ["identity", "credential"]);
+  return Object.freeze({
+    identity: object.identity as CodexDotenvSetupObservationIdentity,
+    credential: object.credential as SetupCredentialInputIdentity,
   });
 }
 
@@ -442,8 +510,8 @@ function discoveryCandidates(
 
 function resolvedCandidates(
   discovery: CredentialDiscoveryResult,
-): ReadonlyMap<string, ResolvedCredential> {
-  const output = new Map<string, ResolvedCredential>();
+): ReadonlyMap<string, RetainedResolvedCredential> {
+  const output = new Map<string, RetainedResolvedCredential>();
   if (discovery.status === "ready") {
     output.set(discovery.candidate.selectionId, discovery.credential);
   } else if (discovery.status === "selection-required") {
@@ -452,6 +520,115 @@ function resolvedCandidates(
     }
   }
   return output;
+}
+
+function orderedSources(
+  sources: readonly SetupCredentialSource[],
+): readonly SetupCredentialSource[] {
+  const order = new Map(
+    SETUP_CREDENTIAL_SOURCES.map((source, index) => [source, index]),
+  );
+  return Object.freeze(
+    [...new Set(sources)].sort(
+      (left, right) =>
+        (order.get(left) ?? Number.MAX_SAFE_INTEGER) -
+        (order.get(right) ?? Number.MAX_SAFE_INTEGER),
+    ),
+  );
+}
+
+function isProtectedCredential(
+  credential: RetainedResolvedCredential,
+): credential is SetupProtectedCredential {
+  return isOwnedSetupSecretLease(
+    (credential as SetupProtectedCredential).lease,
+  );
+}
+
+function cloneResolvedCredential(
+  credential: SetupRegistrationResolvedCredential,
+  sources: readonly SetupCredentialSource[],
+  agent: SetupRegistrationResolvedCredential["agent"] = credential.agent,
+): SetupRegistrationResolvedCredential {
+  const output = {
+    apiOrigin: credential.apiOrigin,
+    fingerprint: credential.fingerprint,
+    agent,
+    sources: orderedSources(sources),
+  } as SetupRegistrationResolvedCredential;
+  Object.defineProperty(output, "apiKey", {
+    configurable: false,
+    enumerable: false,
+    value: credential.apiKey,
+    writable: false,
+  });
+  Object.defineProperty(output, "identity", {
+    configurable: false,
+    enumerable: false,
+    value: credential.identity,
+    writable: false,
+  });
+  return Object.freeze(output);
+}
+
+function copiedProtectedApiKey(
+  credential: SetupProtectedCredential,
+): ApiKey | undefined {
+  const bytes = copySetupSecretLeaseBytes(credential.lease);
+  if (bytes === undefined) {
+    return undefined;
+  }
+  try {
+    return parseApiKey(
+      new TextDecoder("utf-8", {
+        fatal: true,
+        ignoreBOM: true,
+      }).decode(bytes),
+    );
+  } catch {
+    return undefined;
+  } finally {
+    wipeUint8Array(bytes);
+  }
+}
+
+function discardProtectedCredential(
+  credential: RetainedResolvedCredential,
+): void {
+  if (isProtectedCredential(credential)) {
+    discardSetupSecretLease(credential.lease);
+  }
+}
+
+function discardProtectedCandidates(
+  candidates: ReadonlyMap<string, RetainedResolvedCredential>,
+  retainedLease: SetupSecretLease | null = null,
+): void {
+  for (const credential of candidates.values()) {
+    if (
+      isProtectedCredential(credential) &&
+      credential.lease !== retainedLease
+    ) {
+      discardSetupSecretLease(credential.lease);
+    }
+  }
+}
+
+function protectedPublicCandidate(
+  selectionId: string,
+  credential: RetainedResolvedCredential,
+): SetupCredentialCandidate {
+  return Object.freeze({
+    selectionId,
+    apiOrigin: credential.apiOrigin,
+    fingerprint: credential.fingerprint,
+    agent: Object.freeze({
+      id: credential.agent.id,
+      name: credential.agent.name,
+      username: credential.agent.username,
+    }),
+    sources: orderedSources(credential.sources),
+  });
 }
 
 function hasBlocker(
@@ -632,6 +809,154 @@ function unavailableObservation(): SetupCredentialPlanningObservation {
   });
 }
 
+function withoutProtectedInput(
+  retained: RetainedSetupObservation,
+): Readonly<{
+  observation: SetupCredentialPlanningObservation;
+  candidates: Map<string, RetainedResolvedCredential>;
+}> {
+  const candidates = new Map<string, RetainedResolvedCredential>();
+  const publicCandidates: SetupCredentialCandidate[] = [];
+  for (const candidate of retained.observation.candidates) {
+    const resolved = retained.candidates.get(candidate.selectionId);
+    if (resolved === undefined) {
+      return invalid();
+    }
+    if (isProtectedCredential(resolved)) {
+      discardSetupSecretLease(resolved.lease);
+      continue;
+    }
+    const sources = resolved.sources.filter(
+      (source) => source !== "protected-input",
+    );
+    if (sources.length === 0) {
+      continue;
+    }
+    const next = cloneResolvedCredential(resolved, sources);
+    candidates.set(candidate.selectionId, next);
+    publicCandidates.push(
+      protectedPublicCandidate(candidate.selectionId, next),
+    );
+  }
+  return Object.freeze({
+    candidates,
+    observation: Object.freeze({
+      schemaVersion: 1 as const,
+      transaction: retained.observation.transaction,
+      canonical: retained.observation.canonical,
+      candidates: Object.freeze(publicCandidates),
+      blockers: Object.freeze(
+        retained.observation.blockers.filter(
+          (entry) => !entry.sources.includes("protected-input"),
+        ),
+      ),
+      invalidSources: Object.freeze(
+        retained.observation.invalidSources.filter(
+          (source) => source !== "protected-input",
+        ),
+      ),
+    }),
+  });
+}
+
+function nextSelectionId(
+  candidates: ReadonlyMap<string, RetainedResolvedCredential>,
+): string {
+  for (let index = 1; index <= 32; index += 1) {
+    const selectionId = `credential-${index}`;
+    if (!candidates.has(selectionId)) {
+      return selectionId;
+    }
+  }
+  return invalid();
+}
+
+function addProtectedCredential(
+  base: ReturnType<typeof withoutProtectedInput>,
+  protectedCredential: SetupProtectedCredential,
+): ReturnType<typeof withoutProtectedInput> {
+  const candidates = new Map(base.candidates);
+  let selectionId: string | undefined;
+  let merged: RetainedResolvedCredential | undefined;
+  for (const [candidateId, candidate] of candidates) {
+    if (candidate.identity !== protectedCredential.identity) {
+      continue;
+    }
+    if (
+      candidate.apiOrigin !== protectedCredential.apiOrigin ||
+      candidate.fingerprint !== protectedCredential.fingerprint ||
+      candidate.agent.id !== protectedCredential.agent.id ||
+      isProtectedCredential(candidate)
+    ) {
+      discardSetupSecretLease(protectedCredential.lease);
+      return invalid();
+    }
+    selectionId = candidateId;
+    merged = cloneResolvedCredential(
+      candidate,
+      [
+        ...candidate.sources,
+        "protected-input",
+      ],
+      protectedCredential.agent,
+    );
+    discardSetupSecretLease(protectedCredential.lease);
+    break;
+  }
+  if (selectionId === undefined || merged === undefined) {
+    selectionId = nextSelectionId(candidates);
+    merged = protectedCredential;
+  }
+  candidates.set(selectionId, merged);
+
+  const publicCandidates = [...candidates.entries()]
+    .sort(([left], [right]) =>
+      Number(left.slice("credential-".length)) -
+      Number(right.slice("credential-".length)),
+    )
+    .map(([candidateId, candidate]) =>
+      protectedPublicCandidate(candidateId, candidate),
+    );
+  return Object.freeze({
+    candidates,
+    observation: Object.freeze({
+      ...base.observation,
+      candidates: Object.freeze(publicCandidates),
+    }),
+  });
+}
+
+function protectedInputFailure(
+  base: ReturnType<typeof withoutProtectedInput>,
+  status: "invalid" | "indeterminate",
+): ReturnType<typeof withoutProtectedInput> {
+  return Object.freeze({
+    candidates: base.candidates,
+    observation: Object.freeze({
+      ...base.observation,
+      blockers:
+        status === "indeterminate"
+          ? Object.freeze([
+              ...base.observation.blockers,
+              Object.freeze({
+                reason: "credential_validation_unavailable" as const,
+                sources: Object.freeze([
+                  "protected-input" as const,
+                ]),
+              }),
+            ])
+          : base.observation.blockers,
+      invalidSources:
+        status === "invalid"
+          ? orderedSources([
+              ...base.observation.invalidSources,
+              "protected-input",
+            ])
+          : base.observation.invalidSources,
+    }),
+  });
+}
+
 function canonicalReadResult(
   credential: CredentialV1 | null,
 ): CredentialStoreReadResult {
@@ -647,8 +972,9 @@ function selectedEvidence(
   credential: SetupCredentialResolvedPlan,
   retained: RetainedSetupObservation,
 ): Readonly<{
-  selected: SelectedCredentialEvidence;
+  selected: SetupRegistrationSelectedEvidence;
   expectation: CodexDotenvCredentialExpectation;
+  secretLease: SetupSecretLease | null;
 }> {
   if (credential.acquisition === "existing") {
     const selected = retained.candidates.get(
@@ -661,6 +987,23 @@ function selectedEvidence(
     ) {
       return invalid();
     }
+    if (isProtectedCredential(selected)) {
+      const apiKey = copiedProtectedApiKey(selected);
+      if (apiKey === undefined) {
+        return invalid();
+      }
+      return Object.freeze({
+        selected: Object.freeze({
+          kind: "protected-input" as const,
+          credential: selected,
+        }),
+        expectation: Object.freeze({
+          kind: "known" as const,
+          apiKey,
+        }),
+        secretLease: selected.lease,
+      });
+    }
     return Object.freeze({
       selected: Object.freeze({
         kind: "existing" as const,
@@ -670,6 +1013,7 @@ function selectedEvidence(
         kind: "known" as const,
         apiKey: selected.apiKey,
       }),
+      secretLease: null,
     });
   }
 
@@ -695,6 +1039,47 @@ function selectedEvidence(
         kind: "known" as const,
         apiKey: pending.api_key,
       }),
+      secretLease: null,
+    });
+  }
+
+  if (credential.acquisition === "username-conflict-retry") {
+    const pending = retained.store.credential;
+    const conflict = retained.usernameConflict;
+    if (
+      pending === null ||
+      pending.state !== "pending" ||
+      retained.pendingIdentity === null ||
+      conflict === null ||
+      pending.api_origin !== credential.apiOrigin ||
+      pending.agent_name !== credential.registration.agent.name ||
+      pending.username !== credential.registration.previousUsername ||
+      conflict.pending.identity !== retained.pendingIdentity ||
+      conflict.pending.fingerprint !== credential.registration.fingerprint ||
+      conflict.pending.agentName !== pending.agent_name ||
+      conflict.pending.username !== pending.username ||
+      conflict.pending.registrationRequestId !==
+        pending.registration_request_id ||
+      conflict.pending.createdAt !== pending.created_at ||
+      conflict.pending.updatedAt !== pending.updated_at
+    ) {
+      return invalid();
+    }
+    return Object.freeze({
+      selected: Object.freeze({
+        kind: "username-conflict-retry" as const,
+        credential: pending,
+        identity: retained.pendingIdentity,
+        registration: Object.freeze({
+          mode: "username-retry" as const,
+          agent: credential.registration.agent,
+        }),
+      }),
+      expectation: Object.freeze({
+        kind: "known" as const,
+        apiKey: pending.api_key,
+      }),
+      secretLease: null,
     });
   }
 
@@ -707,6 +1092,7 @@ function selectedEvidence(
     expectation: Object.freeze({
       kind: "deferred-registration" as const,
     }),
+    secretLease: null,
   });
 }
 
@@ -762,6 +1148,7 @@ export function createCodexDotenvSetupObservationAuthority(
   const approval = options.approval;
   const store = options.store;
   const discovery = options.discovery;
+  const executionDependencies = options.execution;
   const codexProjection = options.codexProjection;
   const preflight = options.preflight;
   if (
@@ -787,39 +1174,72 @@ export function createCodexDotenvSetupObservationAuthority(
       ...discovery,
       platform: environment.platform,
     });
+    if (
+      executionDependencies !== undefined &&
+      (executionDependencies.network !== boundedDiscovery.network ||
+        executionDependencies.hash !== boundedDiscovery.hash)
+    ) {
+      return invalid();
+    }
   } catch {
     return invalid();
   }
 
   const execution = createSetupExecutionAuthority(approval);
+  const continuationScope = Object.freeze(Object.create(null)) as object;
   const observations = new WeakMap<
     CodexDotenvSetupObservationIdentity,
     RetainedSetupObservation
   >();
   let inspectionStarted = false;
 
-  async function inspect(): Promise<CodexDotenvSetupInspectionResult> {
-    if (inspectionStarted) {
-      return PRECONDITION_FAILED;
-    }
-    inspectionStarted = true;
+  function unavailableInspection(): CodexDotenvSetupInspectionResult {
+    const observation = unavailableObservation();
+    return Object.freeze({
+      status: "unavailable" as const,
+      observation,
+      initial: planSetupCredential({
+        observation,
+        decision: Object.freeze({
+          selectedCandidateId: null,
+          registration: null,
+        }),
+      }),
+    });
+  }
+
+  function exactConflictPending(
+    credential: PendingCredentialV1,
+    conflict: SetupUsernameConflictContinuationClaim,
+    identity: CredentialKeyIdentity,
+    fingerprint: SetupUsernameConflictContinuationClaim["pending"]["fingerprint"],
+  ): boolean {
+    return (
+      conflict.storeAuthority === store &&
+      conflict.canonicalDirectory === canonicalDirectory &&
+      credential.api_origin === conflict.pending.apiOrigin &&
+      identity === conflict.pending.identity &&
+      fingerprint === conflict.pending.fingerprint &&
+      credential.agent_name === conflict.pending.agentName &&
+      credential.username === conflict.pending.username &&
+      credential.registration_request_id ===
+        conflict.pending.registrationRequestId &&
+      credential.created_at === conflict.pending.createdAt &&
+      credential.updated_at === conflict.pending.updatedAt &&
+      credential.agent_id === null &&
+      credential.activated_at === null
+    );
+  }
+
+  async function inspectCurrent(
+    conflict: SetupUsernameConflictContinuationClaim | null,
+  ): Promise<CodexDotenvSetupInspectionResult> {
     try {
       const inspected = await store.inspect({
         directory: canonicalDirectory,
       });
       if (inspected.status !== "available") {
-        const observation = unavailableObservation();
-        return Object.freeze({
-          status: "unavailable" as const,
-          observation,
-          initial: planSetupCredential({
-            observation,
-            decision: Object.freeze({
-              selectedCandidateId: null,
-              registration: null,
-            }),
-          }),
-        });
+        return unavailableInspection();
       }
       const redeemed = store.redeem({
         identity: inspected.identity,
@@ -840,31 +1260,71 @@ export function createCodexDotenvSetupObservationAuthority(
         return PRECONDITION_FAILED;
       }
 
+      let pendingIdentity: CredentialKeyIdentity | null = null;
+      let pendingFingerprint:
+        | SetupUsernameConflictContinuationClaim["pending"]["fingerprint"]
+        | null = null;
+      if (redeemed.credential?.state === "pending") {
+        const identified = identifyCredentialKey(
+          redeemed.credential.api_origin,
+          redeemed.credential.api_key,
+          "https-only",
+          boundedDiscovery.hash,
+        );
+        pendingIdentity = identified.identity;
+        pendingFingerprint = identified.fingerprint;
+      }
+      if (
+        conflict !== null &&
+        (inspected.transaction !== "clean" ||
+          redeemed.transaction !== null ||
+          redeemed.credential?.state !== "pending" ||
+          pendingIdentity === null ||
+          pendingFingerprint === null ||
+          !exactConflictPending(
+            redeemed.credential,
+            conflict,
+            pendingIdentity,
+            pendingFingerprint,
+          ))
+      ) {
+        return PRECONDITION_FAILED;
+      }
+
       const discovered = await discoverCredentialsFromCanonicalObservation(
         Object.freeze({
           ...boundedDiscovery,
           canonical: canonicalReadResult(redeemed.credential),
         }),
       );
-      const observation = planningObservation(
+      const baseObservation = planningObservation(
         redeemed.credential,
         inspected.transaction,
         discovered,
         boundedDiscovery.hash,
       );
-      const pendingIdentity =
-        redeemed.credential?.state === "pending"
-          ? identifyCredentialKey(
-              redeemed.credential.api_origin,
-              redeemed.credential.api_key,
-              "https-only",
-              boundedDiscovery.hash,
-            ).identity
+      const usernameConflict =
+        conflict !== null &&
+        baseObservation.canonical.status === "pending" &&
+        baseObservation.canonical.resumeEvidence ===
+          "definitively-inactive"
+          ? conflict
           : null;
+      const observation =
+        usernameConflict === null
+          ? baseObservation
+          : Object.freeze({
+              ...baseObservation,
+              canonical: Object.freeze({
+                ...baseObservation.canonical,
+                resumeEvidence: "username-conflict" as const,
+              }),
+            });
       const retained = Object.freeze({
         observation,
         candidates: resolvedCandidates(discovered),
         pendingIdentity,
+        usernameConflict,
         store: Object.freeze({
           credential: redeemed.credential,
           transaction: redeemed.transaction,
@@ -886,18 +1346,116 @@ export function createCodexDotenvSetupObservationAuthority(
         }),
       });
     } catch {
-      const observation = unavailableObservation();
+      return unavailableInspection();
+    }
+  }
+
+  async function inspect(): Promise<CodexDotenvSetupInspectionResult> {
+    if (inspectionStarted) {
+      return PRECONDITION_FAILED;
+    }
+    inspectionStarted = true;
+    return inspectCurrent(null);
+  }
+
+  async function inspectUsernameConflict(
+    continuation: SetupUsernameConflictContinuation,
+  ): Promise<CodexDotenvSetupInspectionResult> {
+    const conflict = claimSetupUsernameConflictContinuation(
+      continuation,
+      continuationScope,
+    );
+    if (
+      conflict === undefined ||
+      conflict.storeAuthority !== store ||
+      conflict.canonicalDirectory !== canonicalDirectory
+    ) {
+      return PRECONDITION_FAILED;
+    }
+    return inspectCurrent(conflict);
+  }
+
+  async function resolveCredentialInput(
+    rawRequest: CodexDotenvSetupCredentialInputRequest,
+  ): Promise<CodexDotenvSetupInspectionResult> {
+    let request: CodexDotenvSetupCredentialInputRequest;
+    try {
+      request = normalizeCredentialInputRequest(rawRequest);
+    } catch {
+      return PRECONDITION_FAILED;
+    }
+
+    let retained: RetainedSetupObservation | undefined;
+    try {
+      retained = observations.get(request.identity);
+      observations.delete(request.identity);
+    } catch {
+      return PRECONDITION_FAILED;
+    }
+    if (retained === undefined) {
+      discardSetupCredentialInput(request.credential);
+      return PRECONDITION_FAILED;
+    }
+    if (retained.observation.canonical.status === "pending") {
+      discardSetupCredentialInput(request.credential);
+      discardProtectedCandidates(retained.candidates);
+      return PRECONDITION_FAILED;
+    }
+
+    let nextCandidates:
+      | ReadonlyMap<string, RetainedResolvedCredential>
+      | undefined;
+    let unresolvedProtected: SetupProtectedCredential | undefined;
+    try {
+      const base = withoutProtectedInput(retained);
+      const resolved = await transferSetupProtectedCredentialInput(
+        boundedDiscovery.network,
+        boundedDiscovery.hash,
+        request.credential,
+      );
+      if (resolved.status === "precondition-failed") {
+        return PRECONDITION_FAILED;
+      }
+      const next =
+        resolved.status === "retained"
+          ? (() => {
+              unresolvedProtected = resolved.credential;
+              return addProtectedCredential(base, resolved.credential);
+            })()
+          : protectedInputFailure(base, resolved.status);
+      nextCandidates = next.candidates;
+      unresolvedProtected = undefined;
+      const identity = issueIdentity();
+      const nextRetained = Object.freeze({
+        observation: next.observation,
+        candidates: next.candidates,
+        pendingIdentity: retained.pendingIdentity,
+        usernameConflict: retained.usernameConflict,
+        store: retained.store,
+      });
+      observations.set(identity, nextRetained);
+      nextCandidates = undefined;
       return Object.freeze({
-        status: "unavailable" as const,
-        observation,
+        status: "available" as const,
+        identity,
+        observation: next.observation,
         initial: planSetupCredential({
-          observation,
+          observation: next.observation,
           decision: Object.freeze({
             selectedCandidateId: null,
             registration: null,
           }),
         }),
       });
+    } catch {
+      discardSetupCredentialInput(request.credential);
+      if (unresolvedProtected !== undefined) {
+        discardSetupSecretLease(unresolvedProtected.lease);
+      }
+      discardProtectedCandidates(
+        nextCandidates ?? retained.candidates,
+      );
+      return PRECONDITION_FAILED;
     }
   }
 
@@ -921,6 +1479,7 @@ export function createCodexDotenvSetupObservationAuthority(
       return PRECONDITION_FAILED;
     }
 
+    let transferredSecret = false;
     try {
       const credential = planSetupCredential({
         observation: retained.observation,
@@ -953,7 +1512,8 @@ export function createCodexDotenvSetupObservationAuthority(
 
       const selection = selectedEvidence(credential, retained);
       let projectionPlan: SetupCodexProjectionResolvedPlan | null = null;
-      let projectionEvidence: ProjectionEvidence | null = null;
+      let projectionEvidence: SetupRegistrationProjectionEvidence | null =
+        null;
       if (isExecutableCodex(preflight)) {
         if (codexProjection === undefined) {
           const projection = planSetupCodexProjection(
@@ -1005,15 +1565,24 @@ export function createCodexDotenvSetupObservationAuthority(
         request.operationId,
         request.createdAt,
       );
-      const privateEvidence: PrivateExecutionEvidence = Object.freeze({
+      const privateEvidence: SetupRegistrationExecutionEvidence = Object.freeze({
         canonicalDirectory,
         cwd,
+        continuationScope,
         storeAuthority: store,
         store: retained.store,
         selected: selection.selected,
         projection: projectionEvidence,
       });
-      const observation = execution.registerObservation(privateEvidence);
+      const observation = execution.registerObservation(
+        privateEvidence,
+        selection.secretLease ?? undefined,
+      );
+      transferredSecret = selection.secretLease !== null;
+      discardProtectedCandidates(
+        retained.candidates,
+        selection.secretLease,
+      );
       const sidecar = execution.bind(
         plan,
         credential,
@@ -1027,11 +1596,17 @@ export function createCodexDotenvSetupObservationAuthority(
       });
     } catch {
       return PRECONDITION_FAILED;
+    } finally {
+      if (!transferredSecret) {
+        discardProtectedCandidates(retained.candidates);
+      }
     }
   }
 
   return Object.freeze({
     inspect,
+    inspectUsernameConflict,
+    resolveCredentialInput,
     prepare,
     createConfirmation(
       plan: SetupPreparedPlan<SetupApplyPlan>,
@@ -1050,18 +1625,49 @@ export function createCodexDotenvSetupObservationAuthority(
         confirmation,
       );
     },
+    createRegistrationExecution(
+      plan: SetupPreparedPlan<SetupApplyPlan>,
+      grant: SetupExecutionGrant,
+    ): SetupRegistrationExecutionAttempt {
+      if (executionDependencies === undefined) {
+        execution.discard(grant);
+        return Object.freeze({
+          async execute() {
+            return PRECONDITION_FAILED;
+          },
+          discard() {
+            return PRECONDITION_FAILED;
+          },
+        });
+      }
+      return createSetupRegistrationExecutionAttempt(
+        execution,
+        plan,
+        grant,
+        executionDependencies,
+      );
+    },
     discard(
       identity:
         | CodexDotenvSetupObservationIdentity
         | SetupExecutionSidecarIdentity
-        | SetupExecutionGrant,
+        | SetupExecutionGrant
+        | SetupUsernameConflictContinuation,
     ): SetupExecutionDiscardResult {
-      if (
-        observations.delete(
-          identity as CodexDotenvSetupObservationIdentity,
-        )
-      ) {
+      const observationIdentity =
+        identity as CodexDotenvSetupObservationIdentity;
+      const retained = observations.get(observationIdentity);
+      if (retained !== undefined) {
+        observations.delete(observationIdentity);
+        discardProtectedCandidates(retained.candidates);
         return Object.freeze({ status: "discarded" as const });
+      }
+      const continuation = discardSetupUsernameConflictContinuation(
+        identity as SetupUsernameConflictContinuation,
+        continuationScope,
+      );
+      if (continuation.status === "discarded") {
+        return continuation;
       }
       return execution.discard(
         identity as SetupExecutionSidecarIdentity | SetupExecutionGrant,

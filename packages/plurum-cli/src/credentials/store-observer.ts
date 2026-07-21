@@ -9,6 +9,7 @@ import {
   type CredentialFileAttestation,
   type CredentialFileReadHandle,
   type CredentialObjectIdentity,
+  type CredentialStoreWholePassEvidence,
   type PrivateDirectoryAttestation,
 } from "./store-contracts.js";
 import {
@@ -24,7 +25,6 @@ import {
 } from "./store-transaction.js";
 import type {
   CredentialStoreCanonicalPublicState,
-  CredentialStoreNativeObservationEvidence,
   CredentialStoreObservationAdapter,
   CredentialStoreObservationAuthority,
   CredentialStoreObservationDirectoryHandle,
@@ -61,13 +61,13 @@ interface RetainedObservation {
   readonly directory: string;
   readonly credential: CredentialV1 | null;
   readonly transaction: CredentialReplaceTransactionV1 | null;
-  readonly nativeEvidence: CredentialStoreNativeObservationEvidence;
+  readonly nativeEvidence: CredentialStoreWholePassEvidence;
 }
 
 interface OpenedStoreObservation {
   readonly credential: CredentialV1 | null;
   readonly transaction: CredentialReplaceTransactionV1 | null;
-  readonly nativeEvidence: CredentialStoreNativeObservationEvidence;
+  readonly nativeEvidence: CredentialStoreWholePassEvidence;
   readonly temporaryCount: number;
 }
 
@@ -111,6 +111,13 @@ const PRECONDITION_FAILED = Object.freeze({
 const OWNED_OBSERVATION_AUTHORITIES = new WeakSet<
   CredentialStoreObservationAuthority
 >();
+const OWNED_OBSERVATION_EVIDENCE = new WeakMap<
+  CredentialStoreObservationEvidence,
+  Readonly<{
+    authority: CredentialStoreObservationAuthority;
+    evidence: CredentialStoreWholePassEvidence;
+  }>
+>();
 
 export function isOwnedCredentialStoreObservationAuthority(
   value: unknown,
@@ -124,6 +131,33 @@ export function isOwnedCredentialStoreObservationAuthority(
   return OWNED_OBSERVATION_AUTHORITIES.has(
     value as CredentialStoreObservationAuthority,
   );
+}
+
+/*
+ * This burn-first bridge is intentionally callable only by the exact reviewed
+ * Step 4.8.5 executor. The capability-boundary verifier enforces that import
+ * and call site. Raw native evidence never enters a plan, renderer, diagnostic,
+ * or caller-provided callback.
+ */
+export function claimCredentialStoreObservationEvidence(
+  authority: CredentialStoreObservationAuthority,
+  evidence: CredentialStoreObservationEvidence,
+): CredentialStoreWholePassEvidence | undefined {
+  let retained:
+    | Readonly<{
+        authority: CredentialStoreObservationAuthority;
+        evidence: CredentialStoreWholePassEvidence;
+      }>
+    | undefined;
+  try {
+    retained = OWNED_OBSERVATION_EVIDENCE.get(evidence);
+    OWNED_OBSERVATION_EVIDENCE.delete(evidence);
+  } catch {
+    return undefined;
+  }
+  return retained?.authority === authority
+    ? retained.evidence
+    : undefined;
 }
 
 function invalid(): never {
@@ -433,7 +467,7 @@ async function normalizeDirectoryOpenResult(
       }
       return Object.freeze({
         status: "missing",
-        evidence: object.evidence as unknown as CredentialStoreNativeObservationEvidence,
+        evidence: object.evidence as unknown as CredentialStoreWholePassEvidence,
       });
     }
     if (status === "opened") {
@@ -805,16 +839,11 @@ export function createCredentialStoreObservationAuthority(
     CredentialStoreObservationIdentity,
     RetainedObservation
   >();
-  const nativeEvidence = new WeakMap<
-    CredentialStoreObservationEvidence,
-    CredentialStoreNativeObservationEvidence
-  >();
-
   function issue(
     directory: string,
     credential: CredentialV1 | null,
     transaction: CredentialReplaceTransactionV1 | null,
-    evidence: CredentialStoreNativeObservationEvidence,
+    evidence: CredentialStoreWholePassEvidence,
     temporaryCount: number,
   ): CredentialStoreObservationResult {
     const identity = createToken<CredentialStoreObservationIdentity>();
@@ -881,7 +910,10 @@ export function createCredentialStoreObservationAuthority(
       return PRECONDITION_FAILED;
     }
     const evidence = createToken<CredentialStoreObservationEvidence>();
-    nativeEvidence.set(evidence, retained.nativeEvidence);
+    OWNED_OBSERVATION_EVIDENCE.set(
+      evidence,
+      Object.freeze({ authority, evidence: retained.nativeEvidence }),
+    );
     const result = {
       status: "redeemed" as const,
       evidence,

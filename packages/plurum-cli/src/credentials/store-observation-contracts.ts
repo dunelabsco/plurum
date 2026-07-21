@@ -3,6 +3,7 @@ import type { CredentialV1 } from "./schema.js";
 import type {
   CredentialFileAttestation,
   CredentialFileReadHandle,
+  CredentialStoreWholePassEvidence,
   PrivateDirectoryAttestation,
 } from "./store-contracts.js";
 import type {
@@ -11,7 +12,6 @@ import type {
 } from "./store-mutation-contracts.js";
 import type { CredentialReplaceTransactionV1 } from "./store-transaction.js";
 
-declare const credentialStoreNativeObservationEvidenceBrand: unique symbol;
 declare const credentialStoreObservationIdentityBrand: unique symbol;
 declare const credentialStoreObservationEvidenceBrand: unique symbol;
 
@@ -26,10 +26,6 @@ declare const credentialStoreObservationEvidenceBrand: unique symbol;
  * A future mutation authority may redeem the wrapper only inside the same
  * factory/adapter authority and must revalidate the native state before use.
  */
-export interface CredentialStoreNativeObservationEvidence {
-  readonly [credentialStoreNativeObservationEvidenceBrand]: never;
-}
-
 /*
  * The directory handle is read-only. Its revision must change whenever any
  * fact used by this observation can change: directory identity/binding or
@@ -51,7 +47,7 @@ export interface CredentialStoreObservationDirectoryHandle {
    * credential, transaction, the exact listed temporary entries, and stable
    * directory attestations. It is observational and performs no mutation.
    */
-  finishObservation(): Promise<CredentialStoreNativeObservationEvidence>;
+  finishObservation(): Promise<CredentialStoreWholePassEvidence>;
   close(): Promise<void>;
 }
 
@@ -66,7 +62,7 @@ export type CredentialStoreObservationEntryResult =
 export type CredentialStoreObservationDirectoryOpenResult =
   | Readonly<{
       status: "missing";
-      evidence: CredentialStoreNativeObservationEvidence;
+      evidence: CredentialStoreWholePassEvidence;
     }>
   | Readonly<{
       status: "opened";
