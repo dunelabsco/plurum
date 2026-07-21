@@ -14,6 +14,7 @@ import {
 } from "./discovery-paths.js";
 import { CredentialError } from "./errors.js";
 import {
+  type CredentialKeyIdentity,
   type CredentialKeyFingerprint,
   identifyCredentialKey,
 } from "./fingerprint.js";
@@ -36,9 +37,11 @@ import {
   type CredentialV1,
   containsApiKeyToken,
   parseApiKey,
+  validateCredentialDocument,
 } from "./schema.js";
 import {
   readCredentialStore,
+  type CredentialStoreReadResult,
 } from "./store.js";
 import type {
   CredentialStoreReadAdapter,
@@ -93,6 +96,7 @@ export interface CredentialCandidateSummary {
 export interface ResolvedCredential {
   readonly apiOrigin: ApiOrigin;
   readonly apiKey: ApiKey;
+  readonly identity: CredentialKeyIdentity;
   readonly fingerprint: CredentialKeyFingerprint;
   readonly agent: CredentialAgentSummary;
   readonly sources: readonly CredentialDiscoverySource[];
@@ -136,13 +140,27 @@ export type CredentialDiscoveryResult =
         validCandidates: readonly CredentialCandidateSummary[];
       }>);
 
-export interface CredentialDiscoveryDependencies {
+interface CredentialDiscoveryCommonDependencies {
   readonly credentialEnvironment: CredentialEnvironmentAdapter;
-  readonly canonicalStore: CredentialStoreReadAdapter;
   readonly legacyStore: LegacyCredentialReadAdapter;
   readonly network: ReadOnlyNetworkAdapter;
   readonly hash: HashAdapter;
   readonly platform: PlatformAdapter;
+}
+
+export interface CredentialDiscoveryDependencies
+  extends CredentialDiscoveryCommonDependencies {
+  readonly canonicalStore: CredentialStoreReadAdapter;
+}
+
+/*
+ * Setup's coherent store observer supplies this exact canonical result. Using
+ * it avoids reopening credentials.json after transaction evidence has already
+ * been minted for the approval-bound observation.
+ */
+export interface ObservedCredentialDiscoveryDependencies
+  extends CredentialDiscoveryCommonDependencies {
+  readonly canonical: CredentialStoreReadResult;
 }
 
 interface DiscoveryEnvironment {
@@ -219,6 +237,18 @@ class CredentialDiscoveryError extends Error {
     this.name = "CredentialDiscoveryError";
   }
 }
+
+type CanonicalDiscoveryResult =
+  | Readonly<{
+      status: "observed";
+      result: CredentialStoreReadResult;
+    }>
+  | Readonly<{
+      status: "blocked";
+      reason: CredentialDiscoveryBlockerReason;
+    }>;
+
+type CanonicalDiscoveryReader = () => Promise<CanonicalDiscoveryResult>;
 
 function blocker(
   reason: CredentialDiscoveryBlockerReason,
@@ -463,6 +493,12 @@ function resolved(
     value: value.apiKey,
     writable: false,
   });
+  Object.defineProperty(output, "identity", {
+    configurable: false,
+    enumerable: false,
+    value: value.identity,
+    writable: false,
+  });
   return Object.freeze(output);
 }
 
@@ -497,9 +533,77 @@ function fatalBlockedResult(): CredentialDiscoveryResult {
   ]);
 }
 
-async function discover(
+function observedCanonicalResult(
+  value: CredentialStoreReadResult,
+  originPolicy: ApiOriginPolicy,
+): CredentialStoreReadResult {
+  if (value.status === "missing") {
+    if (
+      value.reason !== "directory_missing" &&
+      value.reason !== "credential_missing"
+    ) {
+      throw new CredentialDiscoveryError();
+    }
+    return Object.freeze({ status: "missing", reason: value.reason });
+  }
+  if (value.status !== "loaded") {
+    throw new CredentialDiscoveryError();
+  }
+  return Object.freeze({
+    status: "loaded",
+    credential: validateCredentialDocument(
+      value.credential,
+      originPolicy,
+    ),
+  });
+}
+
+async function readCanonicalSource(
   dependencies: CredentialDiscoveryDependencies,
   originPolicy: ApiOriginPolicy,
+): Promise<CanonicalDiscoveryResult> {
+  let locations;
+  try {
+    locations = resolveCredentialLocations(dependencies.platform);
+  } catch {
+    return Object.freeze({
+      status: "blocked",
+      reason: "canonical_location_invalid",
+    });
+  }
+
+  try {
+    return Object.freeze({
+      status: "observed",
+      result: await readCredentialStore(
+        dependencies.canonicalStore,
+        locations,
+        originPolicy,
+      ),
+    });
+  } catch (error) {
+    let reason: CredentialDiscoveryBlockerReason =
+      "canonical_credential_unavailable";
+    if (error instanceof CredentialError) {
+      if (error.code === "unsafe_credential_store") {
+        reason = "credential_source_unsafe";
+      } else if (
+        error.code === "invalid_credential_document" ||
+        error.code === "invalid_credential_origin" ||
+        error.code === "unsupported_credential_schema" ||
+        error.code === "credential_document_too_large"
+      ) {
+        reason = "credential_source_malformed";
+      }
+    }
+    return Object.freeze({ status: "blocked", reason });
+  }
+}
+
+async function discover(
+  dependencies: CredentialDiscoveryCommonDependencies,
+  originPolicy: ApiOriginPolicy,
+  readCanonical: CanonicalDiscoveryReader,
 ): Promise<CredentialDiscoveryResult> {
   const blockers: CredentialDiscoveryBlocker[] = [];
   const invalidSources: CredentialDiscoverySource[] = [];
@@ -548,57 +652,29 @@ async function discover(
     }
   }
 
-  let locations;
-  try {
-    locations = resolveCredentialLocations(dependencies.platform);
-  } catch {
+  const canonicalSource = await readCanonical();
+  if (canonicalSource.status === "blocked") {
     addBlocker(
       blockers,
-      blocker("canonical_location_invalid", ["canonical"]),
+      blocker(canonicalSource.reason, ["canonical"]),
     );
-  }
-
-  if (locations !== undefined) {
-    try {
-      const canonical = await readCredentialStore(
-        dependencies.canonicalStore,
-        locations,
+  } else if (canonicalSource.result.status === "loaded") {
+    const canonical = canonicalSource.result.credential;
+    mergeRawCandidate(
+      rawCandidates,
+      candidate(
+        canonical.api_origin,
+        canonical.api_key,
+        "canonical",
         originPolicy,
+        canonical,
+      ),
+    );
+    if (canonical.state === "pending") {
+      addBlocker(
+        blockers,
+        blocker("canonical_credential_pending", ["canonical"]),
       );
-      if (canonical.status === "loaded") {
-        mergeRawCandidate(
-          rawCandidates,
-          candidate(
-            canonical.credential.api_origin,
-            canonical.credential.api_key,
-            "canonical",
-            originPolicy,
-            canonical.credential,
-          ),
-        );
-        if (canonical.credential.state === "pending") {
-          addBlocker(
-            blockers,
-            blocker("canonical_credential_pending", ["canonical"]),
-          );
-        }
-      }
-    } catch (error) {
-      let reason: CredentialDiscoveryBlockerReason =
-        "canonical_credential_unavailable";
-      if (error instanceof CredentialError) {
-        if (error.code === "unsafe_credential_store") {
-          reason = "credential_source_unsafe";
-        } else if (
-          error.code === "invalid_credential_document" ||
-          error.code === "invalid_credential_origin" ||
-          error.code === "unsupported_credential_schema" ||
-          error.code === "credential_document_too_large"
-        ) {
-          reason = "credential_source_malformed";
-        }
-      }
-      addBlocker(blockers, blocker(reason, ["canonical"]));
     }
   }
 
@@ -716,15 +792,19 @@ async function discover(
     }
 
     const canonical = value.canonicalCredential;
-    if (
-      canonical?.state === "active" &&
-      canonical.agent_id !== validation.agent.id
-    ) {
-      addBlocker(
-        blockers,
-        blocker("canonical_identity_mismatch", ["canonical"]),
-      );
-      continue;
+    if (canonical !== undefined) {
+      const identityMatches =
+        canonical.state === "active"
+          ? canonical.agent_id === validation.agent.id
+          : canonical.agent_name === validation.agent.name &&
+            canonical.username === validation.agent.username;
+      if (!identityMatches) {
+        addBlocker(
+          blockers,
+          blocker("canonical_identity_mismatch", ["canonical"]),
+        );
+        continue;
+      }
     }
     validCandidates.push({
       ...value,
@@ -805,7 +885,38 @@ export async function discoverCredentials(
     ) {
       return fatalBlockedResult();
     }
-    return await discover(dependencies, originPolicy);
+    return await discover(
+      dependencies,
+      originPolicy,
+      () => readCanonicalSource(dependencies, originPolicy),
+    );
+  } catch {
+    return fatalBlockedResult();
+  }
+}
+
+export async function discoverCredentialsFromCanonicalObservation(
+  dependencies: ObservedCredentialDiscoveryDependencies,
+  originPolicy: ApiOriginPolicy = "https-only",
+): Promise<CredentialDiscoveryResult> {
+  try {
+    if (
+      dependencies === null ||
+      typeof dependencies !== "object" ||
+      (originPolicy !== "https-only" &&
+        originPolicy !== "explicit-loopback-development")
+    ) {
+      return fatalBlockedResult();
+    }
+    const canonical = observedCanonicalResult(
+      dependencies.canonical,
+      originPolicy,
+    );
+    return await discover(
+      dependencies,
+      originPolicy,
+      async () => Object.freeze({ status: "observed", result: canonical }),
+    );
   } catch {
     return fatalBlockedResult();
   }

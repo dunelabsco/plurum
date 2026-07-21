@@ -5,8 +5,12 @@ import {
 import type {
   CodexDotenvApplyRequest,
   CodexDotenvApplyResult,
+  CodexDotenvCompleteDeferredRequest,
+  CodexDotenvCompleteDeferredResult,
+  CodexDotenvCredentialExpectation,
   CodexDotenvInspection,
   CodexDotenvInspectionRequest,
+  CodexDotenvKnownCredentialExpectation,
   CodexDotenvNativeAdapter,
   CodexDotenvNativeEvidence,
   CodexDotenvNativeMutationResult,
@@ -15,6 +19,7 @@ import type {
   CodexDotenvProjectionIdentity,
   CodexDotenvProjectionStatus,
 } from "./codex-dotenv-contracts.js";
+import { parseApiKey } from "./schema.js";
 import {
   containsHostControlCharacter,
   containsHostSensitiveMaterial,
@@ -35,6 +40,19 @@ const UNAVAILABLE_INSPECTION = Object.freeze({ status: "unavailable" } as const)
 const TOKEN_TO_JSON = Object.freeze(function tokenToJson(): undefined {
   return undefined;
 });
+const OWNED_PROJECTION_ADAPTERS = new WeakSet<CodexDotenvProjectionAdapter>();
+
+export function isOwnedCodexDotenvProjectionAdapter(
+  value: unknown,
+): value is CodexDotenvProjectionAdapter {
+  if (
+    value === null ||
+    (typeof value !== "object" && typeof value !== "function")
+  ) {
+    return false;
+  }
+  return OWNED_PROJECTION_ADAPTERS.has(value as CodexDotenvProjectionAdapter);
+}
 
 interface DataSnapshot {
   readonly names: readonly string[];
@@ -43,6 +61,7 @@ interface DataSnapshot {
 
 interface ProjectionTokenState {
   readonly excludedProjectDirectory: string;
+  readonly expectation: CodexDotenvCredentialExpectation;
   readonly native: CodexDotenvNativeEvidence;
 }
 
@@ -181,11 +200,76 @@ function normalizeNativeEvidence(value: unknown): CodexDotenvNativeEvidence {
   });
 }
 
+function normalizeExpectation(
+  value: unknown,
+): CodexDotenvCredentialExpectation {
+  const snapshot = snapshotDataObject(value);
+  const kind = snapshot.values.kind;
+  if (kind === "deferred-registration") {
+    exactSnapshot(snapshot, ["kind"]);
+    return Object.freeze({ kind });
+  }
+  if (kind !== "known") {
+    return invalid();
+  }
+  const object = exactSnapshot(snapshot, ["kind", "apiKey"]);
+  return Object.freeze({
+    kind,
+    apiKey: parseApiKey(object.apiKey),
+  });
+}
+
+function knownExpectation(
+  value: unknown,
+): CodexDotenvKnownCredentialExpectation {
+  return Object.freeze({
+    kind: "known",
+    apiKey: parseApiKey(value),
+  });
+}
+
+function normalizeEvidenceForExpectation(
+  evidence: CodexDotenvNativeEvidence,
+  expectation: CodexDotenvCredentialExpectation,
+): CodexDotenvNativeEvidence {
+  if (
+    expectation.kind === "deferred-registration" &&
+    evidence.status === "exact"
+  ) {
+    return Object.freeze({
+      revision: evidence.revision,
+      status: "mismatched",
+    });
+  }
+  return evidence;
+}
+
 function normalizeInspectionRequest(
   value: unknown,
 ): CodexDotenvInspectionRequest {
-  const object = exactDataObject(value, ["excludedProjectDirectory"]);
+  const object = exactDataObject(value, [
+    "expectation",
+    "excludedProjectDirectory",
+  ]);
   return Object.freeze({
+    expectation: normalizeExpectation(object.expectation),
+    excludedProjectDirectory: safeExcludedProjectDirectory(
+      object.excludedProjectDirectory,
+    ),
+  });
+}
+
+function normalizeCompleteDeferredRequest(
+  value: unknown,
+): CodexDotenvCompleteDeferredRequest {
+  const object = exactDataObject(value, [
+    "expectedIdentity",
+    "persistedApiKey",
+    "excludedProjectDirectory",
+  ]);
+  return Object.freeze({
+    expectedIdentity: safeIdentity(object.expectedIdentity),
+    persistedApiKey: parseApiKey(object.persistedApiKey),
     excludedProjectDirectory: safeExcludedProjectDirectory(
       object.excludedProjectDirectory,
     ),
@@ -274,6 +358,7 @@ export function createCodexDotenvProjectionAdapter(
   function issueEvidence(
     observed: CodexDotenvNativeEvidence,
     excludedProjectDirectory: string,
+    expectation: CodexDotenvCredentialExpectation,
   ): CodexDotenvProjectionEvidence {
     const token = Object.create(null) as Record<string, unknown>;
     Object.defineProperty(token, "toJSON", {
@@ -289,6 +374,7 @@ export function createCodexDotenvProjectionAdapter(
       identity,
       Object.freeze({
         excludedProjectDirectory,
+        expectation,
         native: observed,
       }),
     );
@@ -297,36 +383,50 @@ export function createCodexDotenvProjectionAdapter(
 
   async function observeNative(
     excludedProjectDirectory: string,
+    expectation: CodexDotenvCredentialExpectation,
   ): Promise<CodexDotenvNativeEvidence> {
-    return normalizeNativeEvidence(
-      await native.observe(
-        Object.freeze({
-          kind: "codex-dotenv-observe",
-          scope: "user",
-          apiOrigin: CODEX_DOTENV_API_ORIGIN,
-          excludedProjectDirectory,
-        }),
+    return normalizeEvidenceForExpectation(
+      normalizeNativeEvidence(
+        await native.observe(
+          Object.freeze({
+            kind: "codex-dotenv-observe",
+            scope: "user",
+            apiOrigin: CODEX_DOTENV_API_ORIGIN,
+            expectation,
+            excludedProjectDirectory,
+          }),
+        ),
       ),
+      expectation,
     );
   }
 
   function convergedUnowned(
     observed: CodexDotenvNativeEvidence,
     excludedProjectDirectory: string,
+    expectation: CodexDotenvKnownCredentialExpectation,
   ): CodexDotenvApplyResult {
     return Object.freeze({
       status: "converged-unowned",
-      state: issueEvidence(observed, excludedProjectDirectory),
+      state: issueEvidence(
+        observed,
+        excludedProjectDirectory,
+        expectation,
+      ),
     });
   }
 
   async function recoverUncertainMutation(
     before: CodexDotenvNativeEvidence,
     excludedProjectDirectory: string,
+    expectation: CodexDotenvKnownCredentialExpectation,
   ): Promise<CodexDotenvApplyResult> {
     let observed: CodexDotenvNativeEvidence;
     try {
-      observed = await observeNative(excludedProjectDirectory);
+      observed = await observeNative(
+        excludedProjectDirectory,
+        expectation,
+      );
     } catch {
       return INDETERMINATE_RESULT;
     }
@@ -337,7 +437,11 @@ export function createCodexDotenvProjectionAdapter(
       return INDETERMINATE_RESULT;
     }
     if (observed.status === "exact") {
-      return convergedUnowned(observed, excludedProjectDirectory);
+      return convergedUnowned(
+        observed,
+        excludedProjectDirectory,
+        expectation,
+      );
     }
     return INDETERMINATE_RESULT;
   }
@@ -345,10 +449,14 @@ export function createCodexDotenvProjectionAdapter(
   async function recoverPreconditionFailure(
     before: CodexDotenvNativeEvidence,
     excludedProjectDirectory: string,
+    expectation: CodexDotenvKnownCredentialExpectation,
   ): Promise<CodexDotenvApplyResult> {
     let observed: CodexDotenvNativeEvidence;
     try {
-      observed = await observeNative(excludedProjectDirectory);
+      observed = await observeNative(
+        excludedProjectDirectory,
+        expectation,
+      );
     } catch {
       return INDETERMINATE_RESULT;
     }
@@ -357,7 +465,11 @@ export function createCodexDotenvProjectionAdapter(
       observed.revision !== before.revision &&
       observed.status === "exact"
     ) {
-      return convergedUnowned(observed, excludedProjectDirectory);
+      return convergedUnowned(
+        observed,
+        excludedProjectDirectory,
+        expectation,
+      );
     }
     return PRECONDITION_FAILED_RESULT;
   }
@@ -367,14 +479,57 @@ export function createCodexDotenvProjectionAdapter(
   ): Promise<CodexDotenvInspection> {
     try {
       const request = normalizeInspectionRequest(rawRequest);
-      const observed = await observeNative(request.excludedProjectDirectory);
+      const observed = await observeNative(
+        request.excludedProjectDirectory,
+        request.expectation,
+      );
       return Object.freeze({
         status: "available",
-        state: issueEvidence(observed, request.excludedProjectDirectory),
+        state: issueEvidence(
+          observed,
+          request.excludedProjectDirectory,
+          request.expectation,
+        ),
       });
     } catch {
       return UNAVAILABLE_INSPECTION;
     }
+  }
+
+  function completeDeferred(
+    rawRequest: CodexDotenvCompleteDeferredRequest,
+  ): CodexDotenvCompleteDeferredResult {
+    let request: CodexDotenvCompleteDeferredRequest;
+    try {
+      request = normalizeCompleteDeferredRequest(rawRequest);
+    } catch {
+      return FAILED_RESULT;
+    }
+
+    const before = identities.get(request.expectedIdentity);
+    if (before === undefined) {
+      return PRECONDITION_FAILED_RESULT;
+    }
+    identities.delete(request.expectedIdentity);
+    if (
+      before.excludedProjectDirectory !== request.excludedProjectDirectory ||
+      before.expectation.kind !== "deferred-registration"
+    ) {
+      return PRECONDITION_FAILED_RESULT;
+    }
+    if (blockedStatus(before.native.status)) {
+      return BLOCKED_RESULT;
+    }
+
+    const expectation = knownExpectation(request.persistedApiKey);
+    return Object.freeze({
+      status: "completed",
+      state: issueEvidence(
+        before.native,
+        request.excludedProjectDirectory,
+        expectation,
+      ),
+    });
   }
 
   async function apply(
@@ -397,6 +552,9 @@ export function createCodexDotenvProjectionAdapter(
     ) {
       return PRECONDITION_FAILED_RESULT;
     }
+    if (before.expectation.kind !== "known") {
+      return BLOCKED_RESULT;
+    }
     if (blockedStatus(before.native.status)) {
       return BLOCKED_RESULT;
     }
@@ -410,6 +568,7 @@ export function createCodexDotenvProjectionAdapter(
           apiOrigin: CODEX_DOTENV_API_ORIGIN,
           expectedRevision: before.native.revision,
           expectedStatus: before.native.status,
+          expectation: before.expectation,
           excludedProjectDirectory: request.excludedProjectDirectory,
         }),
       );
@@ -417,6 +576,7 @@ export function createCodexDotenvProjectionAdapter(
       return recoverUncertainMutation(
         before.native,
         request.excludedProjectDirectory,
+        before.expectation,
       );
     }
 
@@ -427,18 +587,21 @@ export function createCodexDotenvProjectionAdapter(
       return recoverUncertainMutation(
         before.native,
         request.excludedProjectDirectory,
+        before.expectation,
       );
     }
     if (mutation.status === "failed") {
       return recoverUncertainMutation(
         before.native,
         request.excludedProjectDirectory,
+        before.expectation,
       );
     }
     if (mutation.status === "precondition-failed") {
       return recoverPreconditionFailure(
         before.native,
         request.excludedProjectDirectory,
+        before.expectation,
       );
     }
 
@@ -455,12 +618,16 @@ export function createCodexDotenvProjectionAdapter(
       return recoverUncertainMutation(
         before.native,
         request.excludedProjectDirectory,
+        before.expectation,
       );
     }
 
     let observed: CodexDotenvNativeEvidence;
     try {
-      observed = await observeNative(request.excludedProjectDirectory);
+      observed = await observeNative(
+        request.excludedProjectDirectory,
+        before.expectation,
+      );
     } catch {
       return INDETERMINATE_RESULT;
     }
@@ -473,6 +640,7 @@ export function createCodexDotenvProjectionAdapter(
         state: issueEvidence(
           observed,
           request.excludedProjectDirectory,
+          before.expectation,
         ),
       });
     }
@@ -483,10 +651,13 @@ export function createCodexDotenvProjectionAdapter(
       return convergedUnowned(
         observed,
         request.excludedProjectDirectory,
+        before.expectation,
       );
     }
     return INDETERMINATE_RESULT;
   }
 
-  return Object.freeze({ inspect, apply });
+  const adapter = Object.freeze({ inspect, completeDeferred, apply });
+  OWNED_PROJECTION_ADAPTERS.add(adapter);
+  return adapter;
 }

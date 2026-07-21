@@ -22,6 +22,18 @@ prepares one immutable approval-bound plan and renders only its public preview,
 including the disclosure that Codex and processes it starts may inherit the
 API key. The command does not use that composer yet.
 
+An isolated setup-observation core now reads a credential, transaction
+journal, and managed recovery remnants through one injected read-only
+directory authority. It reuses that exact canonical document for credential
+discovery, compares Codex with the selected credential (or a deferred new
+registration), and reuses one immutable platform snapshot for host inspection,
+credential paths, discovery, and project exclusion. It binds the private key,
+transaction evidence, and native revision to the exact immutable apply plan
+through opaque one-use identities. None of that evidence enters the plan or
+renderer.
+This core still has no production/native adapter or command wiring, so normal
+setup apply remains explicitly unavailable.
+
 The completed CLI will expose only:
 
 ```text
@@ -72,8 +84,8 @@ unchanged, replace, ambiguous, unsafe, and unavailable Codex states relative
 to the exact selected credential without receiving a key. Complete host
 reconciliation evidence stays outside the rendered preview, and composition
 cannot re-inspect hosts or perform changes. It remains unreachable from the CLI
-until native projection and credential observation, confirmation, secret
-input, and persistence boundaries are wired.
+until native projection and credential-observation adapters, confirmation,
+secret input, and conditional persistence boundaries are wired.
 
 The test harness refuses unverifiable execution and unsafe identity changes,
 confines guarded fake operations to a unique private root, rejects lexical,

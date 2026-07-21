@@ -37,7 +37,17 @@ const EXECUTABLE_CLASSIFICATIONS = Object.freeze([
   "healthy-newer",
   "needs-changes",
 ] as const);
-const OWNED_PREPARED_APPLY_PLANS = new WeakSet<object>();
+
+interface SetupApplyPlanProvenance {
+  readonly approval: SetupApprovalAuthority;
+  readonly credential: SetupCredentialResolvedPlan;
+  readonly codexProjection: SetupCodexProjectionResolvedPlan | null;
+}
+
+const OWNED_PREPARED_APPLY_PLANS = new WeakMap<
+  object,
+  SetupApplyPlanProvenance
+>();
 
 export type SetupApplyReadiness = "ready" | "no-op";
 
@@ -336,7 +346,14 @@ export function prepareSetupApplyPlan(
       },
     });
     const prepared = approval.prepare(candidate);
-    OWNED_PREPARED_APPLY_PLANS.add(prepared);
+    OWNED_PREPARED_APPLY_PLANS.set(
+      prepared,
+      Object.freeze({
+        approval,
+        credential,
+        codexProjection: resolvedCodexProjection,
+      }),
+    );
     return prepared;
   } catch {
     throw new SetupApplyPlanError();
@@ -358,6 +375,30 @@ export function requireOwnedSetupApplyPlan(
     return invalidPlan();
   }
   return plan as SetupPreparedPlan<SetupApplyPlan>;
+}
+
+/*
+ * The execution sidecar uses this identity-only check to prove that it is
+ * attaching observation evidence to the exact apply plan, approval authority,
+ * credential resolution, and Codex projection that were prepared together.
+ * Nothing from the retained provenance is exposed to the caller.
+ */
+export function isOwnedSetupApplyPlanForProvenance(
+  plan: unknown,
+  approval: unknown,
+  credential: unknown,
+  codexProjection: unknown,
+): plan is SetupPreparedPlan<SetupApplyPlan> {
+  if (typeof plan !== "object" || plan === null) {
+    return false;
+  }
+  const provenance = OWNED_PREPARED_APPLY_PLANS.get(plan);
+  return (
+    provenance !== undefined &&
+    provenance.approval === approval &&
+    provenance.credential === credential &&
+    provenance.codexProjection === codexProjection
+  );
 }
 
 export function publicSetupApplyPreview(

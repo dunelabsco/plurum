@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CODEX_DOTENV_API_ORIGIN,
   CODEX_DOTENV_PROJECTION_STATUSES,
+  type CodexDotenvCredentialExpectation,
   type CodexDotenvNativeAdapter,
   type CodexDotenvNativeEvidence,
   type CodexDotenvProjectionAdapter,
@@ -11,11 +12,26 @@ import {
 } from "../src/credentials/codex-dotenv-contracts.js";
 import {
   createCodexDotenvProjectionAdapter,
+  isOwnedCodexDotenvProjectionAdapter,
 } from "../src/credentials/codex-dotenv-projection.js";
+import { parseApiKey } from "../src/credentials/schema.js";
 
 const PROJECT = "/synthetic/project";
 const OTHER_PROJECT = "/synthetic/other-project";
 const HOSTILE_API_KEY = `plrm_live_${"K".repeat(43)}`;
+const SELECTED_API_KEY = parseApiKey(`plrm_live_${"A".repeat(43)}`);
+const REGISTERED_API_KEY = parseApiKey(`plrm_live_${"B".repeat(43)}`);
+const OTHER_API_KEY = parseApiKey(`plrm_live_${"C".repeat(43)}`);
+
+function knownExpectation(
+  apiKey = SELECTED_API_KEY,
+): CodexDotenvCredentialExpectation {
+  return Object.freeze({ kind: "known", apiKey });
+}
+
+function deferredExpectation(): CodexDotenvCredentialExpectation {
+  return Object.freeze({ kind: "deferred-registration" });
+}
 
 function nativeEvidence(
   revision: string,
@@ -98,8 +114,12 @@ function nativeFake(
 async function inspectAvailable(
   adapter: CodexDotenvProjectionAdapter,
   excludedProjectDirectory = PROJECT,
+  expectation = knownExpectation(),
 ): Promise<CodexDotenvProjectionEvidence> {
-  const result = await adapter.inspect({ excludedProjectDirectory });
+  const result = await adapter.inspect({
+    expectation,
+    excludedProjectDirectory,
+  });
   expect(result.status).toBe("available");
   if (result.status !== "available") {
     throw new Error("expected available projection evidence");
@@ -119,6 +139,48 @@ function applyEvidence(
 }
 
 describe("Codex dotenv projection inspection", () => {
+  it("brands only exact factory-owned adapters without inspecting candidates", () => {
+    const fake = nativeFake("absent");
+    const adapter = createCodexDotenvProjectionAdapter(fake.native);
+    const clone = Object.freeze({
+      inspect: adapter.inspect,
+      completeDeferred: adapter.completeDeferred,
+      apply: adapter.apply,
+    });
+    const forgery = Object.freeze({
+      inspect: async () => Object.freeze({ status: "unavailable" }),
+      completeDeferred: () => Object.freeze({ status: "failed" }),
+      apply: async () => Object.freeze({ status: "failed" }),
+    });
+    let trapCalls = 0;
+    const proxy = new Proxy(adapter, {
+      get() {
+        trapCalls += 1;
+        throw new Error("candidate was inspected");
+      },
+      getOwnPropertyDescriptor() {
+        trapCalls += 1;
+        throw new Error("candidate was inspected");
+      },
+      getPrototypeOf() {
+        trapCalls += 1;
+        throw new Error("candidate was inspected");
+      },
+      ownKeys() {
+        trapCalls += 1;
+        throw new Error("candidate was inspected");
+      },
+    });
+
+    expect(isOwnedCodexDotenvProjectionAdapter(adapter)).toBe(true);
+    expect(isOwnedCodexDotenvProjectionAdapter(clone)).toBe(false);
+    expect(isOwnedCodexDotenvProjectionAdapter(forgery)).toBe(false);
+    expect(isOwnedCodexDotenvProjectionAdapter(proxy)).toBe(false);
+    expect(isOwnedCodexDotenvProjectionAdapter(null)).toBe(false);
+    expect(isOwnedCodexDotenvProjectionAdapter("adapter")).toBe(false);
+    expect(trapCalls).toBe(0);
+  });
+
   it("runtime-freezes the exported projection statuses", () => {
     expect(Object.isFrozen(CODEX_DOTENV_PROJECTION_STATUSES)).toBe(true);
     expect(CODEX_DOTENV_PROJECTION_STATUSES).toEqual([
@@ -156,10 +218,133 @@ describe("Codex dotenv projection inspection", () => {
         kind: "codex-dotenv-observe",
         scope: "user",
         apiOrigin: CODEX_DOTENV_API_ORIGIN,
+        expectation: knownExpectation(),
         excludedProjectDirectory: PROJECT,
       },
     ]);
     expect(Object.isFrozen(fake.observations()[0])).toBe(true);
+    const request = fake.observations()[0] as Parameters<
+      CodexDotenvNativeAdapter["observe"]
+    >[0];
+    expect(Object.isFrozen(request.expectation)).toBe(true);
+    expect(JSON.stringify(state)).not.toContain(SELECTED_API_KEY);
+  });
+
+  it("copies and freezes the selected credential expectation before native observation", async () => {
+    const fake = nativeFake("absent");
+    const adapter = createCodexDotenvProjectionAdapter(fake.native);
+    const supplied = {
+      kind: "known" as const,
+      apiKey: SELECTED_API_KEY,
+    };
+
+    await inspectAvailable(adapter, PROJECT, supplied);
+    supplied.apiKey = OTHER_API_KEY;
+
+    const request = fake.observations()[0] as Parameters<
+      CodexDotenvNativeAdapter["observe"]
+    >[0];
+    expect(request.expectation).not.toBe(supplied);
+    expect(request.expectation).toEqual(knownExpectation(SELECTED_API_KEY));
+    expect(Object.isFrozen(request.expectation)).toBe(true);
+  });
+
+  it("observes relative to the selected key instead of an ambient canonical key", async () => {
+    const fake = nativeFake("absent");
+    fake.setObservation(async (request) =>
+      nativeEvidence(
+        "selected-relative-state",
+        request.expectation.kind === "known" &&
+          request.expectation.apiKey === SELECTED_API_KEY
+          ? "exact"
+          : "mismatched",
+      ),
+    );
+    const adapter = createCodexDotenvProjectionAdapter(fake.native);
+
+    const selected = await inspectAvailable(
+      adapter,
+      PROJECT,
+      knownExpectation(SELECTED_API_KEY),
+    );
+    const other = await inspectAvailable(
+      adapter,
+      PROJECT,
+      knownExpectation(OTHER_API_KEY),
+    );
+
+    expect(selected.status).toBe("exact");
+    expect(other.status).toBe("mismatched");
+  });
+
+  it("never reports an exact projection for deferred registration", async () => {
+    const fake = nativeFake("exact");
+    const adapter = createCodexDotenvProjectionAdapter(fake.native);
+
+    const state = await inspectAvailable(
+      adapter,
+      PROJECT,
+      deferredExpectation(),
+    );
+
+    expect(state.status).toBe("mismatched");
+    const request = fake.observations()[0] as Parameters<
+      CodexDotenvNativeAdapter["observe"]
+    >[0];
+    expect(request.expectation).toEqual(deferredExpectation());
+    expect(JSON.stringify(state)).not.toContain("deferred-registration");
+  });
+
+  it.each([
+    null,
+    {},
+    { kind: "known" },
+    { kind: "known", apiKey: "not-a-key" },
+    { kind: "known", apiKey: SELECTED_API_KEY, extra: true },
+    { kind: "deferred-registration", apiKey: SELECTED_API_KEY },
+    { kind: "unknown" },
+    Object.assign(Object.create({ inherited: true }), {
+      kind: "known",
+      apiKey: SELECTED_API_KEY,
+    }),
+    { kind: "known", apiKey: SELECTED_API_KEY, [Symbol("hidden")]: true },
+  ])("fails closed for hostile credential expectation %#", async (expectation) => {
+    const fake = nativeFake("absent");
+    const adapter = createCodexDotenvProjectionAdapter(fake.native);
+
+    await expect(
+      adapter.inspect({
+        expectation: expectation as never,
+        excludedProjectDirectory: PROJECT,
+      }),
+    ).resolves.toEqual({ status: "unavailable" });
+    expect(fake.observations()).toHaveLength(0);
+  });
+
+  it("does not invoke credential expectation accessors", async () => {
+    const fake = nativeFake("absent");
+    const adapter = createCodexDotenvProjectionAdapter(fake.native);
+    let getterCalls = 0;
+    const expectation = Object.defineProperty(
+      { kind: "known" },
+      "apiKey",
+      {
+        enumerable: true,
+        get() {
+          getterCalls += 1;
+          return SELECTED_API_KEY;
+        },
+      },
+    );
+
+    await expect(
+      adapter.inspect({
+        expectation: expectation as never,
+        excludedProjectDirectory: PROJECT,
+      }),
+    ).resolves.toEqual({ status: "unavailable" });
+    expect(getterCalls).toBe(0);
+    expect(fake.observations()).toHaveLength(0);
   });
 
   it.each([
@@ -182,6 +367,7 @@ describe("Codex dotenv projection inspection", () => {
       const adapter = createCodexDotenvProjectionAdapter(fake.native);
 
       const inspection = await adapter.inspect({
+        expectation: knownExpectation(),
         excludedProjectDirectory: PROJECT,
       });
       expect(inspection.status).toBe("available");
@@ -212,16 +398,20 @@ describe("Codex dotenv projection inspection", () => {
     const fake = nativeFake("absent");
     const adapter = createCodexDotenvProjectionAdapter(fake.native);
     let getterCalls = 0;
-    const request = Object.defineProperty({}, "excludedProjectDirectory", {
-      enumerable: true,
-      get() {
-        getterCalls += 1;
-        return PROJECT;
+    const request = Object.defineProperty(
+      { expectation: knownExpectation() },
+      "excludedProjectDirectory",
+      {
+        enumerable: true,
+        get() {
+          getterCalls += 1;
+          return PROJECT;
+        },
       },
-    });
+    );
 
     await expect(
-      adapter.inspect(request as { excludedProjectDirectory: string }),
+      adapter.inspect(request as never),
     ).resolves.toEqual({ status: "unavailable" });
     expect(getterCalls).toBe(0);
     expect(fake.observations()).toHaveLength(0);
@@ -245,7 +435,10 @@ describe("Codex dotenv projection inspection", () => {
     const adapter = createCodexDotenvProjectionAdapter(fake.native);
 
     await expect(
-      adapter.inspect({ excludedProjectDirectory: PROJECT }),
+      adapter.inspect({
+        expectation: knownExpectation(),
+        excludedProjectDirectory: PROJECT,
+      }),
     ).resolves.toEqual({ status: "unavailable" });
   });
 
@@ -267,7 +460,10 @@ describe("Codex dotenv projection inspection", () => {
     const adapter = createCodexDotenvProjectionAdapter(fake.native);
 
     await expect(
-      adapter.inspect({ excludedProjectDirectory: PROJECT }),
+      adapter.inspect({
+        expectation: knownExpectation(),
+        excludedProjectDirectory: PROJECT,
+      }),
     ).resolves.toEqual({ status: "unavailable" });
     expect(getterCalls).toBe(0);
   });
@@ -372,9 +568,265 @@ describe("Codex dotenv projection identity", () => {
   });
 });
 
+describe("Codex dotenv deferred registration completion", () => {
+  it("synchronously binds the persisted registration key to the original observation", async () => {
+    const fake = nativeFake("absent");
+    const adapter = createCodexDotenvProjectionAdapter(fake.native);
+    const deferred = await inspectAvailable(
+      adapter,
+      PROJECT,
+      deferredExpectation(),
+    );
+
+    const completed = adapter.completeDeferred({
+      expectedIdentity: deferred.identity,
+      persistedApiKey: REGISTERED_API_KEY,
+      excludedProjectDirectory: PROJECT,
+    });
+
+    expect(completed).not.toBeInstanceOf(Promise);
+    expect(completed.status).toBe("completed");
+    if (completed.status !== "completed") {
+      throw new Error("expected deferred completion");
+    }
+    expect(completed.state.status).toBe("absent");
+    expect(JSON.stringify(completed)).toEqual(
+      JSON.stringify({ status: "completed", state: { status: "absent" } }),
+    );
+    expect(JSON.stringify(completed)).not.toContain(REGISTERED_API_KEY);
+    expect(fake.observations()).toHaveLength(1);
+    expect(fake.mutations()).toHaveLength(0);
+
+    const applied = await applyEvidence(adapter, completed.state);
+    expect(applied.status).toBe("changed");
+    expect(fake.mutations()).toHaveLength(1);
+    expect(fake.observations()).toHaveLength(2);
+
+    const initialObservation = fake.observations()[0] as Parameters<
+      CodexDotenvNativeAdapter["observe"]
+    >[0];
+    const mutation = fake.mutations()[0] as Parameters<
+      CodexDotenvNativeAdapter["synchronize"]
+    >[0];
+    const finalObservation = fake.observations()[1] as Parameters<
+      CodexDotenvNativeAdapter["observe"]
+    >[0];
+    expect(initialObservation.expectation).toEqual(deferredExpectation());
+    expect(mutation.expectedRevision).toBe("state-1");
+    expect(mutation.expectedStatus).toBe("absent");
+    expect(mutation.expectation).toEqual(
+      knownExpectation(REGISTERED_API_KEY),
+    );
+    expect(finalObservation.expectation).toBe(mutation.expectation);
+    expect(JSON.stringify(applied)).not.toContain(REGISTERED_API_KEY);
+  });
+
+  it("consumes the deferred identity and rejects replay", async () => {
+    const fake = nativeFake("absent");
+    const adapter = createCodexDotenvProjectionAdapter(fake.native);
+    const deferred = await inspectAvailable(
+      adapter,
+      PROJECT,
+      deferredExpectation(),
+    );
+    const request = {
+      expectedIdentity: deferred.identity,
+      persistedApiKey: REGISTERED_API_KEY,
+      excludedProjectDirectory: PROJECT,
+    } as const;
+
+    expect(adapter.completeDeferred(request).status).toBe("completed");
+    expect(adapter.completeDeferred(request)).toEqual({
+      status: "precondition-failed",
+    });
+    await expect(applyEvidence(adapter, deferred)).resolves.toEqual({
+      status: "precondition-failed",
+    });
+  });
+
+  it("rejects known evidence and consumes the misuse", async () => {
+    const fake = nativeFake("absent");
+    const adapter = createCodexDotenvProjectionAdapter(fake.native);
+    const known = await inspectAvailable(adapter);
+
+    expect(
+      adapter.completeDeferred({
+        expectedIdentity: known.identity,
+        persistedApiKey: REGISTERED_API_KEY,
+        excludedProjectDirectory: PROJECT,
+      }),
+    ).toEqual({ status: "precondition-failed" });
+    await expect(applyEvidence(adapter, known)).resolves.toEqual({
+      status: "precondition-failed",
+    });
+    expect(fake.mutations()).toHaveLength(0);
+  });
+
+  it("rejects foreign identity without consuming its owning adapter", async () => {
+    const fake = nativeFake("absent");
+    const owner = createCodexDotenvProjectionAdapter(fake.native);
+    const foreign = createCodexDotenvProjectionAdapter(fake.native);
+    const deferred = await inspectAvailable(
+      owner,
+      PROJECT,
+      deferredExpectation(),
+    );
+
+    expect(
+      foreign.completeDeferred({
+        expectedIdentity: deferred.identity,
+        persistedApiKey: REGISTERED_API_KEY,
+        excludedProjectDirectory: PROJECT,
+      }),
+    ).toEqual({ status: "precondition-failed" });
+    expect(
+      owner.completeDeferred({
+        expectedIdentity: deferred.identity,
+        persistedApiKey: REGISTERED_API_KEY,
+        excludedProjectDirectory: PROJECT,
+      }).status,
+    ).toBe("completed");
+  });
+
+  it("binds completion to cwd and consumes wrong-cwd misuse", async () => {
+    const fake = nativeFake("absent");
+    const adapter = createCodexDotenvProjectionAdapter(fake.native);
+    const deferred = await inspectAvailable(
+      adapter,
+      PROJECT,
+      deferredExpectation(),
+    );
+
+    expect(
+      adapter.completeDeferred({
+        expectedIdentity: deferred.identity,
+        persistedApiKey: REGISTERED_API_KEY,
+        excludedProjectDirectory: OTHER_PROJECT,
+      }),
+    ).toEqual({ status: "precondition-failed" });
+    expect(
+      adapter.completeDeferred({
+        expectedIdentity: deferred.identity,
+        persistedApiKey: REGISTERED_API_KEY,
+        excludedProjectDirectory: PROJECT,
+      }),
+    ).toEqual({ status: "precondition-failed" });
+  });
+
+  it.each(["ambiguous", "unsafe", "credential-unavailable"] as const)(
+    "blocks deferred completion from %s evidence and consumes it",
+    async (status) => {
+      const fake = nativeFake(status);
+      const adapter = createCodexDotenvProjectionAdapter(fake.native);
+      const deferred = await inspectAvailable(
+        adapter,
+        PROJECT,
+        deferredExpectation(),
+      );
+      const request = {
+        expectedIdentity: deferred.identity,
+        persistedApiKey: REGISTERED_API_KEY,
+        excludedProjectDirectory: PROJECT,
+      } as const;
+
+      expect(adapter.completeDeferred(request)).toEqual({
+        status: "blocked",
+      });
+      expect(adapter.completeDeferred(request)).toEqual({
+        status: "precondition-failed",
+      });
+      expect(fake.mutations()).toHaveLength(0);
+    },
+  );
+
+  it("blocks direct apply of deferred evidence and consumes it", async () => {
+    const fake = nativeFake("absent");
+    const adapter = createCodexDotenvProjectionAdapter(fake.native);
+    const deferred = await inspectAvailable(
+      adapter,
+      PROJECT,
+      deferredExpectation(),
+    );
+
+    await expect(applyEvidence(adapter, deferred)).resolves.toEqual({
+      status: "blocked",
+    });
+    expect(
+      adapter.completeDeferred({
+        expectedIdentity: deferred.identity,
+        persistedApiKey: REGISTERED_API_KEY,
+        excludedProjectDirectory: PROJECT,
+      }),
+    ).toEqual({ status: "precondition-failed" });
+    expect(fake.mutations()).toHaveLength(0);
+  });
+
+  it("does not invoke malformed completion accessors or consume valid evidence", async () => {
+    const fake = nativeFake("absent");
+    const adapter = createCodexDotenvProjectionAdapter(fake.native);
+    const deferred = await inspectAvailable(
+      adapter,
+      PROJECT,
+      deferredExpectation(),
+    );
+    let getterCalls = 0;
+    const hostile = Object.defineProperty(
+      {
+        persistedApiKey: REGISTERED_API_KEY,
+        excludedProjectDirectory: PROJECT,
+      },
+      "expectedIdentity",
+      {
+        enumerable: true,
+        get() {
+          getterCalls += 1;
+          return deferred.identity;
+        },
+      },
+    );
+
+    expect(adapter.completeDeferred(hostile as never)).toEqual({
+      status: "failed",
+    });
+    expect(getterCalls).toBe(0);
+    expect(
+      adapter.completeDeferred({
+        expectedIdentity: deferred.identity,
+        persistedApiKey: REGISTERED_API_KEY,
+        excludedProjectDirectory: PROJECT,
+      }).status,
+    ).toBe("completed");
+  });
+
+  it("rejects an invalid persisted key without consuming valid evidence", async () => {
+    const fake = nativeFake("absent");
+    const adapter = createCodexDotenvProjectionAdapter(fake.native);
+    const deferred = await inspectAvailable(
+      adapter,
+      PROJECT,
+      deferredExpectation(),
+    );
+
+    expect(
+      adapter.completeDeferred({
+        expectedIdentity: deferred.identity,
+        persistedApiKey: "not-a-key" as never,
+        excludedProjectDirectory: PROJECT,
+      }),
+    ).toEqual({ status: "failed" });
+    expect(
+      adapter.completeDeferred({
+        expectedIdentity: deferred.identity,
+        persistedApiKey: REGISTERED_API_KEY,
+        excludedProjectDirectory: PROJECT,
+      }).status,
+    ).toBe("completed");
+  });
+});
+
 describe("Codex dotenv projection mutation", () => {
   it.each(["absent", "mismatched"] as const)(
-    "projects the canonical credential from %s without exposing a revision",
+    "projects the selected credential from %s without exposing a revision",
     async (status) => {
       const fake = nativeFake(status);
       const adapter = createCodexDotenvProjectionAdapter(fake.native);
@@ -397,11 +849,25 @@ describe("Codex dotenv projection mutation", () => {
           apiOrigin: CODEX_DOTENV_API_ORIGIN,
           expectedRevision: "state-1",
           expectedStatus: status,
+          expectation: knownExpectation(),
           excludedProjectDirectory: PROJECT,
         },
       ]);
       expect(Object.isFrozen(fake.mutations()[0])).toBe(true);
       expect(fake.observations()).toHaveLength(2);
+      const firstObservation = fake.observations()[0] as Parameters<
+        CodexDotenvNativeAdapter["observe"]
+      >[0];
+      const mutation = fake.mutations()[0] as Parameters<
+        CodexDotenvNativeAdapter["synchronize"]
+      >[0];
+      const finalObservation = fake.observations()[1] as Parameters<
+        CodexDotenvNativeAdapter["observe"]
+      >[0];
+      expect(mutation.expectation).toBe(firstObservation.expectation);
+      expect(finalObservation.expectation).toBe(
+        firstObservation.expectation,
+      );
     },
   );
 

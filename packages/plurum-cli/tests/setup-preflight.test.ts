@@ -11,6 +11,7 @@ import {
   createSetupDryRunPreflight,
   createSetupPreflightSnapshot,
   retainedSetupHostPlans,
+  retainedSetupPreflightEnvironment,
 } from "../src/commands/setup-preflight.js";
 import { renderSetupDryRunPreflight } from "../src/commands/setup-output.js";
 import { ExitCode } from "../src/exit-codes.js";
@@ -39,8 +40,10 @@ import {
 } from "../src/system/scopes.js";
 import type {
   PlatformAdapter,
+  PlatformPathAdapter,
   SystemCapabilities,
 } from "../src/system/contracts.js";
+import { snapshotPlatformAdapter } from "../src/system/platform-snapshot.js";
 import { createTestSystem } from "./support/system.js";
 
 const CANARY = "plrm_live_STEP_4_8_CANARY_DO_NOT_PRINT";
@@ -157,6 +160,7 @@ function systemWithInspections(
 
 function systemWithApplyInspections(
   inspections: Readonly<Record<HostId, HostInspectionAdapter>>,
+  platform?: PlatformAdapter,
 ): SystemCapabilities {
   const base = createTestSystem();
   const asMutation = (
@@ -176,6 +180,7 @@ function systemWithApplyInspections(
   });
   return Object.freeze({
     ...base,
+    ...(platform === undefined ? {} : { platform }),
     hosts: Object.freeze({
       inspection: base.hosts.inspection,
       mutation,
@@ -315,6 +320,107 @@ describe("setup dry-run preflight", () => {
     expect(inspect).toHaveBeenCalledTimes(1);
     expect(retainedSetupHostPlans(snapshot)).toHaveLength(1);
     expect(inspect).toHaveBeenCalledTimes(1);
+  });
+
+  it("captures one accessor-free platform snapshot before host inspection awaits", async () => {
+    const base = createTestSystem();
+    let cwdReads = 0;
+    const source = {
+      os: base.platform.os,
+      arch: base.platform.arch,
+      environment: base.platform.environment,
+      elevation: base.platform.elevation,
+      paths: base.platform.paths,
+    } as Record<string, unknown>;
+    Object.defineProperty(source, "cwd", {
+      configurable: false,
+      enumerable: true,
+      get() {
+        cwdReads += 1;
+        return cwdReads === 1
+          ? "/isolated/neutral"
+          : "/isolated/changed-after-await";
+      },
+    });
+    const platform = Object.freeze(source) as unknown as PlatformAdapter;
+    const inspect = vi.fn(async (request) => {
+      await Promise.resolve();
+      expect(request.excludedProjectDirectory).toBe("/isolated/neutral");
+      return available("codex", absentConfiguration());
+    });
+    const system = systemWithApplyInspections(
+      {
+        "claude-code": inspectionAdapter(async () => ({
+          host: "claude-code",
+          status: "absent",
+        })),
+        codex: inspectionAdapter(inspect),
+      },
+      platform,
+    );
+    const scope = setupPreflightScope(system);
+
+    const snapshot = await createSetupPreflightSnapshot("codex", scope);
+    const retained = retainedSetupPreflightEnvironment(
+      snapshot,
+      scope.platform,
+    );
+
+    expect(cwdReads).toBe(1);
+    expect(inspect).toHaveBeenCalledTimes(1);
+    expect(Object.getOwnPropertyDescriptor(scope.platform, "cwd")).toEqual({
+      configurable: false,
+      enumerable: true,
+      value: "/isolated/neutral",
+      writable: false,
+    });
+    expect(retained.cwd).toBe("/isolated/neutral");
+    expect(retained.platform).toBe(scope.platform);
+  });
+
+  it("preserves the receiver required by valid platform path methods", () => {
+    const base = createTestSystem();
+    let calls = 0;
+    const paths: PlatformPathAdapter = Object.freeze({
+      separator: "/" as const,
+      isAbsolute(path: string) {
+        expect(this).toBe(paths);
+        calls += 1;
+        return base.platform.paths.isAbsolute(path);
+      },
+      normalize(path: string) {
+        expect(this).toBe(paths);
+        calls += 1;
+        return base.platform.paths.normalize(path);
+      },
+      join(...parts: readonly string[]) {
+        expect(this).toBe(paths);
+        calls += 1;
+        return base.platform.paths.join(...parts);
+      },
+      relative(from: string, to: string) {
+        expect(this).toBe(paths);
+        calls += 1;
+        return base.platform.paths.relative(from, to);
+      },
+      root(path: string) {
+        expect(this).toBe(paths);
+        calls += 1;
+        return base.platform.paths.root(path);
+      },
+    });
+    const snapshot = snapshotPlatformAdapter(
+      Object.freeze({ ...base.platform, paths }),
+    );
+
+    expect(snapshot.paths.isAbsolute("/isolated")).toBe(true);
+    expect(snapshot.paths.normalize("/isolated/../safe")).toBe("/safe");
+    expect(snapshot.paths.join("/isolated", "safe")).toBe("/isolated/safe");
+    expect(snapshot.paths.relative("/isolated", "/isolated/safe")).toBe(
+      "safe",
+    );
+    expect(snapshot.paths.root("/isolated/safe")).toBe("/");
+    expect(calls).toBe(5);
   });
 
   it("makes an inspection-failed snapshot unavailable without fabricating a retained plan", async () => {

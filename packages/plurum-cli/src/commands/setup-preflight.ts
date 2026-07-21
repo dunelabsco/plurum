@@ -33,9 +33,11 @@ import {
 } from "../hosts/privacy.js";
 import type {
   HostPreflightCapabilities,
+  PlatformAdapter,
   PlanningCapabilities,
   SetupPreflightCapabilities,
 } from "../system/contracts.js";
+import { snapshotPlatformAdapter } from "../system/platform-snapshot.js";
 
 const MAX_DISPLAY_CHARACTERS = 32_767;
 const UNSAFE_TERMINAL_FORMATTING = /[\p{Cf}\u2028\u2029]/u;
@@ -149,6 +151,20 @@ type SetupPreflightData = Omit<
 interface InspectedSetupPreflight {
   readonly publicData: SetupPreflightData;
   readonly plans: readonly HostPreflightPlan[];
+  readonly environment: RetainedSetupPreflightEnvironment;
+}
+
+interface RetainedSetupPreflightEnvironment {
+  readonly platformAuthority: PlatformAdapter;
+  readonly platform: PlatformAdapter;
+  readonly cwd: string;
+  readonly credentialDirectory: string;
+}
+
+export interface SetupPreflightEnvironment {
+  readonly platform: PlatformAdapter;
+  readonly cwd: string;
+  readonly credentialDirectory: string;
 }
 
 export interface SetupDryRunPreflight {
@@ -190,6 +206,10 @@ class SetupPreflightError extends Error {
 const RETAINED_HOST_PLANS = new WeakMap<
   SetupPreflightSnapshot,
   readonly HostPreflightPlan[]
+>();
+const RETAINED_ENVIRONMENTS = new WeakMap<
+  SetupPreflightSnapshot,
+  RetainedSetupPreflightEnvironment
 >();
 
 function invalidPreflight(): never {
@@ -425,6 +445,7 @@ function readinessFor(
 async function inspectHost(
   host: HostId,
   capabilities: HostPreflightCapabilities,
+  platform: PlatformAdapter,
 ): Promise<Readonly<{
   host: SetupHostPreview;
   mutations: readonly SetupMutationPreview[];
@@ -436,7 +457,7 @@ async function inspectHost(
         Object.freeze({
           host,
           scope: "user",
-          excludedProjectDirectory: capabilities.platform.cwd,
+          excludedProjectDirectory: platform.cwd,
         }),
       );
     const plan = createHostPreflightPlan(
@@ -470,9 +491,10 @@ async function inspectSetupPreflight(
   target: ClientTarget,
   capabilities: HostPreflightCapabilities,
 ): Promise<InspectedSetupPreflight> {
+  const platform = snapshotPlatformAdapter(capabilities.platform);
   const selected = selectedClients(target);
   const locations = resolveCredentialLocations(
-    capabilities.platform,
+    platform,
   );
   const destinations: SetupDryRunPreflight["destinations"] = [
     {
@@ -500,7 +522,7 @@ async function inspectSetupPreflight(
   ];
   const inspected: Array<Awaited<ReturnType<typeof inspectHost>>> = [];
   for (const host of selected) {
-    inspected.push(await inspectHost(host, capabilities));
+    inspected.push(await inspectHost(host, capabilities, platform));
   }
 
   const hosts = inspected.map((result) => result.host);
@@ -515,7 +537,7 @@ async function inspectSetupPreflight(
     return invalidPreflight();
   }
 
-  return deepFreeze({
+  const inspectedResult = deepFreeze({
     publicData: {
       requestedTarget: target,
       selectedClients: selected,
@@ -534,6 +556,15 @@ async function inspectSetupPreflight(
       ),
     ),
   });
+  return Object.freeze({
+    ...inspectedResult,
+    environment: Object.freeze({
+      platformAuthority: capabilities.platform,
+      platform,
+      cwd: platform.cwd,
+      credentialDirectory: locations.directory,
+    }),
+  });
 }
 
 export async function createSetupPreflightSnapshot(
@@ -543,6 +574,7 @@ export async function createSetupPreflightSnapshot(
   const inspected = await inspectSetupPreflight(target, capabilities);
   const snapshot = inspected.publicData as SetupPreflightSnapshot;
   RETAINED_HOST_PLANS.set(snapshot, inspected.plans);
+  RETAINED_ENVIRONMENTS.set(snapshot, inspected.environment);
   return snapshot;
 }
 
@@ -556,6 +588,35 @@ export function retainedSetupHostPlans(
     snapshot as SetupPreflightSnapshot,
   );
   return plans ?? invalidPreflight();
+}
+
+/*
+ * Setup composition may recover paths only when it presents the exact
+ * platform authority that produced this exact apply preflight. This keeps host
+ * inspection, credential-store observation, and Codex projection exclusion on
+ * one invocation-local environment without publishing the cwd in the plan.
+ */
+export function retainedSetupPreflightEnvironment(
+  snapshot: unknown,
+  platform: unknown,
+): SetupPreflightEnvironment {
+  if (typeof snapshot !== "object" || snapshot === null) {
+    return invalidPreflight();
+  }
+  const retained = RETAINED_ENVIRONMENTS.get(
+    snapshot as SetupPreflightSnapshot,
+  );
+  if (
+    retained === undefined ||
+    retained.platformAuthority !== platform
+  ) {
+    return invalidPreflight();
+  }
+  return Object.freeze({
+    platform: retained.platform,
+    cwd: retained.cwd,
+    credentialDirectory: retained.credentialDirectory,
+  });
 }
 
 export async function createSetupDryRunPreflight(

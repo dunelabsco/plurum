@@ -32,6 +32,7 @@ import {
   copyCredentialEnvironmentSnapshot,
 } from "./credential-environment.js";
 import { CapabilityPolicyError } from "./errors.js";
+import { snapshotPlatformAdapter } from "./platform-snapshot.js";
 
 function readOnlyFileSystem(
   filesystem: SystemCapabilities["filesystem"],
@@ -155,7 +156,7 @@ function setupProcesses(processes: ProcessAdapter): ProcessAdapter {
 function scopedHostInspectionAdapter(
   adapter: HostInspectionAdapter,
   host: (typeof HOST_IDS)[number],
-  system: SystemCapabilities,
+  platform: SystemCapabilities["platform"],
 ): HostInspectionAdapter {
   return Object.freeze({
     async inspect(request: HostInspectionRequest) {
@@ -164,7 +165,7 @@ function scopedHostInspectionAdapter(
         if (
           request.host !== host ||
           request.scope !== "user" ||
-          request.excludedProjectDirectory !== system.platform.cwd ||
+          request.excludedProjectDirectory !== platform.cwd ||
           Object.keys(request).length !== 3 ||
           Object.getOwnPropertySymbols(request).length !== 0
         ) {
@@ -173,7 +174,7 @@ function scopedHostInspectionAdapter(
         copiedRequest = Object.freeze({
           host,
           scope: "user",
-          excludedProjectDirectory: system.platform.cwd,
+          excludedProjectDirectory: platform.cwd,
         });
       } catch (error) {
         if (error instanceof CapabilityPolicyError) {
@@ -185,8 +186,8 @@ function scopedHostInspectionAdapter(
       return validateHostInspection(
         result,
         copiedRequest,
-        system.platform.paths,
-        system.platform.os,
+        platform.paths,
+        platform.os,
       );
     },
   });
@@ -194,12 +195,13 @@ function scopedHostInspectionAdapter(
 
 function scopedHostInspection(
   system: SystemCapabilities,
+  platform: SystemCapabilities["platform"],
 ): HostAdapterMap<HostInspectionAdapter> {
   const entries = HOST_IDS.map((host) => {
     const scoped = scopedHostInspectionAdapter(
       system.hosts.inspection[host],
       host,
-      system,
+      platform,
     );
     return [host, scoped] as const;
   });
@@ -225,10 +227,11 @@ function inspectionOnlyHostMap(
 
 function scopedHostMutation(
   system: SystemCapabilities,
+  platform: SystemCapabilities["platform"],
 ): HostAdapterMap<HostMutationAdapter> {
   const entries = HOST_IDS.map((host) => {
     const adapter = system.hosts.mutation[host];
-    const inspection = scopedHostInspectionAdapter(adapter, host, system);
+    const inspection = scopedHostInspectionAdapter(adapter, host, platform);
     const scoped: HostMutationAdapter = Object.freeze({
       inspect: inspection.inspect,
       async apply(request: HostApplyRequest) {
@@ -265,10 +268,11 @@ function scopedHostMutation(
 }
 
 export function planningScope(system: SystemCapabilities): PlanningCapabilities {
+  const platform = snapshotPlatformAdapter(system.platform);
   return Object.freeze({
-    platform: system.platform,
+    platform,
     hosts: Object.freeze({
-      inspection: scopedHostInspection(system),
+      inspection: scopedHostInspection(system, platform),
     }),
   }) as PlanningCapabilities;
 }
@@ -281,9 +285,10 @@ export function setupPreflightScope(
    * mutate, while exposing only its inspect method. No adapter object carrying
    * apply/rollback crosses this scope.
    */
-  const mutationAuthority = scopedHostMutation(system);
+  const platform = snapshotPlatformAdapter(system.platform);
+  const mutationAuthority = scopedHostMutation(system, platform);
   return Object.freeze({
-    platform: system.platform,
+    platform,
     hosts: Object.freeze({
       inspection: inspectionOnlyHostMap(mutationAuthority),
     }),
@@ -297,9 +302,11 @@ export function setupScope(system: SystemCapabilities): SetupCapabilities {
    * separately composed inspection map from approving evidence that the
    * mutation side did not mint.
    */
-  const mutation = scopedHostMutation(system);
+  const platform = snapshotPlatformAdapter(system.platform);
+  const mutation = scopedHostMutation(system, platform);
   return Object.freeze({
     ...system,
+    platform,
     processes: setupProcesses(system.processes),
     credentialEnvironment: credentialEnvironment(
       system.credentialEnvironment,
@@ -312,6 +319,7 @@ export function setupScope(system: SystemCapabilities): SetupCapabilities {
 }
 
 export function statusScope(system: SystemCapabilities): StatusCapabilities {
+  const platform = snapshotPlatformAdapter(system.platform);
   return Object.freeze({
     filesystem: readOnlyFileSystem(system.filesystem),
     network: readOnlyNetwork(system.network),
@@ -320,14 +328,15 @@ export function statusScope(system: SystemCapabilities): StatusCapabilities {
     ),
     clock: system.clock,
     hash: system.hash,
-    platform: system.platform,
+    platform,
     hosts: Object.freeze({
-      inspection: scopedHostInspection(system),
+      inspection: scopedHostInspection(system, platform),
     }),
   });
 }
 
 export function doctorScope(system: SystemCapabilities): DoctorCapabilities {
+  const platform = snapshotPlatformAdapter(system.platform);
   return Object.freeze({
     filesystem: readOnlyFileSystem(system.filesystem),
     network: readOnlyNetwork(system.network),
@@ -336,9 +345,9 @@ export function doctorScope(system: SystemCapabilities): DoctorCapabilities {
     ),
     clock: system.clock,
     hash: system.hash,
-    platform: system.platform,
+    platform,
     hosts: Object.freeze({
-      inspection: scopedHostInspection(system),
+      inspection: scopedHostInspection(system, platform),
     }),
   });
 }

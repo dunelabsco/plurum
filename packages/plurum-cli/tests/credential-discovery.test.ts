@@ -4,6 +4,7 @@ import { nodeHash } from "../src/adapters/node/hash.js";
 import { createPlatformPathAdapter } from "../src/adapters/node/platform.js";
 import {
   discoverCredentials,
+  discoverCredentialsFromCanonicalObservation,
   type CredentialDiscoveryDependencies,
   type CredentialDiscoveryResult,
   type CredentialDiscoverySource,
@@ -170,25 +171,39 @@ function activeCredentialBytes(
   agentId = AGENT_A,
   apiOrigin: string = DEFAULT_API_ORIGIN,
 ): Uint8Array {
+  const credential = activeCredential(apiKey, agentId, apiOrigin);
   return encodeText(
     serializeCredentialDocument(
-      validateCredentialDocument({
-        schema_version: 1,
-        state: "active",
-        api_origin: apiOrigin,
-        api_key: apiKey,
-        agent_id: agentId,
-        agent_name: "Codex",
-        username: "agent-alpha",
-        registration_request_id: REQUEST_ID,
-        created_at: CREATED_AT,
-        updated_at: ACTIVATED_AT,
-        activated_at: ACTIVATED_AT,
-      }),
+      credential,
       apiOrigin.startsWith("http:")
         ? "explicit-loopback-development"
         : "https-only",
     ),
+  );
+}
+
+function activeCredential(
+  apiKey: string,
+  agentId = AGENT_A,
+  apiOrigin: string = DEFAULT_API_ORIGIN,
+) {
+  return validateCredentialDocument(
+    {
+      schema_version: 1,
+      state: "active",
+      api_origin: apiOrigin,
+      api_key: apiKey,
+      agent_id: agentId,
+      agent_name: "Codex",
+      username: "agent-alpha",
+      registration_request_id: REQUEST_ID,
+      created_at: CREATED_AT,
+      updated_at: ACTIVATED_AT,
+      activated_at: ACTIVATED_AT,
+    },
+    apiOrigin.startsWith("http:")
+      ? "explicit-loopback-development"
+      : "https-only",
   );
 }
 
@@ -417,6 +432,37 @@ describe("credential discovery orchestration", () => {
     ).toBe(true);
     expect(harness.canonical.trace.operations()).toEqual(["open-directory"]);
     expectFrozenPublicResult(result);
+  });
+
+  it("uses one already-observed canonical document without reopening its store", async () => {
+    const canonical = createInMemoryCredentialStore({
+      bytes: activeCredentialBytes(KEY_B),
+      failAt: ["open-directory"],
+    });
+    const harness = createHarness({ canonical });
+    const dependencies = harness.dependencies;
+
+    const result = await discoverCredentialsFromCanonicalObservation({
+      credentialEnvironment: dependencies.credentialEnvironment,
+      legacyStore: dependencies.legacyStore,
+      network: dependencies.network,
+      hash: dependencies.hash,
+      platform: dependencies.platform,
+      canonical: Object.freeze({
+        status: "loaded",
+        credential: activeCredential(KEY_A),
+      }),
+    });
+
+    expect(result.status).toBe("ready");
+    if (result.status !== "ready") {
+      return;
+    }
+    expect(result.candidate.sources).toEqual(["canonical"]);
+    expect(result.credential.apiKey).toBe(KEY_A);
+    expect(harness.canonical.trace.operations()).toEqual([]);
+    expect(harness.networkRequests).toHaveLength(1);
+    expectNoCanaries(publicJson(result));
   });
 
   it("maps hostile credential-environment getters to one fixed blocker", async () => {
@@ -1034,6 +1080,77 @@ describe("credential discovery orchestration", () => {
     expectNoCanaries(publicJson(result));
   });
 
+  it.each([
+    {
+      label: "name",
+      body: agentBody(AGENT_A, "agent-alpha", "Different Agent"),
+      expectedName: "Different Agent",
+      expectedUsername: "agent-alpha",
+    },
+    {
+      label: "username",
+      body: agentBody(AGENT_A, "different-agent", "Codex"),
+      expectedName: "Codex",
+      expectedUsername: "different-agent",
+    },
+  ])(
+    "keeps an active canonical credential valid when its live agent $label changed",
+    async ({ body, expectedName, expectedUsername }) => {
+      const canonical = createInMemoryCredentialStore({
+        bytes: activeCredentialBytes(KEY_A, AGENT_A),
+      });
+      const harness = createHarness({
+        canonical,
+        network: () => response(200, body),
+      });
+
+      const result = await discoverCredentials(harness.dependencies);
+
+      expect(result.status).toBe("ready");
+      if (result.status === "ready") {
+        expect(result.candidate.agent).toEqual({
+          id: AGENT_A,
+          name: expectedName,
+          username: expectedUsername,
+        });
+      }
+      expectNoCanaries(publicJson(result));
+    },
+  );
+
+  it.each([
+    {
+      label: "name",
+      body: agentBody(AGENT_A, "agent-alpha", "Different Agent"),
+    },
+    {
+      label: "username",
+      body: agentBody(AGENT_A, "different-agent", "Codex"),
+    },
+  ])(
+    "does not treat a pending canonical credential with a changed live $label as resumable evidence",
+    async ({ body }) => {
+      const canonical = createInMemoryCredentialStore({
+        bytes: pendingCredentialBytes(KEY_A),
+      });
+      const harness = createHarness({
+        canonical,
+        network: () => response(200, body),
+      });
+
+      const result = await discoverCredentials(harness.dependencies);
+
+      expect(result.status).toBe("blocked");
+      expect(blockerReasons(result)).toContain(
+        "canonical_identity_mismatch",
+      );
+      if (result.status === "blocked") {
+        expect(result.validCandidates).toEqual([]);
+      }
+      expectNoCanaries(publicJson(result));
+    },
+  );
+
   it("returns numbered fingerprint-and-username choices and resolves only an exact selection", async () => {
     const harness = createHarness({
       environment: Object.freeze({ PLURUM_API_KEY: KEY_A }),
@@ -1089,6 +1206,8 @@ describe("credential discovery orchestration", () => {
       expect(Object.isFrozen(credential.agent)).toBe(true);
       expect(Object.isFrozen(credential.sources)).toBe(true);
       expect(Object.keys(credential)).not.toContain("apiKey");
+      expect(Object.keys(credential)).not.toContain("identity");
+      expect(credential.identity).toMatch(/^[0-9a-f]{64}$/u);
     }
     expect(Object.keys(result)).not.toContain("select");
 

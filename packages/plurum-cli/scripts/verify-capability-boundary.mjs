@@ -587,6 +587,8 @@ function scanText(relativePath, text) {
               "src/commands/setup-approval.ts",
               "src/commands/setup-credential-plan.ts",
               "src/credentials/codex-dotenv-projection.ts",
+              "src/credentials/codex-dotenv-setup-observation.ts",
+              "src/credentials/store-observer.ts",
               "src/data/uint8-array.ts",
               "src/hosts/claude-code/adapter.ts",
               "src/hosts/claude-code/output.ts",
@@ -1028,6 +1030,46 @@ const negativeFixtures = [
   ],
   [
     "src/commands/setup-credential-plan.ts",
+    "const getDescriptor = Object.getOwnPropertyDescriptor; getDescriptor({}, 'key');",
+    "dynamic-code",
+  ],
+  [
+    "src/credentials/store-observer.ts",
+    "Object['getPrototypeOf']({});",
+    "dynamic-code",
+  ],
+  [
+    "src/credentials/store-observer.ts",
+    "const getPrototype = Object.getPrototypeOf; getPrototype({});",
+    "dynamic-code",
+  ],
+  [
+    "src/credentials/store-observer.ts",
+    "Object['getOwnPropertyDescriptor']({}, 'key');",
+    "dynamic-code",
+  ],
+  [
+    "src/credentials/store-observer.ts",
+    "const getDescriptor = Object.getOwnPropertyDescriptor; getDescriptor({}, 'key');",
+    "dynamic-code",
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
+    "Object['getPrototypeOf']({});",
+    "dynamic-code",
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
+    "const getPrototype = Object.getPrototypeOf; getPrototype({});",
+    "dynamic-code",
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
+    "Object['getOwnPropertyDescriptor']({}, 'key');",
+    "dynamic-code",
+  ],
+  [
+    "src/credentials/codex-dotenv-setup-observation.ts",
     "const getDescriptor = Object.getOwnPropertyDescriptor; getDescriptor({}, 'key');",
     "dynamic-code",
   ],
