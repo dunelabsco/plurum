@@ -1,16 +1,20 @@
 import {
-  setupDisplayText,
   type SetupCommandPreview,
   type SetupDryRunPreflight,
   type SetupHostPreview,
   type SetupMutationPreview,
 } from "./setup-preflight.js";
+import { setupDisplayText } from "./setup-display.js";
 import {
   publicSetupApplyPreview,
   type SetupApplyPlan,
   type SetupApplyPreview,
 } from "./setup-apply-plan.js";
 import type { SetupPreparedPlan } from "./setup-approval.js";
+import type {
+  SetupHostClientExecutionResult,
+  SetupHostExecutionResult,
+} from "./setup-host-execution.js";
 
 const MAX_PREFLIGHT_OUTPUT_BYTES = 256 * 1024;
 const UTF8_ENCODER = new TextEncoder();
@@ -236,5 +240,115 @@ export function renderSetupApplyPlan(
     "No changes have been made.",
     "",
   );
+  return boundedOutput(lines);
+}
+
+function hostExecutionStatus(
+  client: SetupHostClientExecutionResult,
+): string {
+  if (client.configuration === "absent") {
+    return "not installed";
+  }
+  if (client.mcp === "verified") {
+    return client.configuration === "changed"
+      ? "configured and verified"
+      : "already configured and verified";
+  }
+  if (
+    client.configuration === "changed" ||
+    client.configuration === "unchanged"
+  ) {
+    return "configured but not verified";
+  }
+  if (client.configuration === "restored") {
+    return "change failed and prior configuration was restored";
+  }
+  if (client.configuration === "uncertain") {
+    return "configuration state is uncertain";
+  }
+  return "not configured";
+}
+
+export function renderSetupHostExecutionResult(
+  result: SetupHostExecutionResult,
+): string {
+  if (result.status === "precondition-failed") {
+    return boundedOutput([
+      "Plurum setup could not continue safely.",
+      "Inspect current setup status before retrying.",
+      "",
+    ]);
+  }
+
+  const lines = [
+    result.status === "complete"
+      ? "Plurum setup complete"
+      : "Plurum setup needs attention",
+    "",
+    `agent id: ${quoted(result.agent.id)}`,
+    `agent name: ${quoted(result.agent.name)}`,
+    `username: ${
+      result.agent.username === null
+        ? "not set"
+        : quoted(result.agent.username)
+    }`,
+    `agent verification: ${setupDisplayText(result.agent.verification, 128)}`,
+    `credential state: ${setupDisplayText(result.credential, 128)}`,
+    "",
+    "clients:",
+  ];
+
+  for (const client of result.clients) {
+    lines.push(
+      `  ${client.client}: ${hostExecutionStatus(client)}`,
+      `    configuration: ${setupDisplayText(client.configuration, 128)}`,
+      `    credential projection: ${setupDisplayText(client.projection, 128)}`,
+      `    MCP: ${setupDisplayText(client.mcp, 128)}`,
+    );
+    if (client.mcp === "verified") {
+      lines.push("    tool inventory: exact seven Plurum tools");
+    }
+    if (client.reason !== null) {
+      lines.push(
+        `    reason: ${setupDisplayText(client.reason, 128)}`,
+      );
+    }
+  }
+
+  const readyRestartClients = result.clients.filter(
+    ({ restartRequired, mcp }) =>
+      restartRequired &&
+      mcp === "verified" &&
+      result.credential === "verified" &&
+      result.agent.verification === "verified",
+  );
+  const incompleteChangedClients = result.clients.filter(
+    ({ restartRequired, mcp }) => restartRequired && mcp !== "verified",
+  );
+  lines.push("", `result: ${result.status}`);
+  if (
+    readyRestartClients.some(({ client }) => client === "claude-code")
+  ) {
+    lines.push(
+      "next step for Claude Code: reload plugins or start a new Claude Code task.",
+    );
+  }
+  if (readyRestartClients.some(({ client }) => client === "codex")) {
+    lines.push("next step for Codex: start a new Codex task.");
+  }
+  for (const client of incompleteChangedClients) {
+    lines.push(
+      `${client.client} setup state changed, but verification is incomplete; resolve the issue and rerun setup before starting a new task.`,
+    );
+  }
+  if (result.status !== "complete") {
+    if (result.clients.some(({ mcp }) => mcp === "verified")) {
+      lines.push("Working client configuration has been preserved.");
+    }
+    lines.push("Resolve the reported issue, then rerun plurum setup.");
+  } else if (readyRestartClients.length === 0) {
+    lines.push("No client configuration changed.");
+  }
+  lines.push("");
   return boundedOutput(lines);
 }

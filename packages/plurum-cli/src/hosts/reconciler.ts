@@ -59,6 +59,14 @@ export type HostReconciliationResult =
       replanRequired: true;
     }>;
 
+export type HostReconciliationSettledResult =
+  | HostReconciliationResult
+  | Readonly<{
+      /* The one selected host was restored exactly after a clean failure. */
+      status: "failed-restored";
+      committedHosts: readonly [];
+    }>;
+
 interface PreparedHost {
   readonly host: HostId;
   readonly actions: readonly HostAction[];
@@ -98,6 +106,23 @@ const OPAQUE_REVISION = /^[A-Za-z0-9._~:+@=-]{1,512}$/u;
 
 function invalidPlan(): never {
   throw new HostError("invalid_reconciliation_plan");
+}
+
+function requireSelectedHostPlan(
+  plan: ReconciliationPlan,
+  selectedHost: HostPreflightPlan,
+): void {
+  try {
+    if (
+      !Object.isFrozen(plan) ||
+      !Array.isArray(plan.hosts) ||
+      plan.hosts.filter((host) => host === selectedHost).length !== 1
+    ) {
+      return invalidPlan();
+    }
+  } catch {
+    return invalidPlan();
+  }
 }
 
 function conflict(): never {
@@ -249,6 +274,7 @@ function initialJournalFor(
 
 function prepare(
   plan: ReconciliationPlan,
+  selectedHost: HostPreflightPlan | null,
   adapters: HostAdapterMap<HostMutationAdapter>,
   options: HostReconciliationOptions,
 ): PreparedReconciliation {
@@ -265,6 +291,12 @@ function prepare(
       return invalidPlan();
     }
     validateReconciliationOperationId(plan.operationId);
+    if (
+      selectedHost !== null &&
+      plan.hosts.filter((host) => host === selectedHost).length !== 1
+    ) {
+      return invalidPlan();
+    }
 
     const expectedOrder = HOST_IDS.filter((host) =>
       plan.hosts.some((entry) => entry.host === host),
@@ -304,6 +336,9 @@ function prepare(
         )
       ) {
         return invalidPlan();
+      }
+      if (selectedHost !== null && host !== selectedHost) {
+        continue;
       }
       const adapter = prepareAdapter(adapters, host.host);
       actionable.push(
@@ -1495,14 +1530,16 @@ async function recoverHistoricalForReplan(
 
 async function execute(
   plan: ReconciliationPlan,
+  selectedHost: HostPreflightPlan | null,
   lease: ReconciliationJournalLease,
   lifecycle: LeaseLifecycle,
   adapters: HostAdapterMap<HostMutationAdapter>,
   options: HostReconciliationOptions,
-): Promise<HostReconciliationResult> {
+  settleRestoredFailure: boolean,
+): Promise<HostReconciliationSettledResult> {
   const observed = await observeJournal(lease, lifecycle);
   if (observed.status === "missing") {
-    const prepared = prepare(plan, adapters, options);
+    const prepared = prepare(plan, selectedHost, adapters, options);
     if (prepared.initialJournal === null) {
       return Object.freeze({
         status: "no-op",
@@ -1519,12 +1556,18 @@ async function execute(
       journal: prepared.initialJournal,
       revision,
     };
-    return executeJournal(prepared, lease, lifecycle, state);
+    return executeJournal(
+      prepared,
+      lease,
+      lifecycle,
+      state,
+      settleRestoredFailure,
+    );
   }
 
   let prepared: PreparedReconciliation | null = null;
   try {
-    prepared = prepare(plan, adapters, options);
+    prepared = prepare(plan, selectedHost, adapters, options);
   } catch (error) {
     if (
       !(error instanceof HostError) ||
@@ -1545,6 +1588,7 @@ async function execute(
         journal: observed.journal,
         revision: observed.revision,
       },
+      settleRestoredFailure,
     );
   }
   return recoverHistoricalForReplan(
@@ -1563,7 +1607,8 @@ async function executeJournal(
   lease: ReconciliationJournalLease,
   lifecycle: LeaseLifecycle,
   state: JournalState,
-): Promise<HostReconciliationResult> {
+  settleRestoredFailure: boolean,
+): Promise<HostReconciliationSettledResult> {
   try {
     if (
       state.journal.stage === "rollback" ||
@@ -1594,7 +1639,12 @@ async function executeJournal(
       throw error;
     }
     await removeJournal(lease, lifecycle, state);
-    return failed();
+    return settleRestoredFailure
+      ? Object.freeze({
+          status: "failed-restored" as const,
+          committedHosts: Object.freeze([]) as readonly [],
+        })
+      : failed();
   }
 
   await persist(
@@ -1612,22 +1662,32 @@ async function executeJournal(
   });
 }
 
-export async function reconcileHostPlan(
+async function reconcileHostPlanWithFailureMode(
   plan: ReconciliationPlan,
+  selectedHost: HostPreflightPlan | null,
   adapters: HostAdapterMap<HostMutationAdapter>,
   lease: ReconciliationJournalLease,
   options: HostReconciliationOptions,
-): Promise<HostReconciliationResult> {
+  settleRestoredFailure: boolean,
+): Promise<HostReconciliationSettledResult> {
   const lifecycle: LeaseLifecycle = { lost: false };
   let operationError: unknown;
-  let result: HostReconciliationResult | undefined;
+  let result: HostReconciliationSettledResult | undefined;
   try {
+    if (settleRestoredFailure) {
+      if (selectedHost === null) {
+        return invalidPlan();
+      }
+      requireSelectedHostPlan(plan, selectedHost);
+    }
     result = await execute(
       plan,
+      selectedHost,
       lease,
       lifecycle,
       adapters,
       options,
+      settleRestoredFailure,
     );
   } catch (error) {
     operationError = error;
@@ -1656,6 +1716,45 @@ export async function reconcileHostPlan(
     return failed();
   }
   return result ?? failed();
+}
+
+export async function reconcileHostPlan(
+  plan: ReconciliationPlan,
+  adapters: HostAdapterMap<HostMutationAdapter>,
+  lease: ReconciliationJournalLease,
+  options: HostReconciliationOptions,
+): Promise<HostReconciliationResult> {
+  const result = await reconcileHostPlanWithFailureMode(
+    plan,
+    null,
+    adapters,
+    lease,
+    options,
+    false,
+  );
+  return result.status === "failed-restored" ? failed() : result;
+}
+
+/*
+ * Setup runs one approved host slice at a time. This variant distinguishes the
+ * reconciler's exact, journal-proven rollback from uncertain failures so the
+ * next selected host may proceed independently only after a clean restore.
+ */
+async function reconcileSelectedHostPlanSettled(
+  plan: ReconciliationPlan,
+  selectedHost: HostPreflightPlan,
+  adapters: HostAdapterMap<HostMutationAdapter>,
+  lease: ReconciliationJournalLease,
+  options: HostReconciliationOptions,
+): Promise<HostReconciliationSettledResult> {
+  return reconcileHostPlanWithFailureMode(
+    plan,
+    selectedHost,
+    adapters,
+    lease,
+    options,
+    true,
+  );
 }
 
 export async function acquireAndReconcileHostPlan(
@@ -1687,4 +1786,43 @@ export async function acquireAndReconcileHostPlan(
     return failed();
   }
   return reconcileHostPlan(plan, adapters, acquired.lease, options);
+}
+
+export async function acquireAndReconcileSelectedHostPlanSettled(
+  plan: ReconciliationPlan,
+  selectedHost: HostPreflightPlan,
+  adapters: HostAdapterMap<HostMutationAdapter>,
+  store: ReconciliationJournalStoreAdapter,
+  nonce: string,
+  options: HostReconciliationOptions,
+): Promise<HostReconciliationSettledResult> {
+  requireSelectedHostPlan(plan, selectedHost);
+  const validatedNonce = validateReconciliationJournalLeaseNonce(nonce);
+  let acquired;
+  try {
+    acquired = await store.acquire(
+      Object.freeze({ nonce: validatedNonce }),
+    );
+  } catch {
+    return failed();
+  }
+  if (acquired?.status === "busy") {
+    throw new HostError("reconciliation_busy");
+  }
+  if (
+    acquired?.status !== "acquired" ||
+    (acquired.priorLease !== "absent" &&
+      acquired.priorLease !== "proven-abandoned") ||
+    acquired.lease === null ||
+    typeof acquired.lease !== "object"
+  ) {
+    return failed();
+  }
+  return reconcileSelectedHostPlanSettled(
+    plan,
+    selectedHost,
+    adapters,
+    acquired.lease,
+    options,
+  );
 }

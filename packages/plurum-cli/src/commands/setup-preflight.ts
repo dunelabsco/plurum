@@ -5,7 +5,9 @@ import {
   HOST_IDS,
   type DesiredHostConfiguration,
   type HostAction,
+  type HostAdapterMap,
   type HostId,
+  type HostInspectionAdapter,
   type HostPlanClassification,
   type HostPreflightPlan,
   type HostRollbackRecipe,
@@ -27,20 +29,15 @@ import {
   CODEX_DESIRED_CONFIGURATION,
 } from "../hosts/codex/configuration.js";
 import { createHostPreflightPlan } from "../hosts/planner.js";
-import {
-  containsHostControlCharacter,
-  containsHostSensitiveMaterial,
-} from "../hosts/privacy.js";
 import type {
   HostPreflightCapabilities,
   PlatformAdapter,
   PlanningCapabilities,
+  SetupCapabilities,
   SetupPreflightCapabilities,
 } from "../system/contracts.js";
 import { snapshotPlatformAdapter } from "../system/platform-snapshot.js";
-
-const MAX_DISPLAY_CHARACTERS = 32_767;
-const UNSAFE_TERMINAL_FORMATTING = /[\p{Cf}\u2028\u2029]/u;
+import { setupDisplayText } from "./setup-display.js";
 
 const DESIRED_BY_HOST: Readonly<
   Record<HostId, DesiredHostConfiguration>
@@ -156,6 +153,7 @@ interface InspectedSetupPreflight {
 
 interface RetainedSetupPreflightEnvironment {
   readonly platformAuthority: PlatformAdapter;
+  readonly hostInspectionAuthority: HostAdapterMap<HostInspectionAdapter>;
   readonly platform: PlatformAdapter;
   readonly cwd: string;
   readonly credentialDirectory: string;
@@ -225,23 +223,6 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
     deepFreeze(child, seen);
   }
   return Object.freeze(value);
-}
-
-export function setupDisplayText(
-  value: unknown,
-  maximumLength = MAX_DISPLAY_CHARACTERS,
-): string {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.length > maximumLength ||
-    containsHostControlCharacter(value) ||
-    containsHostSensitiveMaterial(value) ||
-    UNSAFE_TERMINAL_FORMATTING.test(value)
-  ) {
-    return invalidPreflight();
-  }
-  return value;
 }
 
 function selectedClients(target: ClientTarget): readonly HostId[] {
@@ -560,6 +541,7 @@ async function inspectSetupPreflight(
     ...inspectedResult,
     environment: Object.freeze({
       platformAuthority: capabilities.platform,
+      hostInspectionAuthority: capabilities.hosts.inspection,
       platform,
       cwd: platform.cwd,
       credentialDirectory: locations.directory,
@@ -567,9 +549,36 @@ async function inspectSetupPreflight(
   });
 }
 
+/*
+ * Host execution may proceed only through the exact semantic adapters whose
+ * inspection methods produced this snapshot. In setupScope the inspection and
+ * mutation maps are the same invocation-local authority; an independently
+ * composed lookalike map must not inherit the approved executable revisions.
+ */
+export function isRetainedSetupPreflightHostAuthority(
+  snapshot: unknown,
+  adapters: unknown,
+): adapters is HostAdapterMap<HostInspectionAdapter> {
+  if (
+    typeof snapshot !== "object" ||
+    snapshot === null ||
+    typeof adapters !== "object" ||
+    adapters === null
+  ) {
+    return false;
+  }
+  const retained = RETAINED_ENVIRONMENTS.get(
+    snapshot as SetupPreflightSnapshot,
+  );
+  if (retained === undefined) {
+    return false;
+  }
+  return retained.hostInspectionAuthority === adapters;
+}
+
 export async function createSetupPreflightSnapshot(
   target: ClientTarget,
-  capabilities: SetupPreflightCapabilities,
+  capabilities: SetupPreflightCapabilities | SetupCapabilities,
 ): Promise<SetupPreflightSnapshot> {
   const inspected = await inspectSetupPreflight(target, capabilities);
   const snapshot = inspected.publicData as SetupPreflightSnapshot;

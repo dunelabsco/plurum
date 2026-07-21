@@ -28,6 +28,7 @@ import type {
 import { createReconciliationPlan } from "../src/hosts/planner.js";
 import {
   acquireAndReconcileHostPlan,
+  acquireAndReconcileSelectedHostPlanSettled,
   reconcileHostPlan,
   type HostReconciliationOptions,
 } from "../src/hosts/reconciler.js";
@@ -769,6 +770,118 @@ describe("journaled host reconciliation", () => {
     ]);
     expect(codex.control.rolledBack()).toEqual([codexFirst.id]);
     expect(journal.control.hasJournal()).toBe(false);
+  });
+
+  it("reports an exact clean restore for one independently settled host", async () => {
+    const baseline = absentConfiguration();
+    const plan = planFor({ "claude-code": baseline });
+    const firstAction = plan.hosts[0]?.actions[0];
+    if (firstAction === undefined) {
+      throw new Error("expected one actionable host");
+    }
+    const claude = hostFake("claude-code", baseline, {
+      failApplyAction: firstAction.id,
+    });
+    const journal = journalFake();
+    const store: ReconciliationJournalStoreAdapter = Object.freeze({
+      async acquire() {
+        return Object.freeze({
+          status: "acquired" as const,
+          priorLease: "absent" as const,
+          lease: journal.lease,
+        });
+      },
+    });
+
+    await expect(
+      acquireAndReconcileSelectedHostPlanSettled(
+        plan,
+        plan.hosts[0]!,
+        adapters(claude),
+        store,
+        LEASE_NONCE,
+        OPTIONS,
+      ),
+    ).resolves.toEqual({
+      status: "failed-restored",
+      committedHosts: [],
+    });
+    expect(claude.control.configuration()).toEqual(baseline);
+    expect(journal.control.hasJournal()).toBe(false);
+    expect(journal.control.releaseCalls()).toBe(1);
+  });
+
+  it("settles only the exact selected member of a full two-host plan", async () => {
+    const baseline = installedConfiguration("1.2.0");
+    const plan = planFor({
+      "claude-code": baseline,
+      codex: baseline,
+    });
+    const claude = hostFake("claude-code", baseline);
+    const codex = hostFake("codex", baseline);
+
+    for (const selectedHost of plan.hosts) {
+      const journal = journalFake();
+      const store: ReconciliationJournalStoreAdapter = Object.freeze({
+        async acquire() {
+          return Object.freeze({
+            status: "acquired" as const,
+            priorLease: "absent" as const,
+            lease: journal.lease,
+          });
+        },
+      });
+      await expect(
+        acquireAndReconcileSelectedHostPlanSettled(
+          plan,
+          selectedHost,
+          adapters(claude, codex),
+          store,
+          LEASE_NONCE,
+          OPTIONS,
+        ),
+      ).resolves.toEqual({
+        status: "complete",
+        committedHosts: [selectedHost.host],
+      });
+      expect(journal.control.hasJournal()).toBe(false);
+    }
+
+    expect(claude.control.applied()).toEqual([
+      "claude-code:01:update-plugin",
+    ]);
+    expect(codex.control.applied()).toEqual([
+      "codex:01:update-plugin",
+    ]);
+    expect(claude.control.configuration()).toEqual(installedConfiguration());
+    expect(codex.control.configuration()).toEqual(installedConfiguration());
+  });
+
+  it("rejects a structurally equal selected host before journal acquisition", async () => {
+    const plan = planFor({
+      "claude-code": installedConfiguration(),
+      codex: installedConfiguration(),
+    });
+    let acquireCalls = 0;
+    const store: ReconciliationJournalStoreAdapter = Object.freeze({
+      async acquire() {
+        acquireCalls += 1;
+        return Object.freeze({ status: "busy" as const });
+      },
+    });
+
+    await expectHostError(
+      acquireAndReconcileSelectedHostPlanSettled(
+        plan,
+        Object.freeze({ ...plan.hosts[0] }) as typeof plan.hosts[number],
+        adapters(hostFake("claude-code", installedConfiguration())),
+        store,
+        LEASE_NONCE,
+        OPTIONS,
+      ),
+      "invalid_reconciliation_plan",
+    );
+    expect(acquireCalls).toBe(0);
   });
 
   it("preserves concurrent exact-state creation after a precondition failure", async () => {

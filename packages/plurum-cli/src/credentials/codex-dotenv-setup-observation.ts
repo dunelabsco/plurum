@@ -37,8 +37,21 @@ import {
   type SetupCredentialInputIdentity,
 } from "../commands/setup-credential-input.js";
 import {
+  createSetupHostExecutionAuthority,
+  isOwnedSetupHostExecutionAuthority,
+  type SetupHostExecutionAuthority,
+  type SetupHostExecutionAttempt,
+  type SetupHostExecutionDependencies,
+} from "../commands/setup-host-execution.js";
+import {
+  createSetupCredentialSessionAuthority,
+  isOwnedSetupCredentialSessionAuthority,
+  type SetupCredentialSessionAuthority,
+} from "../commands/setup-credential-session.js";
+import {
   claimSetupUsernameConflictContinuation,
   createSetupRegistrationExecutionAttempt,
+  discardSetupHostConfigurationGrant,
   discardSetupUsernameConflictContinuation,
   transferSetupProtectedCredentialInput,
   type SetupRegistrationExecutionAttempt,
@@ -48,6 +61,7 @@ import {
   type SetupRegistrationResolvedCredential,
   type SetupRegistrationSelectedEvidence,
   type SetupProtectedCredential,
+  type SetupHostConfigurationGrant,
   type SetupUsernameConflictContinuation,
   type SetupUsernameConflictContinuationClaim,
 } from "../commands/setup-registration-execution.js";
@@ -60,6 +74,7 @@ import {
 import {
   retainedSetupHostPlans,
   retainedSetupPreflightEnvironment,
+  isRetainedSetupPreflightHostAuthority,
   type SetupPreflightSnapshot,
 } from "../commands/setup-preflight.js";
 import {
@@ -130,6 +145,7 @@ export interface CodexDotenvSetupObservationOptions {
    * after approval.
    */
   readonly execution?: SetupRegistrationExecutionDependencies;
+  readonly hostExecution?: SetupHostExecutionDependencies;
   readonly codexProjection?: CodexDotenvProjectionAdapter;
   readonly preflight: SetupPreflightSnapshot;
 }
@@ -219,6 +235,10 @@ export interface CodexDotenvSetupObservationAuthority {
     plan: SetupPreparedPlan<SetupApplyPlan>,
     grant: SetupExecutionGrant,
   ): SetupRegistrationExecutionAttempt;
+  createHostExecution(
+    plan: SetupPreparedPlan<SetupApplyPlan>,
+    grant: SetupHostConfigurationGrant,
+  ): SetupHostExecutionAttempt;
   discard(
     identity:
       | CodexDotenvSetupObservationIdentity
@@ -346,6 +366,7 @@ interface NormalizedSetupObservationOptions {
   readonly store: CredentialStoreObservationAuthority;
   readonly discovery: CodexDotenvSetupDiscoveryDependencies;
   readonly execution?: SetupRegistrationExecutionDependencies;
+  readonly hostExecution?: SetupHostExecutionDependencies;
   readonly codexProjection?: CodexDotenvProjectionAdapter;
   readonly preflight: SetupPreflightSnapshot;
 }
@@ -356,7 +377,7 @@ function normalizeOptions(
   const object = exactDataObject(
     value,
     ["approval", "store", "discovery", "preflight"],
-    ["codexProjection", "execution"],
+    ["codexProjection", "execution", "hostExecution"],
   );
   const discovery = exactDataObject(object.discovery, [
     "credentialEnvironment",
@@ -372,6 +393,16 @@ function normalizeOptions(
         "clock",
         "random",
         "hash",
+      ])
+    : undefined;
+  const hostExecution = Object.hasOwn(object, "hostExecution")
+    ? exactDataObject(object.hostExecution, [
+        "hosts",
+        "journal",
+        "verification",
+        "containment",
+        "nonce",
+        "network",
       ])
     : undefined;
   return Object.freeze({
@@ -402,6 +433,24 @@ function normalizeOptions(
               execution.random as SetupRegistrationExecutionDependencies["random"],
             hash:
               execution.hash as SetupRegistrationExecutionDependencies["hash"],
+          }),
+        }),
+    ...(hostExecution === undefined
+      ? {}
+      : {
+          hostExecution: Object.freeze({
+            hosts:
+              hostExecution.hosts as SetupHostExecutionDependencies["hosts"],
+            journal:
+              hostExecution.journal as SetupHostExecutionDependencies["journal"],
+            verification:
+              hostExecution.verification as SetupHostExecutionDependencies["verification"],
+            containment:
+              hostExecution.containment as SetupHostExecutionDependencies["containment"],
+            nonce:
+              hostExecution.nonce as SetupHostExecutionDependencies["nonce"],
+            network:
+              hostExecution.network as SetupHostExecutionDependencies["network"],
           }),
         }),
     ...(Object.hasOwn(object, "codexProjection")
@@ -1149,6 +1198,7 @@ export function createCodexDotenvSetupObservationAuthority(
   const store = options.store;
   const discovery = options.discovery;
   const executionDependencies = options.execution;
+  const hostExecutionDependencies = options.hostExecution;
   const codexProjection = options.codexProjection;
   const preflight = options.preflight;
   if (
@@ -1162,6 +1212,12 @@ export function createCodexDotenvSetupObservationAuthority(
   let canonicalDirectory: string;
   let cwd: string;
   let boundedDiscovery: CodexDotenvSetupDiscoveryDependencies;
+  let hostExecutionAuthority:
+    | SetupHostExecutionAuthority
+    | undefined;
+  let credentialSessionAuthority:
+    | SetupCredentialSessionAuthority
+    | undefined;
   try {
     retainedSetupHostPlans(preflight);
     const environment = retainedSetupPreflightEnvironment(
@@ -1180,6 +1236,35 @@ export function createCodexDotenvSetupObservationAuthority(
         executionDependencies.hash !== boundedDiscovery.hash)
     ) {
       return invalid();
+    }
+    if (hostExecutionDependencies !== undefined) {
+      if (
+        executionDependencies === undefined ||
+        hostExecutionDependencies.network !== executionDependencies.network ||
+        !isRetainedSetupPreflightHostAuthority(
+          preflight,
+          hostExecutionDependencies.hosts,
+        )
+      ) {
+        return invalid();
+      }
+      credentialSessionAuthority = createSetupCredentialSessionAuthority(
+        Object.freeze({
+          storage: executionDependencies.storage,
+          clock: executionDependencies.clock,
+          random: executionDependencies.random,
+        }),
+      );
+      if (!isOwnedSetupCredentialSessionAuthority(credentialSessionAuthority)) {
+        return invalid();
+      }
+      hostExecutionAuthority = createSetupHostExecutionAuthority(
+        hostExecutionDependencies,
+        credentialSessionAuthority,
+      );
+      if (!isOwnedSetupHostExecutionAuthority(hostExecutionAuthority)) {
+        return invalid();
+      }
     }
   } catch {
     return invalid();
@@ -1645,7 +1730,25 @@ export function createCodexDotenvSetupObservationAuthority(
         plan,
         grant,
         executionDependencies,
+        hostExecutionAuthority ?? null,
       );
+    },
+    createHostExecution(
+      plan: SetupPreparedPlan<SetupApplyPlan>,
+      grant: SetupHostConfigurationGrant,
+    ): SetupHostExecutionAttempt {
+      if (hostExecutionAuthority === undefined) {
+        discardSetupHostConfigurationGrant(grant);
+        return Object.freeze({
+          async execute() {
+            return PRECONDITION_FAILED;
+          },
+          discard() {
+            return PRECONDITION_FAILED;
+          },
+        });
+      }
+      return hostExecutionAuthority.createAttempt(plan, grant);
     },
     discard(
       identity:

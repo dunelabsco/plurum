@@ -26,6 +26,7 @@ import type {
   CredentialStoreObservationAuthority,
   CredentialStoreObservationEvidence,
 } from "../credentials/store-observation-contracts.js";
+import type { CredentialStoreWholePassEvidence } from "../credentials/store-contracts.js";
 import type { CredentialReplaceTransactionV1 } from "../credentials/store-transaction.js";
 import type { ResolvedCredential } from "../credentials/discovery.js";
 import { CredentialError } from "../credentials/errors.js";
@@ -217,8 +218,21 @@ export interface SetupRegistrationExecutionAttempt {
 
 interface SetupHostConfigurationState {
   readonly plan: SetupPreparedPlan<SetupApplyPlan>;
-  readonly evidence: SetupRegistrationExecutionEvidence;
+  readonly canonicalDirectory: string;
+  readonly cwd: string;
+  readonly projection: SetupRegistrationProjectionEvidence | null;
   readonly credential: ActiveCredentialV1;
+  readonly credentialEvidence: CredentialStoreWholePassEvidence;
+  readonly authority: object | null;
+}
+
+export interface SetupHostConfigurationClaim {
+  readonly plan: SetupPreparedPlan<SetupApplyPlan>;
+  readonly canonicalDirectory: string;
+  readonly cwd: string;
+  readonly projection: SetupRegistrationProjectionEvidence | null;
+  readonly credential: ActiveCredentialV1;
+  readonly credentialEvidence: CredentialStoreWholePassEvidence;
 }
 
 interface SetupUsernameConflictContinuationState
@@ -488,6 +502,77 @@ function issueHostConfigurationGrant(
   ) as unknown as SetupHostConfigurationGrant;
   HOST_CONFIGURATION_GRANTS.set(grant, Object.freeze(state));
   return grant;
+}
+
+function sameActiveCredential(
+  left: ActiveCredentialV1,
+  right: ActiveCredentialV1,
+): boolean {
+  return (
+    left.schema_version === right.schema_version &&
+    left.state === right.state &&
+    left.api_origin === right.api_origin &&
+    left.api_key === right.api_key &&
+    left.agent_id === right.agent_id &&
+    left.agent_name === right.agent_name &&
+    left.username === right.username &&
+    left.registration_request_id === right.registration_request_id &&
+    left.created_at === right.created_at &&
+    left.updated_at === right.updated_at &&
+    left.activated_at === right.activated_at
+  );
+}
+
+async function observeExactHostCredentialEvidence(
+  authority: CredentialStoreObservationAuthority,
+  canonicalDirectory: string,
+  expected: ActiveCredentialV1,
+): Promise<
+  | Readonly<{
+      readonly status: "ready";
+      readonly evidence: CredentialStoreWholePassEvidence;
+    }>
+  | Readonly<{ readonly status: "state-changed" | "unavailable" }>
+> {
+  let inspected;
+  try {
+    inspected = await authority.inspect({ directory: canonicalDirectory });
+  } catch {
+    return Object.freeze({ status: "unavailable" as const });
+  }
+  if (inspected.status !== "available") {
+    return Object.freeze({ status: "unavailable" as const });
+  }
+  if (
+    inspected.canonical !== "active" ||
+    inspected.transaction !== "clean"
+  ) {
+    return Object.freeze({ status: "state-changed" as const });
+  }
+  let redeemed;
+  try {
+    redeemed = authority.redeem({
+      identity: inspected.identity,
+      directory: canonicalDirectory,
+    });
+  } catch {
+    return Object.freeze({ status: "unavailable" as const });
+  }
+  if (
+    redeemed.status !== "redeemed" ||
+    redeemed.transaction !== null ||
+    redeemed.credential?.state !== "active" ||
+    !sameActiveCredential(redeemed.credential, expected)
+  ) {
+    return Object.freeze({ status: "state-changed" as const });
+  }
+  const evidence = claimCredentialStoreObservationEvidence(
+    authority,
+    redeemed.evidence,
+  );
+  return evidence === undefined
+    ? Object.freeze({ status: "unavailable" as const })
+    : Object.freeze({ status: "ready" as const, evidence });
 }
 
 function issueUsernameConflictContinuation(
@@ -1277,6 +1362,7 @@ export function createSetupRegistrationExecutionAttempt(
   plan: SetupPreparedPlan<SetupApplyPlan>,
   grant: SetupExecutionGrant,
   rawDependencies: SetupRegistrationExecutionDependencies,
+  hostConfigurationAuthority: object | null = null,
 ): SetupRegistrationExecutionAttempt {
   const dependencies = snapshotExecutionDependencies(rawDependencies);
   let state: "ready" | "running" | "settled" = "ready";
@@ -1346,10 +1432,25 @@ export function createSetupRegistrationExecutionAttempt(
           return execution.value;
         }
 
+        const credentialGuard = await observeExactHostCredentialEvidence(
+          evidence.storeAuthority,
+          evidence.canonicalDirectory,
+          execution.value.credential,
+        );
+        if (credentialGuard.status !== "ready") {
+          return credentialGuard.status === "state-changed"
+            ? PRECONDITION_FAILED
+            : STORE_UNAVAILABLE;
+        }
+
         const hostGrant = issueHostConfigurationGrant({
           plan,
-          evidence,
+          canonicalDirectory: evidence.canonicalDirectory,
+          cwd: evidence.cwd,
+          projection: evidence.projection,
           credential: execution.value.credential,
+          credentialEvidence: credentialGuard.evidence,
+          authority: hostConfigurationAuthority,
         });
         return Object.freeze({
           status: "ready" as const,
@@ -1373,6 +1474,43 @@ export function createSetupRegistrationExecutionAttempt(
         ? DISCARDED
         : PRECONDITION_FAILED;
     },
+  });
+}
+
+/*
+ * Only the factory-owned Step 4.8.6 executor may redeem this capability. The
+ * grant burns before authority and plan checks, and the returned claim exposes
+ * only the exact post-persistence data needed for Codex projection and host
+ * execution. It must never enter a renderer, callback, or serializable result.
+ */
+export function claimSetupHostConfigurationGrant(
+  grant: SetupHostConfigurationGrant,
+  authority: object,
+  plan: SetupPreparedPlan<SetupApplyPlan>,
+): SetupHostConfigurationClaim | undefined {
+  let state: SetupHostConfigurationState | undefined;
+  try {
+    state = HOST_CONFIGURATION_GRANTS.get(grant);
+    if (state !== undefined) {
+      HOST_CONFIGURATION_GRANTS.delete(grant);
+    }
+  } catch {
+    return undefined;
+  }
+  if (
+    state === undefined ||
+    state.authority !== authority ||
+    state.plan !== plan
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    plan: state.plan,
+    canonicalDirectory: state.canonicalDirectory,
+    cwd: state.cwd,
+    projection: state.projection,
+    credential: state.credential,
+    credentialEvidence: state.credentialEvidence,
   });
 }
 

@@ -84,6 +84,27 @@ const reservedGlobals = new Map([
 const unwiredNativeBoundaryStem =
   "src/adapters/node/native-credential-store";
 const codexCredentialBoundaryStem = "src/credentials/codex-dotenv";
+const exactCodexCredentialBoundaryImports = new Map([
+  [
+    "src/commands/setup-host-execution.ts",
+    new Map([
+      [
+        "src/credentials/codex-dotenv-contracts.js",
+        [
+          "type:CodexDotenvProjectionAdapter",
+          "type:CodexDotenvProjectionIdentity",
+        ],
+      ],
+      [
+        "src/credentials/codex-dotenv-projection.js",
+        ["isOwnedCodexDotenvProjectionAdapter"],
+      ],
+    ]),
+  ],
+]);
+const exactHostExecutionDisplayImports = new Map([
+  ["src/commands/setup-display.js", ["setupDisplayText"]],
+]);
 const sourceModuleExtensions = Object.freeze([
   "",
   ".js",
@@ -216,6 +237,59 @@ const restrictedCapabilityImports = Object.freeze([
     ]),
   }),
   Object.freeze({
+    module: "src/commands/setup-registration-execution",
+    binding: "claimSetupHostConfigurationGrant",
+    allowedFiles: new Set([
+      "src/commands/setup-host-execution.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-host-execution",
+    binding: "createSetupHostExecutionAuthority",
+    allowedFiles: new Set([
+      "src/credentials/codex-dotenv-setup-observation.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-credential-session",
+    binding: "createSetupCredentialSessionAuthority",
+    allowedFiles: new Set([
+      "src/credentials/codex-dotenv-setup-observation.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-credential-session",
+    binding: "isOwnedSetupCredentialSessionAuthority",
+    allowedFiles: new Set([
+      "src/commands/setup-host-execution.ts",
+      "src/credentials/codex-dotenv-setup-observation.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-preflight",
+    binding: "isRetainedSetupPreflightHostAuthority",
+    allowedFiles: new Set([
+      "src/credentials/codex-dotenv-setup-observation.ts",
+    ]),
+  }),
+  Object.freeze({
+    module: "src/commands/setup-preflight",
+    binding: "createSetupPreflightSnapshot",
+    allowedFiles: new Set(),
+  }),
+  Object.freeze({
+    module: "src/hosts/planner",
+    binding: "createHostPreflightPlan",
+    allowedFiles: new Set(["src/commands/setup-preflight.ts"]),
+  }),
+  Object.freeze({
+    module: "src/hosts/reconciler",
+    binding: "acquireAndReconcileSelectedHostPlanSettled",
+    allowedFiles: new Set([
+      "src/commands/setup-host-execution.ts",
+    ]),
+  }),
+  Object.freeze({
     module: "src/credentials/store-observer",
     binding: "claimCredentialStoreObservationEvidence",
     allowedFiles: new Set([
@@ -226,6 +300,7 @@ const restrictedCapabilityImports = Object.freeze([
     module: "src/credentials/store-writer",
     binding: "runExclusiveObservedCredentialSetup",
     allowedFiles: new Set([
+      "src/commands/setup-credential-session.ts",
       "src/commands/setup-registration-execution.ts",
     ]),
   }),
@@ -699,11 +774,63 @@ function scanText(relativePath, text) {
       resolvedModule?.startsWith(codexCredentialBoundaryStem) &&
       !relativePath.startsWith(codexCredentialBoundaryStem)
     ) {
+      const allowed = exactCodexCredentialBoundaryImports
+        .get(relativePath)
+        ?.get(resolvedModule);
+      const actual = importNode === undefined ? [] : importBindings(importNode);
+      if (
+        allowed === undefined ||
+        JSON.stringify(actual) !== JSON.stringify([...allowed].sort())
+      ) {
+        report(
+          node,
+          "codex-credential-wiring",
+          "the Codex credential family requires an exact reviewed import boundary",
+        );
+      }
+    }
+
+    if (
+      relativePath === "src/commands/setup-host-execution.ts" &&
+      resolvedModule !== undefined &&
+      moduleMatchesStem(resolvedModule, "src/hosts/planner")
+    ) {
       report(
         node,
-        "codex-credential-wiring",
-        "the Codex credential family must remain isolated until native platform suites pass",
+        "post-approval-replanning",
+        "host execution must verify the exact approved postcondition without replanning",
       );
+    }
+
+    if (
+      relativePath === "src/commands/setup-host-execution.ts" &&
+      resolvedModule !== undefined &&
+      moduleMatchesStem(resolvedModule, "src/commands/setup-preflight")
+    ) {
+      report(
+        node,
+        "post-approval-replanning",
+        "host execution must not import the preflight planning boundary",
+      );
+    }
+
+    if (
+      relativePath === "src/commands/setup-host-execution.ts" &&
+      resolvedModule !== undefined &&
+      moduleMatchesStem(resolvedModule, "src/commands/setup-display")
+    ) {
+      const allowed = exactHostExecutionDisplayImports.get(resolvedModule);
+      const actual = importNode === undefined ? [] : importBindings(importNode);
+      if (
+        allowed === undefined ||
+        JSON.stringify(actual) !== JSON.stringify([...allowed].sort())
+      ) {
+        report(
+          node,
+          "post-approval-replanning",
+          "host execution may import only the reviewed display sanitizer",
+        );
+      }
     }
 
     if (
@@ -861,7 +988,9 @@ function scanText(relativePath, text) {
               "src/adapters/node/native-credential-store.ts",
               "src/commands/setup-approval.ts",
               "src/commands/setup-credential-plan.ts",
+              "src/commands/setup-host-execution.ts",
               "src/commands/setup-registration-execution.ts",
+              "src/credentials/codex-containment.ts",
               "src/credentials/codex-dotenv-projection.ts",
               "src/credentials/codex-dotenv-setup-observation.ts",
               "src/credentials/store-observer.ts",
@@ -870,6 +999,7 @@ function scanText(relativePath, text) {
               "src/hosts/claude-code/output.ts",
               "src/hosts/codex/adapter.ts",
               "src/hosts/codex/output.ts",
+              "src/hosts/mcp-verification.ts",
               "src/system/credential-environment.ts",
             ].includes(relativePath) &&
             ["getPrototypeOf", "getOwnPropertyDescriptor"].includes(
@@ -1475,6 +1605,41 @@ const negativeFixtures = [
     "codex-credential-wiring",
   ],
   [
+    "src/commands/setup-host-execution.ts",
+    'import { createCodexDotenvProjectionAdapter } from "../credentials/codex-dotenv-projection.js";',
+    "codex-credential-wiring",
+  ],
+  [
+    "src/commands/setup-host-execution.ts",
+    'import { createCodexDotenvSetupObservationAuthority } from "../credentials/codex-dotenv-setup-observation.js";',
+    "codex-credential-wiring",
+  ],
+  [
+    "src/commands/setup-host-execution.ts",
+    'import * as projection from "../credentials/codex-dotenv-projection.js"; void projection;',
+    "codex-credential-wiring",
+  ],
+  [
+    "src/commands/setup-host-execution.ts",
+    'export { createCodexDotenvProjectionAdapter } from "../credentials/codex-dotenv-projection.js";',
+    "codex-credential-wiring",
+  ],
+  [
+    "src/commands/setup-host-execution.ts",
+    'import { createHostPreflightPlan } from "../hosts/planner.js"; void createHostPreflightPlan;',
+    "post-approval-replanning",
+  ],
+  [
+    "src/commands/setup-host-execution.ts",
+    'import { createSetupPreflightSnapshot } from "./setup-preflight.js"; void createSetupPreflightSnapshot;',
+    "post-approval-replanning",
+  ],
+  [
+    "src/commands/setup-host-execution.ts",
+    'import * as display from "./setup-display.js"; void display;',
+    "post-approval-replanning",
+  ],
+  [
     "src/adapters/node/production.ts",
     'import "./native-credential-store.jsx";',
     "native-credential-wiring",
@@ -1707,6 +1872,14 @@ const positiveFixtures = [
   [
     "src/commands/setup-confirmation.ts",
     'import { mintSetupApproval as mint } from "./setup-approval.js"; import { claimSetupExecutionSidecar as claim } from "./setup-execution-authority.js"; mint({}, {}); claim({}, {}, {});',
+  ],
+  [
+    "src/commands/setup-host-execution.ts",
+    'import type { CodexDotenvProjectionAdapter, CodexDotenvProjectionIdentity } from "../credentials/codex-dotenv-contracts.js"; import { isOwnedCodexDotenvProjectionAdapter } from "../credentials/codex-dotenv-projection.js"; void isOwnedCodexDotenvProjectionAdapter; type Pair = [CodexDotenvProjectionAdapter, CodexDotenvProjectionIdentity];',
+  ],
+  [
+    "src/commands/setup-host-execution.ts",
+    'import { setupDisplayText } from "./setup-display.js"; setupDisplayText("safe");',
   ],
   [
     "src/credentials/codex-dotenv-setup-observation.ts",

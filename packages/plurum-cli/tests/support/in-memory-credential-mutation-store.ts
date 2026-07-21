@@ -33,6 +33,8 @@ export interface InMemoryCredentialMutationStoreOptions {
   readonly loseLeaseAtRenew?: number;
   readonly malformedLeaseAtRenew?: number;
   readonly failRelease?: boolean;
+  readonly failReleaseAt?: number;
+  readonly busyObservedLeaseAtAcquire?: number;
   readonly crashPolicy?: "discard-unsynced" | "persist-unsynced";
   readonly onOperation?: (operation: string) => void;
   readonly fault?: Readonly<{
@@ -232,6 +234,8 @@ export function createInMemoryCredentialMutationStore(
   let abandonedLeaseEvidence = false;
   let renewCount = 0;
   let releaseFailuresRemaining = options.failRelease === true ? 1 : 0;
+  let releaseCount = 0;
+  let observedLeaseAcquireCount = 0;
 
   const generations = new Map<string, number>();
   const snapshotRecords = new WeakMap<object, SnapshotRecord>();
@@ -781,10 +785,16 @@ export function createInMemoryCredentialMutationStore(
       async release() {
         assertHeld(leaseState);
         record("release");
+        releaseCount += 1;
         leaseState.state = "released";
         activeLease = undefined;
-        if (releaseFailuresRemaining > 0) {
-          releaseFailuresRemaining -= 1;
+        if (
+          releaseFailuresRemaining > 0 ||
+          options.failReleaseAt === releaseCount
+        ) {
+          if (releaseFailuresRemaining > 0) {
+            releaseFailuresRemaining -= 1;
+          }
           abandonedLeaseEvidence = true;
           throw new Error("simulated in-memory release failure");
         }
@@ -856,6 +866,7 @@ export function createInMemoryCredentialMutationStore(
       }>,
     ) {
       record("acquire-observed-lease");
+      observedLeaseAcquireCount += 1;
       if (
         acquireOptions.noFollow !== true ||
         acquireOptions.createDirectory !== true ||
@@ -868,7 +879,10 @@ export function createInMemoryCredentialMutationStore(
         acquireOptions.evidence,
       );
       wholePassEvidenceRecords.delete(acquireOptions.evidence);
-      if (activeLease?.state === "held") {
+      if (
+        activeLease?.state === "held" ||
+        options.busyObservedLeaseAtAcquire === observedLeaseAcquireCount
+      ) {
         return Object.freeze({ status: "busy" as const });
       }
       if (
