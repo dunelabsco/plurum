@@ -15,7 +15,12 @@ The apply grammar now reserves `--yes` for approval of one exact displayed
 plan. `--yes` is invalid with `--dry-run`, and `--api-key-stdin` requires
 `--yes` so confirmation and credential input can never compete for stdin.
 While apply is unavailable, neither flag causes stdin to be read or grants
-mutation authority.
+mutation authority. A pure, unwired apply-plan composer now combines one
+resolved credential decision, the exact retained host preflight, and—when
+Codex is executable—an exact secret-free user-`.env` projection decision. It
+prepares one immutable approval-bound plan and renders only its public preview,
+including the disclosure that Codex and processes it starts may inherit the
+API key. The command does not use that composer yet.
 
 The completed CLI will expose only:
 
@@ -61,7 +66,14 @@ adopt, register, replace, or block. Selection and registration-input states are
 explicitly non-approvable. This planner has no credential reader, secret,
 network, prompt, registration, filesystem, or mutation capability; execution
 remains gated on an exact compare-and-swap observation of canonical credential
-and recovery state.
+and recovery state. The apply-plan composer rejects unresolved credentials and
+blocked host preflights. Its projection planner distinguishes create,
+unchanged, replace, ambiguous, unsafe, and unavailable Codex states relative
+to the exact selected credential without receiving a key. Complete host
+reconciliation evidence stays outside the rendered preview, and composition
+cannot re-inspect hosts or perform changes. It remains unreachable from the CLI
+until native projection and credential observation, confirmation, secret
+input, and persistence boundaries are wired.
 
 The test harness refuses unverifiable execution and unsafe identity changes,
 confines guarded fake operations to a unique private root, rejects lexical,

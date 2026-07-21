@@ -103,6 +103,7 @@ const APPROVED_ASSUME_YES = Object.freeze({
 const TOKEN_TO_JSON = Object.freeze(function tokenToJson(): undefined {
   return undefined;
 });
+const OWNED_APPROVAL_AUTHORITIES = new WeakSet<object>();
 
 class SetupApprovalError extends Error {
   constructor() {
@@ -378,7 +379,7 @@ export function createSetupApprovalAuthority(): SetupApprovalAuthority {
     ApprovalState
   >();
 
-  return Object.freeze({
+  const authority = Object.freeze({
     prepare<Plan extends object>(
       candidate: Plan,
     ): SetupPreparedPlan<Plan> {
@@ -440,4 +441,16 @@ export function createSetupApprovalAuthority(): SetupApprovalAuthority {
         : APPROVED_ASSUME_YES;
     },
   });
+  OWNED_APPROVAL_AUTHORITIES.add(authority);
+  return authority;
+}
+
+export function isOwnedSetupApprovalAuthority(
+  value: unknown,
+): value is SetupApprovalAuthority {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    OWNED_APPROVAL_AUTHORITIES.has(value)
+  );
 }

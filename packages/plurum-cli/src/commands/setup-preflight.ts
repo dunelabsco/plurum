@@ -31,7 +31,11 @@ import {
   containsHostControlCharacter,
   containsHostSensitiveMaterial,
 } from "../hosts/privacy.js";
-import type { HostPreflightCapabilities } from "../system/contracts.js";
+import type {
+  HostPreflightCapabilities,
+  PlanningCapabilities,
+  SetupPreflightCapabilities,
+} from "../system/contracts.js";
 
 const MAX_DISPLAY_CHARACTERS = 32_767;
 const UNSAFE_TERMINAL_FORMATTING = /[\p{Cf}\u2028\u2029]/u;
@@ -114,6 +118,39 @@ export interface SetupHostPreview {
   readonly explanation: string;
 }
 
+declare const setupPreflightSnapshotBrand: unique symbol;
+
+/*
+ * This is the public half of one mutation-authority-derived apply inspection.
+ * Exact semantic host plans are retained in a module-private WeakMap so
+ * accidental serialization cannot expose executable attestations, revisions,
+ * baselines, or rollback state. Apply composition must recover them from this
+ * exact snapshot instead of inspecting or planning a second time.
+ */
+export interface SetupPreflightSnapshot {
+  readonly [setupPreflightSnapshotBrand]: never;
+  readonly requestedTarget: ClientTarget;
+  readonly selectedClients: readonly HostId[];
+  readonly readiness: SetupPreflightReadiness;
+  readonly services: Readonly<{
+    readonly apiOrigin: string;
+    readonly mcpEndpoint: string;
+  }>;
+  readonly destinations: SetupDryRunPreflight["destinations"];
+  readonly hosts: readonly SetupHostPreview[];
+  readonly mutations: readonly SetupMutationPreview[];
+}
+
+type SetupPreflightData = Omit<
+  SetupPreflightSnapshot,
+  typeof setupPreflightSnapshotBrand
+>;
+
+interface InspectedSetupPreflight {
+  readonly publicData: SetupPreflightData;
+  readonly plans: readonly HostPreflightPlan[];
+}
+
 export interface SetupDryRunPreflight {
   readonly schemaVersion: 1;
   readonly mode: "dry-run";
@@ -149,6 +186,11 @@ class SetupPreflightError extends Error {
     this.name = "SetupPreflightError";
   }
 }
+
+const RETAINED_HOST_PLANS = new WeakMap<
+  SetupPreflightSnapshot,
+  readonly HostPreflightPlan[]
+>();
 
 function invalidPreflight(): never {
   throw new SetupPreflightError();
@@ -386,6 +428,7 @@ async function inspectHost(
 ): Promise<Readonly<{
   host: SetupHostPreview;
   mutations: readonly SetupMutationPreview[];
+  plan: HostPreflightPlan | null;
 }>> {
   try {
     const inspection =
@@ -412,19 +455,21 @@ async function inspectHost(
     return {
       host: hostPreview(plan),
       mutations,
+      plan,
     };
   } catch {
     return {
       host: inspectionFailedPreview(host),
       mutations: [],
+      plan: null,
     };
   }
 }
 
-export async function createSetupDryRunPreflight(
+async function inspectSetupPreflight(
   target: ClientTarget,
   capabilities: HostPreflightCapabilities,
-): Promise<SetupDryRunPreflight> {
+): Promise<InspectedSetupPreflight> {
   const selected = selectedClients(target);
   const locations = resolveCredentialLocations(
     capabilities.platform,
@@ -471,21 +516,69 @@ export async function createSetupDryRunPreflight(
   }
 
   return deepFreeze({
+    publicData: {
+      requestedTarget: target,
+      selectedClients: selected,
+      readiness: readinessFor(hosts, mutations),
+      services: {
+        apiOrigin: setupDisplayText(DEFAULT_API_ORIGIN, 2_048),
+        mcpEndpoint: setupDisplayText(endpoint, 2_048),
+      },
+      destinations,
+      hosts,
+      mutations,
+    },
+    plans: Object.freeze(
+      inspected.flatMap(({ plan }) =>
+        plan === null ? [] : [plan],
+      ),
+    ),
+  });
+}
+
+export async function createSetupPreflightSnapshot(
+  target: ClientTarget,
+  capabilities: SetupPreflightCapabilities,
+): Promise<SetupPreflightSnapshot> {
+  const inspected = await inspectSetupPreflight(target, capabilities);
+  const snapshot = inspected.publicData as SetupPreflightSnapshot;
+  RETAINED_HOST_PLANS.set(snapshot, inspected.plans);
+  return snapshot;
+}
+
+export function retainedSetupHostPlans(
+  snapshot: unknown,
+): readonly HostPreflightPlan[] {
+  if (typeof snapshot !== "object" || snapshot === null) {
+    return invalidPreflight();
+  }
+  const plans = RETAINED_HOST_PLANS.get(
+    snapshot as SetupPreflightSnapshot,
+  );
+  return plans ?? invalidPreflight();
+}
+
+export async function createSetupDryRunPreflight(
+  target: ClientTarget,
+  capabilities: PlanningCapabilities,
+): Promise<SetupDryRunPreflight> {
+  const { publicData: snapshot } = await inspectSetupPreflight(
+    target,
+    capabilities,
+  );
+  return deepFreeze({
     schemaVersion: 1,
     mode: "dry-run",
-    requestedTarget: target,
-    selectedClients: selected,
-    readiness: readinessFor(hosts, mutations),
-    services: {
-      apiOrigin: setupDisplayText(DEFAULT_API_ORIGIN, 2_048),
-      mcpEndpoint: setupDisplayText(endpoint, 2_048),
-    },
-    destinations,
+    requestedTarget: snapshot.requestedTarget,
+    selectedClients: snapshot.selectedClients,
+    readiness: snapshot.readiness,
+    services: snapshot.services,
+    destinations: snapshot.destinations,
     credential: {
       status: "not-inspected",
     },
-    hosts,
-    mutations,
+    hosts: snapshot.hosts,
+    mutations: snapshot.mutations,
     confirmation: "not-requested",
   });
 }

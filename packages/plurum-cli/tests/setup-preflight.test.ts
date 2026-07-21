@@ -4,8 +4,13 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createPlatformPathAdapter } from "../src/adapters/node/platform.js";
 import { runCli } from "../src/cli.js";
+import { prepareSetupApplyPlan } from "../src/commands/setup-apply-plan.js";
+import { createSetupApprovalAuthority } from "../src/commands/setup-approval.js";
+import { planSetupCredential } from "../src/commands/setup-credential-plan.js";
 import {
   createSetupDryRunPreflight,
+  createSetupPreflightSnapshot,
+  retainedSetupHostPlans,
 } from "../src/commands/setup-preflight.js";
 import { renderSetupDryRunPreflight } from "../src/commands/setup-output.js";
 import { ExitCode } from "../src/exit-codes.js";
@@ -26,8 +31,12 @@ import {
   CODEX_DESIRED_CONFIGURATION,
   CODEX_MUTATION_SUPPORT,
 } from "../src/hosts/codex/configuration.js";
+import { createHostPreflightPlan } from "../src/hosts/planner.js";
 import type { CliRuntime } from "../src/runtime.js";
-import { planningScope } from "../src/system/scopes.js";
+import {
+  planningScope,
+  setupPreflightScope,
+} from "../src/system/scopes.js";
 import type {
   PlatformAdapter,
   SystemCapabilities,
@@ -146,6 +155,34 @@ function systemWithInspections(
   });
 }
 
+function systemWithApplyInspections(
+  inspections: Readonly<Record<HostId, HostInspectionAdapter>>,
+): SystemCapabilities {
+  const base = createTestSystem();
+  const asMutation = (
+    adapter: HostInspectionAdapter,
+  ): HostMutationAdapter => Object.freeze({
+    inspect: adapter.inspect,
+    apply: async () => {
+      throw new Error("apply preflight must not mutate a host");
+    },
+    rollback: async () => {
+      throw new Error("apply preflight must not mutate a host");
+    },
+  });
+  const mutation = Object.freeze({
+    "claude-code": asMutation(inspections["claude-code"]),
+    codex: asMutation(inspections.codex),
+  });
+  return Object.freeze({
+    ...base,
+    hosts: Object.freeze({
+      inspection: base.hosts.inspection,
+      mutation,
+    }),
+  });
+}
+
 function expectDeepFrozen(
   value: unknown,
   seen = new WeakSet<object>(),
@@ -184,6 +221,162 @@ function outputRuntime(system: SystemCapabilities): {
 }
 
 describe("setup dry-run preflight", () => {
+  it("retains the exact ordered host evidence from one inspection pass", async () => {
+    const claudeInspection = available(
+      "claude-code",
+      absentConfiguration(),
+    );
+    const codexInspection = available(
+      "codex",
+      healthyConfiguration("codex"),
+    );
+    const claudeInspect = vi.fn(async () => claudeInspection);
+    const codexInspect = vi.fn(async () => codexInspection);
+    const system = systemWithApplyInspections({
+      "claude-code": inspectionAdapter(claudeInspect),
+      codex: inspectionAdapter(codexInspect),
+    });
+
+    const snapshot = await createSetupPreflightSnapshot(
+      "all",
+      setupPreflightScope(system),
+    );
+    const retained = retainedSetupHostPlans(snapshot);
+
+    expect(claudeInspect).toHaveBeenCalledTimes(1);
+    expect(codexInspect).toHaveBeenCalledTimes(1);
+    expect(retained.map(({ host }) => host)).toEqual([
+      "claude-code",
+      "codex",
+    ]);
+    expect(retained).toEqual([
+      createHostPreflightPlan(
+        claudeInspection,
+        CLAUDE_CODE_DESIRED_CONFIGURATION,
+      ),
+      createHostPreflightPlan(
+        codexInspection,
+        CODEX_DESIRED_CONFIGURATION,
+      ),
+    ]);
+    expectDeepFrozen(retained);
+
+    const publicJson = JSON.stringify(snapshot);
+    for (const privateEvidence of [
+      "claude-code-executable-revision",
+      "claude-code-chain-revision",
+      "claude-code-state-revision",
+      "codex-executable-revision",
+      "codex-chain-revision",
+      "codex-state-revision",
+      '"baseline"',
+      '"actions"',
+      '"before"',
+      '"after"',
+    ]) {
+      expect(publicJson).not.toContain(privateEvidence);
+    }
+  });
+
+  it("keeps retained plans bound to the original snapshot identity", async () => {
+    const inspect = vi.fn(
+      async (): Promise<HostInspection> =>
+        available("claude-code", absentConfiguration()),
+    );
+    const system = systemWithApplyInspections({
+      "claude-code": inspectionAdapter(inspect),
+      codex: inspectionAdapter(async () => ({
+        host: "codex",
+        status: "absent",
+      })),
+    });
+    const snapshot = await createSetupPreflightSnapshot(
+      "claude-code",
+      setupPreflightScope(system),
+    );
+    const clone = { ...snapshot };
+    const traps = vi.fn(() => {
+      throw new Error(`snapshot proxy touched ${CANARY}`);
+    });
+    const proxy = new Proxy(snapshot, {
+      get: traps,
+      getOwnPropertyDescriptor: traps,
+      getPrototypeOf: traps,
+      ownKeys: traps,
+    });
+
+    expect(() => retainedSetupHostPlans(clone)).toThrow(
+      "The setup preflight could not be created safely.",
+    );
+    expect(() => retainedSetupHostPlans(proxy)).toThrow(
+      "The setup preflight could not be created safely.",
+    );
+    expect(traps).not.toHaveBeenCalled();
+    expect(inspect).toHaveBeenCalledTimes(1);
+    expect(retainedSetupHostPlans(snapshot)).toHaveLength(1);
+    expect(inspect).toHaveBeenCalledTimes(1);
+  });
+
+  it("makes an inspection-failed snapshot unavailable without fabricating a retained plan", async () => {
+    const claudeInspect = vi.fn(async (): Promise<HostInspection> => {
+      throw new Error(`inspection failed with ${CANARY}`);
+    });
+    const codexInspect = vi.fn(
+      async (): Promise<HostInspection> =>
+        available("codex", healthyConfiguration("codex")),
+    );
+    const system = systemWithApplyInspections({
+      "claude-code": inspectionAdapter(claudeInspect),
+      codex: inspectionAdapter(codexInspect),
+    });
+    const snapshot = await createSetupPreflightSnapshot(
+      "all",
+      setupPreflightScope(system),
+    );
+
+    expect(snapshot.readiness).toBe("unavailable");
+    expect(snapshot.hosts.map(({ classification }) => classification)).toEqual([
+      "inspection-failed",
+      "healthy",
+    ]);
+    expect(retainedSetupHostPlans(snapshot).map(({ host }) => host)).toEqual([
+      "codex",
+    ]);
+
+    const credential = planSetupCredential({
+      observation: {
+        schemaVersion: 1,
+        transaction: "clean",
+        canonical: { status: "missing" },
+        candidates: [],
+        blockers: [],
+        invalidSources: [],
+      },
+      decision: {
+        selectedCandidateId: null,
+        registration: {
+          agentName: "Codex",
+          username: "codex-agent",
+        },
+      },
+    });
+    const approval = createSetupApprovalAuthority();
+
+    expect(() =>
+      prepareSetupApplyPlan(
+        approval,
+        snapshot,
+        credential,
+        null,
+        "00000000-0000-4000-8000-000000000001",
+        "2026-07-21T00:00:00.000Z",
+      ),
+    ).toThrow("The setup apply plan could not be created safely.");
+    expect(claudeInspect).toHaveBeenCalledTimes(1);
+    expect(codexInspect).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(snapshot)).not.toContain(CANARY);
+  });
+
   it("renders exact ordered reversible commands without internal evidence", async () => {
     const requests: HostId[] = [];
     const system = systemWithInspections({
@@ -327,6 +520,9 @@ describe("setup dry-run preflight", () => {
     expect(rendered).toContain("Plurum setup preflight");
     expect(rendered).toContain('"shell":false');
     expect(rendered).toContain("No changes were made.");
+    expect(() => retainedSetupHostPlans(result)).toThrow(
+      "The setup preflight could not be created safely.",
+    );
     expectDeepFrozen(result);
   });
 

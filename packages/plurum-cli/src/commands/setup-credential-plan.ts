@@ -284,6 +284,7 @@ const UNAVAILABLE_BLOCKER_REASONS: ReadonlySet<
   "credential_source_unavailable",
   "credential_validation_unavailable",
 ]);
+const OWNED_RESOLVED_PLANS = new WeakSet<object>();
 
 function invalidPlan(): never {
   throw new SetupCredentialPlanError();
@@ -1123,11 +1124,30 @@ export function planSetupCredential(
 ): SetupCredentialPlanningResult {
   try {
     const record = exactRecord(request, ["observation", "decision"]);
-    return createPlan(
+    const plan = createPlan(
       normalizeObservation(record.observation),
       normalizeDecision(record.decision),
     );
+    if (plan.status === "resolved") {
+      OWNED_RESOLVED_PLANS.add(plan);
+    }
+    return plan;
   } catch {
     throw new SetupCredentialPlanError();
   }
+}
+
+/*
+ * Apply planning accepts only the exact resolved object returned above. This
+ * runtime provenance check rejects forged, cloned, proxied, and unresolved
+ * credential plans before any caller-controlled property is read.
+ */
+export function isOwnedSetupCredentialResolvedPlan(
+  value: unknown,
+): value is SetupCredentialResolvedPlan {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    OWNED_RESOLVED_PLANS.has(value)
+  );
 }
