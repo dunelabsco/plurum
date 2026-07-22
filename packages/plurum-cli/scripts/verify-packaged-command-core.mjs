@@ -1639,6 +1639,17 @@ function sanitizedWorkerEnvironment(options, allowedModules) {
   return Object.freeze(environment);
 }
 
+function permissionModelFlag() {
+  const flags = runtimeProcess.allowedNodeEnvironmentFlags;
+  if (flags.has("--permission")) {
+    return "--permission";
+  }
+  if (flags.has("--experimental-permission")) {
+    return "--experimental-permission";
+  }
+  throw new Error("runtime does not expose a supported permission model flag");
+}
+
 export async function verifyPackagedCommandCore(options) {
   const workerOptions = exactWorkerOptions(options);
   const auditedModules = auditInstalledModuleGraph(
@@ -1654,12 +1665,15 @@ export async function verifyPackagedCommandCore(options) {
   );
   assert.ok(payload.length > 0 && payload.length <= 16 * 1024);
   const outsideRoot = dirname(workerOptions.outsideCanaryPath);
+  const loaderUrl = pathToFileURL(loaderPath);
+  assert.equal(loaderUrl.protocol, "file:");
+  assert.equal(fileURLToPath(loaderUrl), loaderPath);
   const result = spawnSync(
     runtimeProcess.execPath,
     [
       "--frozen-intrinsics",
       "--disallow-code-generation-from-strings",
-      "--experimental-permission",
+      permissionModelFlag(),
       "--allow-addons",
       "--allow-worker",
       `--allow-fs-read=${scriptsDirectory}`,
@@ -1669,7 +1683,7 @@ export async function verifyPackagedCommandCore(options) {
       `--allow-fs-read=${outsideRoot}`,
       `--allow-fs-write=${workerOptions.testRoot}`,
       "--experimental-loader",
-      loaderPath,
+      loaderUrl.href,
       verifierPath,
       payload,
     ],
@@ -1683,18 +1697,23 @@ export async function verifyPackagedCommandCore(options) {
       timeout: 120_000,
     },
   );
-  assert.equal(result.error, undefined, "packaged command-core worker did not start");
-  assert.equal(result.signal, null, "packaged command-core worker was interrupted");
+  if (result.error !== undefined) {
+    throw new Error("packaged command-core worker did not start");
+  }
+  if (result.signal !== null) {
+    throw new Error("packaged command-core worker was interrupted");
+  }
   if (result.status !== 0) {
     const match =
       /^packaged command core worker failed at ([a-z-]+)\n$/u.exec(
         result.stderr,
       );
     const stage = match?.[1];
-    assert.ok(
-      stage !== undefined && WORKER_STAGES.has(stage),
-      "packaged command-core worker failed without a safe stage",
-    );
+    if (stage === undefined || !WORKER_STAGES.has(stage)) {
+      throw new Error(
+        "packaged command-core worker failed before reporting a safe stage",
+      );
+    }
     throw new Error(`packaged command-core worker failed at ${stage}`);
   }
   assert.equal(
