@@ -43,7 +43,10 @@ const allowedExternalImports = new Map([
 ]);
 
 const allowedProcessMembers = new Map([
-  ["src/runtime.ts", new Set(["stdin", "stdout", "stderr"])],
+  [
+    "src/adapters/node/process-runtime.ts",
+    new Set(["stdin", "stdout", "stderr"]),
+  ],
   ["src/index.ts", new Set(["argv", "exitCode", "stderr"])],
   ["src/adapters/node/credential-environment.ts", new Set(["env"])],
   [
@@ -1256,14 +1259,14 @@ function scanText(relativePath, text) {
     if (resolvedModule?.startsWith("src/adapters/node/")) {
       const insideAdapter = relativePath.startsWith("src/adapters/node/");
       const approvedBridge =
-        relativePath === "src/runtime.ts" &&
-        resolvedModule === "src/adapters/node/production.js" &&
-        specifier === "./adapters/node/production.js";
+        relativePath === "src/index.ts" &&
+        resolvedModule === "src/adapters/node/process-runtime.js" &&
+        specifier === "./adapters/node/process-runtime.js";
       if (!insideAdapter && !approvedBridge) {
         report(
           node,
           "adapter-boundary",
-          "Node adapters may only be composed by the runtime boundary",
+          "Node adapters may only be composed by the executable entrypoint",
         );
       }
     }
@@ -1607,6 +1610,25 @@ function scanText(relativePath, text) {
       }
     }
 
+    if (
+      node.type === "Property" &&
+      parent?.type === "ObjectPattern"
+    ) {
+      const propertyName =
+        node.key.type === "Identifier"
+          ? node.key.name
+          : node.key.type === "Literal"
+            ? node.key.value
+            : undefined;
+      if (propertyName === "constructor" || propertyName === "__proto__") {
+        report(
+          node,
+          "dynamic-code",
+          "prototype destructuring can bypass the capability boundary",
+        );
+      }
+    }
+
     if (node.type === "Identifier" && isIdentifierReference(node, parent, key)) {
       const restrictedCapability = restrictedLocalBindings.get(
         node.name,
@@ -1866,6 +1888,16 @@ const negativeFixtures = [
     "src/commands/example.ts",
     'import "../ADAPTERS/NODE/production.js";',
     "source-boundary",
+  ],
+  [
+    "src/runtime.ts",
+    'import "./adapters/node/production.js";',
+    "adapter-boundary",
+  ],
+  [
+    "src/index.ts",
+    'import "./adapters/node/production.js";',
+    "adapter-boundary",
   ],
   [
     "src/runtime.ts",
@@ -2410,6 +2442,16 @@ const negativeFixtures = [
     "dynamic-code",
   ],
   ["src/example.ts", "(() => {}).constructor('return process')();", "dynamic-code"],
+  [
+    "src/example.ts",
+    "const { constructor: FunctionAlias } = () => {}; FunctionAlias('return process')();",
+    "dynamic-code",
+  ],
+  [
+    "src/example.ts",
+    "const { ['__proto__']: prototype } = {}; void prototype;",
+    "dynamic-code",
+  ],
   ["src/example.ts", 'Date["now"]();', "clock-global"],
   ["src/example.ts", 'Math["random"]();', "random-global"],
   [

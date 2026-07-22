@@ -11,16 +11,119 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import {
+  snapshotProtectedTrees,
+  verifyPackagedCommandCore,
+} from "./verify-packaged-command-core.mjs";
+
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const npmCli = process.env.npm_execpath;
 
 assert.ok(npmCli, "package verification must run through npm");
+
+function readBoundedRegularFile(path, maxBytes, label) {
+  const metadata = lstatSync(path);
+  assert.equal(metadata.isSymbolicLink(), false, `${label} must not be a symlink`);
+  assert.equal(metadata.isFile(), true, `${label} must be a regular file`);
+  assert.equal(metadata.nlink, 1, `${label} must have one link`);
+  assert.equal(
+    metadata.size <= maxBytes,
+    true,
+    `${label} exceeded its byte limit`,
+  );
+  return readFileSync(path);
+}
+
+function digest(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function assertBoundedContent(path, expected, maxBytes, label) {
+  const actual = readBoundedRegularFile(path, maxBytes, label);
+  const expectedBytes = Buffer.from(expected, "utf8");
+  assert.equal(
+    actual.byteLength === expectedBytes.byteLength &&
+      digest(actual) === digest(expectedBytes),
+    true,
+    `${label} content changed`,
+  );
+}
+
+function captureIdentity(path, kind, label) {
+  const metadata = lstatSync(path);
+  assert.equal(metadata.isSymbolicLink(), false, `${label} must not be a symlink`);
+  assert.equal(
+    kind === "directory" ? metadata.isDirectory() : metadata.isFile(),
+    true,
+    `${label} has the wrong kind`,
+  );
+  if (kind === "file") {
+    assert.equal(metadata.nlink, 1, `${label} must have one link`);
+  }
+  return Object.freeze({ device: metadata.dev, inode: metadata.ino });
+}
+
+function assertIdentity(path, kind, expected, label) {
+  const actual = captureIdentity(path, kind, label);
+  assert.deepEqual(actual, expected, `${label} identity changed`);
+}
+
+function assertExactWindowsShim(path) {
+  const actual = readBoundedRegularFile(
+    path,
+    16 * 1024,
+    "installed Windows command shim",
+  );
+  const expected = Buffer.from(
+    [
+      "@ECHO off",
+      "GOTO start",
+      ":find_dp0",
+      "SET dp0=%~dp0",
+      "EXIT /b",
+      ":start",
+      "SETLOCAL",
+      "CALL :find_dp0",
+      "",
+      'IF EXIST "%dp0%\\node.exe" (',
+      '  SET "_prog=%dp0%\\node.exe"',
+      ") ELSE (",
+      '  SET "_prog=node"',
+      "  SET PATHEXT=%PATHEXT:;.JS;=;%",
+      ")",
+      "",
+      'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\..\\plurum\\dist\\index.js" %*',
+      "",
+    ].join("\r\n"),
+    "utf8",
+  );
+  assert.equal(
+    actual.byteLength === expected.byteLength && digest(actual) === digest(expected),
+    true,
+    "installed Windows command shim has an unexpected shape",
+  );
+}
+
+function assertExactNodeShebang(path) {
+  const actual = readBoundedRegularFile(
+    path,
+    1024 * 1024,
+    "installed Node entrypoint",
+  );
+  const expected = Buffer.from("#!/usr/bin/env node\n", "utf8");
+  assert.equal(
+    actual.byteLength > expected.byteLength &&
+      digest(actual.subarray(0, expected.byteLength)) === digest(expected),
+    true,
+    "installed entrypoint must use the exact Node shebang",
+  );
+}
 
 const expectedFiles = [
   "LICENSE",
@@ -31,6 +134,7 @@ const expectedFiles = [
   "dist/adapters/node/native-credential-store.js",
   "dist/adapters/node/network.js",
   "dist/adapters/node/platform.js",
+  "dist/adapters/node/process-runtime.js",
   "dist/adapters/node/production.js",
   "dist/adapters/node/random.js",
   "dist/adapters/node/setup-credential-input.js",
@@ -133,20 +237,80 @@ const expectedFiles = [
 ];
 
 const trustedTemporaryBase = realpathSync(tmpdir());
-const temporaryRoot = realpathSync(
-  mkdtempSync(join(trustedTemporaryBase, "plurum-cli-package-")),
-);
-const runId = randomUUID();
-const sentinelPath = join(temporaryRoot, ".plurum-test-root");
-if (process.platform !== "win32") {
-  chmodSync(temporaryRoot, 0o700);
-}
-writeFileSync(sentinelPath, runId, { encoding: "utf8", flag: "wx", mode: 0o600 });
-if (process.platform !== "win32") {
-  chmodSync(sentinelPath, 0o600);
-}
-
+let temporaryRoot;
+let sentinelPath;
+let runId;
+let sentinelWritten = false;
+let outsideRoot;
+let outsideCanaryPath;
+let outsideCanaryContent;
+let outsideCanaryWritten = false;
+let temporaryRootIdentity;
+let sentinelIdentity;
+let outsideRootIdentity;
+let outsideCanaryIdentity;
+let protectedTreeBefore;
+let outsideTreeBefore;
+let temporaryCleanupBaseline;
+let outsideCleanupBaseline;
+let primaryError;
+const cleanupErrors = [];
 try {
+  temporaryRoot = mkdtempSync(
+    join(trustedTemporaryBase, "plurum-cli-package-"),
+  );
+  temporaryRoot = realpathSync(temporaryRoot);
+  temporaryRootIdentity = captureIdentity(
+    temporaryRoot,
+    "directory",
+    "package test root",
+  );
+  outsideRoot = mkdtempSync(
+    join(trustedTemporaryBase, "plurum-cli-package-canary-"),
+  );
+  outsideRoot = realpathSync(outsideRoot);
+  outsideRootIdentity = captureIdentity(
+    outsideRoot,
+    "directory",
+    "outside canary root",
+  );
+  runId = randomUUID();
+  sentinelPath = join(temporaryRoot, ".plurum-test-root");
+  outsideCanaryPath = join(outsideRoot, "outside-canary.txt");
+  outsideCanaryContent = `outside-${randomUUID()}`;
+  if (process.platform !== "win32") {
+    chmodSync(temporaryRoot, 0o700);
+    chmodSync(outsideRoot, 0o700);
+  }
+  writeFileSync(sentinelPath, runId, {
+    encoding: "utf8",
+    flag: "wx",
+    mode: 0o600,
+  });
+  sentinelWritten = true;
+  writeFileSync(outsideCanaryPath, outsideCanaryContent, {
+    encoding: "utf8",
+    flag: "wx",
+    mode: 0o600,
+  });
+  outsideCanaryWritten = true;
+  if (process.platform !== "win32") {
+    chmodSync(sentinelPath, 0o600);
+    chmodSync(outsideCanaryPath, 0o600);
+  }
+  sentinelIdentity = captureIdentity(
+    sentinelPath,
+    "file",
+    "package test sentinel",
+  );
+  outsideCanaryIdentity = captureIdentity(
+    outsideCanaryPath,
+    "file",
+    "outside package canary",
+  );
+  outsideTreeBefore = snapshotProtectedTrees([outsideRoot]);
+  outsideCleanupBaseline = outsideTreeBefore;
+
   const artifactDirectory = join(temporaryRoot, "artifact");
   const cacheDirectory = join(temporaryRoot, "npm-cache");
   const configDirectory = join(temporaryRoot, "config");
@@ -199,7 +363,6 @@ try {
     npm_config_userconfig: join(configDirectory, "npmrc"),
     npm_config_update_notifier: "false",
   };
-
   function runNpm(
     arguments_,
     expectedStatus = 0,
@@ -210,6 +373,7 @@ try {
       cwd,
       env: { ...childEnvironment, ...environmentOverrides },
       encoding: "utf8",
+      killSignal: "SIGKILL",
       maxBuffer: 1024 * 1024,
       shell: false,
       timeout: 120_000,
@@ -280,150 +444,76 @@ try {
     existsSync(installedEntrypoint),
     "npm install must include the Plurum entrypoint",
   );
-
-  function runInstalled(
-    arguments_,
-    expectedStatus = 0,
-    environmentOverrides = {},
-  ) {
-    const result = spawnSync(installedShim, arguments_, {
-      cwd: neutralDirectory,
-      env: { ...childEnvironment, ...environmentOverrides },
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024,
-      shell: process.platform === "win32",
-      timeout: 120_000,
-    });
-    assert.equal(result.error, undefined, "installed CLI must start successfully");
-    assert.equal(
-      result.status,
-      expectedStatus,
-      `installed CLI failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+  const installedPackage = realpathSync(
+    join(installDirectory, "node_modules", "plurum"),
+  );
+  let installedPackageMetadata;
+  try {
+    installedPackageMetadata = JSON.parse(
+      readBoundedRegularFile(
+        join(installedPackage, "package.json"),
+        64 * 1024,
+        "installed package metadata",
+      ).toString("utf8"),
     );
-    return result;
+  } catch {
+    throw new Error("installed package metadata is invalid");
   }
-
-  const version = runInstalled(["--version"]);
-  assert.equal(version.stdout, "0.0.0-development\n");
-
-  const help = runInstalled(["--help"]);
-  assert.match(help.stdout, /^plurum — connect Claude Code and Codex to Plurum/m);
-  assert.match(help.stdout, /^  setup /m);
-  assert.match(help.stdout, /^  status /m);
-  assert.match(help.stdout, /^  doctor /m);
-
-  const invalid = runInstalled(["setup", "--json"], 2);
-  assert.equal(invalid.stdout, "");
-  assert.match(invalid.stderr, /Invalid arguments/);
-
-  const missingApproval = runInstalled(
-    ["setup", "--api-key-stdin"],
-    2,
-  );
-  assert.equal(missingApproval.stdout, "");
-  assert.match(missingApproval.stderr, /Invalid arguments/);
-
-  const dryRunApproval = runInstalled(
-    ["setup", "--dry-run", "--yes"],
-    2,
-  );
-  assert.equal(dryRunApproval.stdout, "");
-  assert.match(dryRunApproval.stderr, /Invalid arguments/);
-
-  const setupHelp = runInstalled(["setup", "--help"]);
-  assert.match(setupHelp.stdout, /--api-key-stdin\s+reserve stdin as the API-key source \(requires --yes\)/);
-  assert.match(setupHelp.stdout, /--yes\s+reserve noninteractive approval for the exact apply plan/);
-  assert.match(setupHelp.stdout, /apply is unavailable; these flags do not read input/);
-
-  const groups = process.getgroups?.();
-  const standardExecution =
-    (process.platform === "darwin" || process.platform === "linux") &&
-    process.getuid?.() !== undefined &&
-    process.geteuid?.() !== undefined &&
-    process.getgid?.() !== undefined &&
-    process.getegid?.() !== undefined &&
-    groups !== undefined &&
-    process.getuid?.() !== 0 &&
-    process.geteuid?.() !== 0 &&
-    process.getgid?.() !== 0 &&
-    process.getegid?.() !== 0 &&
-    process.getuid?.() === process.geteuid?.() &&
-    process.getgid?.() === process.getegid?.() &&
-    !groups.includes(0);
-
-  if (standardExecution) {
-    const setup = runInstalled(["setup"], 3);
-    assert.equal(setup.stdout, "");
-    assert.match(setup.stderr, /private development build/);
-
-    for (const approvedArgs of [
-      ["setup", "--yes"],
-      ["setup", "--api-key-stdin", "--yes"],
-    ]) {
-      const approvedSetup = runInstalled(approvedArgs, 3);
-      assert.equal(approvedSetup.stdout, "");
-      assert.match(
-        approvedSetup.stderr,
-        /private development build/,
-      );
-    }
-
-    const dryRunCanary =
-      "plrm_live_PACKAGE_VERIFY_CANARY_DO_NOT_PRINT";
-    const dryRun = runInstalled(
-      ["setup", "--dry-run"],
-      1,
-      { PLURUM_API_KEY: dryRunCanary },
-    );
-    assert.match(dryRun.stdout, /^Plurum setup preflight/m);
-    assert.equal(
-      (dryRun.stdout.match(/status: inspection-failed/g) ?? []).length,
-      2,
-    );
-    assert.match(dryRun.stdout, /^readiness: unavailable$/m);
-    assert.match(dryRun.stdout, /^No changes were made\.$/m);
-    assert.doesNotMatch(dryRun.stdout, new RegExp(dryRunCanary));
-    assert.equal(dryRun.stderr, "");
-
-    for (const command of ["status", "doctor"]) {
-      const readOnly = runInstalled([command, "--json"], 3);
-      assert.deepEqual(JSON.parse(readOnly.stdout), {
-        schema_version: 1,
-        ok: false,
-        command,
-        error: {
-          code: "command_unavailable",
-          message: "This command is not available in the private development build.",
-        },
-      });
-    }
+  assert.equal(installedPackageMetadata.name, "plurum");
+  assert.equal(installedPackageMetadata.version, "0.0.0-development");
+  assert.equal(installedPackageMetadata.private, true);
+  assert.equal(installedPackageMetadata.type, "module");
+  assert.deepEqual(installedPackageMetadata.engines, {
+    node: "^22.12.0 || ^24.0.0",
+  });
+  assert.deepEqual(installedPackageMetadata.bin, {
+    plurum: "./dist/index.js",
+  });
+  assertExactNodeShebang(installedEntrypoint);
+  if (process.platform === "win32") {
+    assertExactWindowsShim(installedShim);
   } else {
-    const setup = runInstalled(["setup"], 1);
-    assert.equal(setup.stdout, "");
-    assert.match(setup.stderr, /refuses|cannot verify/);
+    assert.equal(realpathSync(installedShim), realpathSync(installedEntrypoint));
+  }
 
-    for (const command of ["status", "doctor"]) {
-      const readOnly = runInstalled([command, "--json"], 1);
-      assert.equal(JSON.parse(readOnly.stdout).error.code, "unsafe_execution_context");
+  const fakeBin = join(temporaryRoot, "fake-host-bin");
+  mkdirSync(fakeBin, { mode: 0o700 });
+  if (process.platform !== "win32") {
+    chmodSync(fakeBin, 0o700);
+  }
+  for (const executable of [join(fakeBin, "claude"), join(fakeBin, "codex")]) {
+    writeFileSync(executable, "inert packaged-command-core host\n", {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o700,
+    });
+    if (process.platform !== "win32") {
+      chmodSync(executable, 0o700);
     }
   }
+  protectedTreeBefore = snapshotProtectedTrees([temporaryRoot]);
+  temporaryCleanupBaseline = protectedTreeBefore;
 
-  const elevatedSetup = runInstalled(["setup"], 1, { SUDO_UID: "0" });
-  assert.equal(elevatedSetup.stdout, "");
-  assert.match(elevatedSetup.stderr, /refuses to run with elevated privileges/);
-  for (const command of ["status", "doctor"]) {
-    const elevatedReadOnly = runInstalled(
-      [command, "--json"],
-      1,
-      { SUDO_UID: "0" },
-    );
-    assert.equal(
-      JSON.parse(elevatedReadOnly.stdout).error.code,
-      "unsafe_execution_context",
-    );
-  }
-  assert.equal(runInstalled(["--help"], 0, { SUDO_UID: "0" }).stderr, "");
-  assert.equal(runInstalled(["--version"], 0, { SUDO_UID: "0" }).stderr, "");
+  await verifyPackagedCommandCore({
+    testRoot: temporaryRoot,
+    installedPackage,
+    neutralDirectory,
+    homeDirectory,
+    configDirectory,
+    sentinelPath,
+    runId,
+    outsideCanaryPath,
+  });
+  assert.deepEqual(
+    snapshotProtectedTrees([temporaryRoot]),
+    protectedTreeBefore,
+    "installed command execution changed the protected test root",
+  );
+  assert.deepEqual(
+    snapshotProtectedTrees([outsideRoot]),
+    outsideTreeBefore,
+    "installed command execution changed the outside canary tree",
+  );
 
   for (const path of [
     homeDirectory,
@@ -440,23 +530,160 @@ try {
     "plurum",
   ]);
 
-  process.stdout.write("package artifact verified\n");
-} finally {
-  assert.equal(realpathSync(temporaryRoot), temporaryRoot);
-  const rootMetadata = lstatSync(temporaryRoot);
-  const sentinelMetadata = lstatSync(sentinelPath);
-  assert.equal(rootMetadata.isDirectory(), true);
-  assert.equal(rootMetadata.isSymbolicLink(), false);
-  assert.equal(sentinelMetadata.isFile(), true);
-  assert.equal(sentinelMetadata.isSymbolicLink(), false);
-  assert.equal(sentinelMetadata.nlink, 1);
-  assert.equal(readFileSync(sentinelPath, "utf8"), runId);
-  if (process.platform !== "win32") {
-    assert.equal(rootMetadata.uid, process.getuid?.());
-    assert.equal(sentinelMetadata.uid, process.getuid?.());
-    assert.equal(rootMetadata.mode & 0o077, 0);
-    assert.equal(sentinelMetadata.mode & 0o077, 0);
+} catch (error) {
+  primaryError = error;
+  if (temporaryRoot !== undefined && existsSync(temporaryRoot)) {
+    try {
+      temporaryCleanupBaseline = snapshotProtectedTrees([temporaryRoot]);
+    } catch {
+      cleanupErrors.push(
+        new Error("package test root has no safe cleanup snapshot"),
+      );
+    }
   }
-  rmSync(temporaryRoot, { recursive: true, force: false });
-  assert.equal(existsSync(temporaryRoot), false);
+  if (outsideRoot !== undefined && existsSync(outsideRoot)) {
+    try {
+      outsideCleanupBaseline = snapshotProtectedTrees([outsideRoot]);
+    } catch {
+      cleanupErrors.push(
+        new Error("outside canary root has no safe cleanup snapshot"),
+      );
+    }
+  }
+} finally {
+  if (temporaryRoot !== undefined) {
+    try {
+      assert.equal(realpathSync(temporaryRoot), temporaryRoot);
+      const rootMetadata = lstatSync(temporaryRoot);
+      assert.equal(rootMetadata.isDirectory(), true);
+      assert.equal(rootMetadata.isSymbolicLink(), false);
+      if (process.platform !== "win32") {
+        assert.equal(rootMetadata.uid, process.getuid?.());
+        assert.equal(rootMetadata.mode & 0o077, 0);
+      }
+      assert.ok(
+        temporaryRootIdentity !== undefined,
+        "package test root has no original identity",
+      );
+      assertIdentity(
+        temporaryRoot,
+        "directory",
+        temporaryRootIdentity,
+        "package test root",
+      );
+      if (sentinelWritten) {
+        assert.ok(sentinelPath !== undefined && runId !== undefined);
+        const sentinelMetadata = lstatSync(sentinelPath);
+        assert.equal(sentinelMetadata.isFile(), true);
+        assert.equal(sentinelMetadata.isSymbolicLink(), false);
+        assert.equal(sentinelMetadata.nlink, 1);
+        assertBoundedContent(
+          sentinelPath,
+          runId,
+          256,
+          "package test sentinel",
+        );
+        assert.ok(sentinelIdentity !== undefined);
+        assertIdentity(
+          sentinelPath,
+          "file",
+          sentinelIdentity,
+          "package test sentinel",
+        );
+        if (process.platform !== "win32") {
+          assert.equal(sentinelMetadata.uid, process.getuid?.());
+          assert.equal(sentinelMetadata.mode & 0o077, 0);
+        }
+      }
+      assert.ok(
+        temporaryCleanupBaseline !== undefined,
+        "package test root has no validated cleanup baseline",
+      );
+      assert.deepEqual(
+        snapshotProtectedTrees([temporaryRoot]),
+        temporaryCleanupBaseline,
+        "protected package tree changed during execution",
+      );
+      rmSync(temporaryRoot, { recursive: true, force: false });
+      assert.equal(existsSync(temporaryRoot), false);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (outsideRoot !== undefined) {
+    try {
+      assert.equal(realpathSync(outsideRoot), outsideRoot);
+      const outsideRootMetadata = lstatSync(outsideRoot);
+      assert.equal(outsideRootMetadata.isDirectory(), true);
+      assert.equal(outsideRootMetadata.isSymbolicLink(), false);
+      if (process.platform !== "win32") {
+        assert.equal(outsideRootMetadata.uid, process.getuid?.());
+        assert.equal(outsideRootMetadata.mode & 0o077, 0);
+      }
+      assert.ok(
+        outsideRootIdentity !== undefined,
+        "outside canary root has no original identity",
+      );
+      assertIdentity(
+        outsideRoot,
+        "directory",
+        outsideRootIdentity,
+        "outside canary root",
+      );
+      if (outsideCanaryWritten) {
+        assert.ok(
+          outsideCanaryPath !== undefined &&
+            outsideCanaryContent !== undefined,
+        );
+        const outsideCanaryMetadata = lstatSync(outsideCanaryPath);
+        assert.equal(outsideCanaryMetadata.isFile(), true);
+        assert.equal(outsideCanaryMetadata.isSymbolicLink(), false);
+        assert.equal(outsideCanaryMetadata.nlink, 1);
+        assertBoundedContent(
+          outsideCanaryPath,
+          outsideCanaryContent,
+          256,
+          "outside package canary",
+        );
+        assert.ok(outsideCanaryIdentity !== undefined);
+        assertIdentity(
+          outsideCanaryPath,
+          "file",
+          outsideCanaryIdentity,
+          "outside package canary",
+        );
+        if (process.platform !== "win32") {
+          assert.equal(outsideCanaryMetadata.uid, process.getuid?.());
+          assert.equal(outsideCanaryMetadata.mode & 0o077, 0);
+        }
+      }
+      assert.ok(
+        outsideCleanupBaseline !== undefined,
+        "outside canary root has no validated cleanup baseline",
+      );
+      assert.deepEqual(
+        snapshotProtectedTrees([outsideRoot]),
+        outsideCleanupBaseline,
+        "outside canary tree changed during execution",
+      );
+      rmSync(outsideRoot, { recursive: true, force: false });
+      assert.equal(existsSync(outsideRoot), false);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
 }
+
+if (primaryError !== undefined) {
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(
+      [primaryError, ...cleanupErrors],
+      "package verification and cleanup failed",
+    );
+  }
+  throw primaryError;
+}
+if (cleanupErrors.length > 0) {
+  throw new AggregateError(cleanupErrors, "package verifier cleanup failed");
+}
+process.stdout.write("package artifact verified\n");

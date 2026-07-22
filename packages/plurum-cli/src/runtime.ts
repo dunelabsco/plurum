@@ -1,4 +1,3 @@
-import { createProductionSystem } from "./adapters/node/production.js";
 import type { SystemCapabilities } from "./system/contracts.js";
 
 export interface TextSink {
@@ -28,21 +27,4 @@ export function scopeRuntime<Capabilities>(
     stderr: runtime.stderr,
     system,
   });
-}
-
-export function createProcessRuntime(): CliRuntime {
-  return {
-    stdin: process.stdin,
-    stdout: {
-      write(text) {
-        process.stdout.write(text);
-      },
-    },
-    stderr: {
-      write(text) {
-        process.stderr.write(text);
-      },
-    },
-    system: createProductionSystem(),
-  };
 }

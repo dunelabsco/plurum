@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { runCli } from "./cli.js";
+import { createProcessRuntime } from "./adapters/node/process-runtime.js";
 import { ExitCode } from "./exit-codes.js";
-import { createProcessRuntime } from "./runtime.js";
 
 try {
   const runtime = createProcessRuntime();
