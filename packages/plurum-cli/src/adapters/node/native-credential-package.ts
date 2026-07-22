@@ -210,15 +210,8 @@ function bigintIdentity(
     readonly ctimeNs: bigint;
   },
 ): FileIdentity {
-  /*
-   * Node 22.12's Windows path stat exposes the full volume serial while its
-   * descriptor stat exposes the low 32 bits. Newer libuv normalizes both to
-   * that portable value, so do the same before comparing one file identity.
-   */
-  const device =
-    sep === "\\" ? BigInt.asUintN(32, metadata.dev) : metadata.dev;
   return Object.freeze({
-    device,
+    device: metadata.dev,
     object: metadata.ino,
     owner: metadata.uid,
     mode: metadata.mode,
@@ -229,9 +222,11 @@ function bigintIdentity(
   });
 }
 
-function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
+function sameNonDeviceIdentity(
+  left: FileIdentity,
+  right: FileIdentity,
+): boolean {
   return (
-    left.device === right.device &&
     left.object === right.object &&
     left.owner === right.owner &&
     left.mode === right.mode &&
@@ -239,6 +234,29 @@ function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
     left.size === right.size &&
     left.modified === right.modified &&
     left.changed === right.changed
+  );
+}
+
+function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
+  return (
+    left.device === right.device && sameNonDeviceIdentity(left, right)
+  );
+}
+
+function samePathAndDescriptorIdentity(
+  pathIdentity: FileIdentity,
+  descriptorIdentity: FileIdentity,
+): boolean {
+  /*
+   * Node 22.12 and Node 24.0 bundle libuv releases that decode the tail of
+   * Windows' fast path-stat structure in the wrong order, so path and
+   * descriptor device values are not a portable cross-version comparison.
+   * Keep exact device checks within each source and bridge the two using the
+   * stable file ID plus every other identity field.
+   */
+  return (
+    (sep === "\\" || pathIdentity.device === descriptorIdentity.device) &&
+    sameNonDeviceIdentity(pathIdentity, descriptorIdentity)
   );
 }
 
@@ -343,7 +361,7 @@ function readDirectFile(
   );
   try {
     const openedBefore = bigintIdentity(fstatSync(descriptor, { bigint: true }));
-    if (!sameIdentity(before, openedBefore)) {
+    if (!samePathAndDescriptorIdentity(before, openedBefore)) {
       throw new Error("native package file changed before opening");
     }
     const bytes = new Uint8Array(Number(openedBefore.size));
@@ -378,7 +396,7 @@ function readDirectFile(
       trustedOwner,
       enforcePosixTrust,
     );
-    if (!sameIdentity(openedAfter, pathAfter)) {
+    if (!samePathAndDescriptorIdentity(pathAfter, openedAfter)) {
       throw new Error("native package file was replaced");
     }
     return bytes;
