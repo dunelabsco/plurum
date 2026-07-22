@@ -284,7 +284,11 @@ function readStableBounded(path, maxBytes, label) {
       `${label} exceeded its byte limit`,
     );
     const openedBefore = fileIdentity(openedBeforeMetadata);
-    assert.deepEqual(openedBefore, before, `${label} changed before opening`);
+    assertPathAndDescriptorIdentity(
+      before,
+      openedBefore,
+      `${label} changed before opening`,
+    );
     const bytes = Buffer.alloc(openedBefore.size);
     let offset = 0;
     while (offset < bytes.byteLength) {
@@ -308,7 +312,11 @@ function readStableBounded(path, maxBytes, label) {
     const pathAfter = fileIdentity(
       assertDirectRegularFile(path, label, maxBytes),
     );
-    assert.deepEqual(pathAfter, openedAfter, `${label} was replaced`);
+    assertPathAndDescriptorIdentity(
+      pathAfter,
+      openedAfter,
+      `${label} was replaced`,
+    );
     return Object.freeze({
       bytes,
       identity: openedAfter,
@@ -441,6 +449,41 @@ function fileIdentity(metadata) {
     modified: metadata.mtimeMs,
     changed: metadata.ctimeMs,
   });
+}
+
+function assertPathAndDescriptorIdentity(
+  pathIdentity,
+  descriptorIdentity,
+  message,
+) {
+  /*
+   * Node 22.12 and Node 24.0 bundle libuv releases that decode the tail of
+   * Windows' fast path-stat structure in the wrong order, so path and
+   * descriptor device values are not a portable cross-version comparison.
+   * Keep exact device checks within each source and bridge the two using the
+   * stable file ID plus every other identity field.
+   */
+  if (process.platform === "win32") {
+    assert.deepEqual(
+      {
+        inode: pathIdentity.inode,
+        links: pathIdentity.links,
+        size: pathIdentity.size,
+        modified: pathIdentity.modified,
+        changed: pathIdentity.changed,
+      },
+      {
+        inode: descriptorIdentity.inode,
+        links: descriptorIdentity.links,
+        size: descriptorIdentity.size,
+        modified: descriptorIdentity.modified,
+        changed: descriptorIdentity.changed,
+      },
+      message,
+    );
+    return;
+  }
+  assert.deepEqual(pathIdentity, descriptorIdentity, message);
 }
 
 function digest(bytes, algorithm, encoding) {

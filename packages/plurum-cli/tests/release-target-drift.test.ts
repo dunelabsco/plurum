@@ -791,6 +791,52 @@ describe("native release target drift", () => {
     ).toBe(1);
   });
 
+  it("keeps Windows path and descriptor identity reconciliation narrowly scoped", () => {
+    const stableReadStart = uniqueLine(
+      nativePackageAssembler,
+      "function readStableBounded(path, maxBytes, label) {",
+    );
+    const stableReadEnd = uniqueFollowingLine(
+      nativePackageAssembler,
+      "function sha256(bytes) {",
+      stableReadStart,
+    );
+    const stableRead = nativePackageAssembler.slice(
+      stableReadStart,
+      stableReadEnd,
+    );
+    expect(
+      stableRead.filter(
+        (line) => line.trim() === "assertPathAndDescriptorIdentity(",
+      ),
+    ).toHaveLength(2);
+    expect(stableRead).toContain(
+      "    assert.deepEqual(openedAfter, openedBefore, `${label} changed while reading`);",
+    );
+
+    const bridgeStart = uniqueLine(
+      nativePackageAssembler,
+      "function assertPathAndDescriptorIdentity(",
+    );
+    const bridgeEnd = uniqueFollowingLine(
+      nativePackageAssembler,
+      "function digest(bytes, algorithm, encoding) {",
+      bridgeStart,
+    );
+    const bridge = nativePackageAssembler.slice(bridgeStart, bridgeEnd);
+    expect(bridge).toContain('  if (process.platform === "win32") {');
+    expect(bridge).toContain(
+      "  assert.deepEqual(pathIdentity, descriptorIdentity, message);",
+    );
+    expect(bridge.filter((line) => line.includes(".device"))).toHaveLength(0);
+    for (const field of ["inode", "links", "size", "modified", "changed"]) {
+      expect(bridge).toContain(`        ${field}: pathIdentity.${field},`);
+      expect(bridge).toContain(
+        `        ${field}: descriptorIdentity.${field},`,
+      );
+    }
+  });
+
   it("limits Cargo's non-macOS release hard-link allowance to its isolated sibling", () => {
     const strictFileCheck = uniqueLine(
       nativePackageAssembler,
