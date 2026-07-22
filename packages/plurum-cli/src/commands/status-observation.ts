@@ -386,31 +386,12 @@ async function inspectHost(
   return projectHostStatus(inspection, DESIRED_BY_HOST[client]);
 }
 
-function withCredentialProjection(
+function attachCredentialProjection(
   host: PublicHostStatusProjection,
   projection: StatusCredentialProjection,
 ): StatusClientReport {
-  let status = host.status;
-  let reason = host.reason;
-  if (host.status === "healthy") {
-    if (projection === "absent" || projection === "unavailable") {
-      status = "incomplete";
-      reason = "configuration-incomplete";
-    } else if (projection === "mismatched") {
-      status = "mismatched";
-      reason = "configuration-mismatched";
-    } else if (projection === "ambiguous") {
-      status = "duplicated";
-      reason = "ambiguous-configuration";
-    } else if (projection === "unsafe") {
-      status = "unknown";
-      reason = "inspection-unavailable";
-    }
-  }
   return deepFreeze({
     ...host,
-    status,
-    reason,
     credentialProjection: projection,
   });
 }
@@ -423,10 +404,10 @@ async function inspectClient(
 ): Promise<StatusClientReport> {
   const host = await inspectHost(client, capabilities);
   if (client === "claude-code" || host.status === "absent") {
-    return withCredentialProjection(host, "not-applicable");
+    return attachCredentialProjection(host, "not-applicable");
   }
   if (credential.resolved === null) {
-    return withCredentialProjection(host, "unavailable");
+    return attachCredentialProjection(host, "unavailable");
   }
 
   const observed = await observeCodexDotenvStatus(
@@ -441,20 +422,26 @@ async function inspectClient(
     observed.status === "unavailable"
       ? "unavailable"
       : observed.status;
-  return withCredentialProjection(host, projection);
+  return attachCredentialProjection(host, projection);
 }
 
 function hostPolicyHealthy(
   target: StatusOptions["client"],
   clients: readonly StatusClientReport[],
 ): boolean {
+  const clientHealthy = (client: StatusClientReport): boolean =>
+    client.status === "healthy" &&
+    (client.client === "claude-code" ||
+      client.credentialProjection === "exact");
   if (target !== "all") {
-    return clients.length === 1 && clients[0]?.status === "healthy";
+    return clients.length === 1 &&
+      clients[0] !== undefined &&
+      clientHealthy(clients[0]);
   }
   return (
-    clients.some((client) => client.status === "healthy") &&
+    clients.some(clientHealthy) &&
     clients.every(
-      (client) => client.status === "healthy" || client.status === "absent",
+      (client) => clientHealthy(client) || client.status === "absent",
     )
   );
 }

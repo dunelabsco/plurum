@@ -58,6 +58,20 @@ attention. The default status handler remains unavailable until the native
 read-only credential, host, Codex, filesystem, and network composition passes
 the disposable-home release tests.
 
+An isolated doctor core now builds on that exact public status report, adds a
+strict observation of the running Node/platform release target, and performs a
+credential-free GET against the hosted MCP authentication boundary. It reports
+fixed findings for runtime support, API health, protected credential state,
+host and plugin versions, local MCP registration shape, and the Codex
+credential projection. Host configuration and credential projection remain
+separate so one problem cannot hide the other. Doctor then provides fixed,
+client-scoped repair guidance without executing it. The MCP check proves only
+that the HTTP authentication edge returns the expected challenge; it does not
+initialize an MCP session, list tools, or prove that a running host has loaded
+the plugin. The default doctor handler
+also remains unavailable until native composition and disposable-home release
+tests are complete.
+
 The completed CLI will expose only:
 
 ```text

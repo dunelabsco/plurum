@@ -117,16 +117,19 @@ const exactCodexCredentialBoundaryImports = new Map([
 const exactHostExecutionDisplayImports = new Map([
   ["src/commands/setup-display.js", ["setupDisplayText"]],
 ]);
-const statusReadOnlyFiles = new Set([
+const diagnosticReadOnlyFiles = new Set([
   "src/hosts/status.ts",
   "src/api/reachability.ts",
   "src/credentials/codex-dotenv-status.ts",
+  "src/system/runtime-support.ts",
 ]);
-const statusReflectionFiles = new Set([
-  "src/api/reachability.ts",
-  "src/credentials/codex-dotenv-status.ts",
+const diagnosticReflectionMembers = new Map([
+  ["src/api/reachability.ts", new Set(["ownKeys"])],
+  ["src/commands/doctor-output.ts", new Set(["ownKeys"])],
+  ["src/credentials/codex-dotenv-status.ts", new Set(["ownKeys"])],
+  ["src/system/runtime-support.ts", new Set(["apply", "ownKeys"])],
 ]);
-const statusForbiddenModuleStems = Object.freeze([
+const diagnosticForbiddenModuleStems = Object.freeze([
   "src/api/agent-registration",
   "src/api/agent-username",
   "src/credentials/codex-containment",
@@ -140,15 +143,17 @@ const statusForbiddenModuleStems = Object.freeze([
   "src/hosts/claude-code/commands",
   "src/hosts/codex/adapter",
   "src/hosts/codex/commands",
+  "src/hosts/mcp-verification",
   "src/hosts/process-policy",
   "src/hosts/reconciler",
   "src/system/host-mutation-boundary",
 ]);
-const statusForbiddenSystemContractBindings = new Set([
+const diagnosticForbiddenSystemContractBindings = new Set([
   "DirectoryHandleAdapter",
   "FileSystemAdapter",
   "HostCapabilities",
   "NetworkAdapter",
+  "NetworkRequest",
   "PlanningCapabilities",
   "ProcessAdapter",
   "ProcessRequest",
@@ -159,7 +164,7 @@ const statusForbiddenSystemContractBindings = new Set([
   "SystemCapabilities",
   "WritableFileHandleAdapter",
 ]);
-const statusForbiddenHostContractBindings = new Set([
+const diagnosticForbiddenHostContractBindings = new Set([
   "HostAction",
   "HostActionKind",
   "HostApplyRequest",
@@ -173,8 +178,137 @@ const exactStatusCodexContractImports = Object.freeze([
   "CODEX_DOTENV_PROJECTION_STATUSES",
   "type:CodexDotenvProjectionStatus",
 ]);
-const exactStatusDiagnosticRuntimeImports = Object.freeze([
+const exactDiagnosticRuntimeImports = Object.freeze([
   "type:DiagnosticRuntime",
+]);
+const exactDoctorReviewedImports = new Map([
+  [
+    "src/commands/doctor-observation.ts",
+    new Map([
+      [
+        "src/commands/status-observation.js",
+        ["observeStatus", "type:StatusObservationDependencies"],
+      ],
+      [
+        "src/api/reachability.js",
+        [
+          "probeMcpAuthenticationBoundary",
+          "type:McpAuthenticationBoundaryResult",
+        ],
+      ],
+      [
+        "src/system/runtime-support.js",
+        [
+          "observeRuntimePlatformSupport",
+          "type:RuntimePlatformSupportResult",
+          "type:RuntimeSupportObservationAdapter",
+        ],
+      ],
+      [
+        "src/hosts/claude-code/configuration.js",
+        ["CLAUDE_CODE_PLUGIN_VERSION"],
+      ],
+      [
+        "src/hosts/codex/configuration.js",
+        ["CODEX_PLUGIN_VERSION"],
+      ],
+      [
+        "src/hosts/contracts.js",
+        ["HOST_IDS", "type:HostId"],
+      ],
+      [
+        "src/hosts/version.js",
+        ["compareCanonicalVersions"],
+      ],
+      [
+        "src/commands/status-contracts.js",
+        ["type:StatusReportV1"],
+      ],
+    ]),
+  ],
+  [
+    "src/commands/doctor-contracts.ts",
+    new Map([
+      [
+        "src/commands/status-contracts.js",
+        ["type:StatusJsonSuccessEnvelope", "type:StatusReportV1"],
+      ],
+      [
+        "src/api/reachability.js",
+        ["type:McpAuthenticationBoundaryResult"],
+      ],
+      [
+        "src/system/runtime-support.js",
+        ["type:RuntimePlatformSupportResult"],
+      ],
+      [
+        "src/hosts/contracts.js",
+        ["type:HostId"],
+      ],
+    ]),
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    new Map([
+      [
+        "src/commands/status-output.js",
+        ["createStatusJsonEnvelope"],
+      ],
+      [
+        "src/system/runtime-support.js",
+        [
+          "RECOGNIZED_RUNTIME_TARGETS",
+          "RELEASED_RUNTIME_TARGETS",
+          "type:ReleasedRuntimePlatformTarget",
+          "type:RuntimePlatformTarget",
+        ],
+      ],
+      [
+        "src/hosts/claude-code/configuration.js",
+        [
+          "CLAUDE_CODE_MINIMUM_VERSION",
+          "CLAUDE_CODE_PLUGIN_COMPATIBLE_MAXIMUM_EXCLUSIVE",
+          "CLAUDE_CODE_PLUGIN_VERSION",
+        ],
+      ],
+      [
+        "src/hosts/codex/configuration.js",
+        [
+          "CODEX_MINIMUM_VERSION",
+          "CODEX_PLUGIN_COMPATIBLE_MAXIMUM_EXCLUSIVE",
+          "CODEX_PLUGIN_VERSION",
+        ],
+      ],
+      [
+        "src/hosts/version.js",
+        ["compareCanonicalVersions"],
+      ],
+    ]),
+  ],
+]);
+const exactDiagnosticHelperImports = new Map([
+  [
+    "src/api/reachability.ts",
+    new Map([
+      [
+        "src/credentials/origin.js",
+        ["normalizeApiOrigin", "type:ApiOrigin", "type:ApiOriginPolicy"],
+      ],
+      [
+        "src/data/strict-json-object.js",
+        ["parseStrictJsonObject"],
+      ],
+      [
+        "src/data/uint8-array.js",
+        ["copyUint8Array", "intrinsicUint8ArrayByteLength"],
+      ],
+      [
+        "src/system/contracts.js",
+        ["type:ReadOnlyNetworkAdapter", "type:ReadOnlyNetworkRequest"],
+      ],
+    ]),
+  ],
+  ["src/system/runtime-support.ts", new Map()],
 ]);
 const sourceModuleExtensions = Object.freeze([
   "",
@@ -409,20 +543,68 @@ function moduleMatchesStem(resolvedModule, stem) {
   );
 }
 
-function isStatusReadOnlyFile(relativePath) {
+function isStatusDiagnosticFile(relativePath) {
+  return /^src\/commands\/status(?:-[a-z0-9-]+)?\.ts$/u.test(relativePath);
+}
+
+function isDoctorDiagnosticFile(relativePath) {
+  return /^src\/commands\/doctor(?:-[a-z0-9-]+)?\.ts$/u.test(relativePath);
+}
+
+function isDiagnosticReadOnlyFile(relativePath) {
   return (
-    statusReadOnlyFiles.has(relativePath) ||
-    /^src\/commands\/status(?:-[a-z0-9-]+)?\.ts$/u.test(relativePath)
+    diagnosticReadOnlyFiles.has(relativePath) ||
+    isStatusDiagnosticFile(relativePath) ||
+    isDoctorDiagnosticFile(relativePath)
   );
 }
 
-function isStatusRenderFile(relativePath) {
-  return /^src\/commands\/status-(?:output|render(?:-[a-z0-9-]+)?)\.ts$/u.test(
+function isDiagnosticRenderFile(relativePath) {
+  return /^src\/commands\/(?:status|doctor)-(?:output|render(?:-[a-z0-9-]+)?)\.ts$/u.test(
     relativePath,
   );
 }
 
-function isStatusForbiddenModule(resolvedModule) {
+function isDoctorPrivateModule(resolvedModule) {
+  if (resolvedModule === undefined) {
+    return false;
+  }
+  return (
+    resolvedModule.startsWith("src/credentials/") ||
+    resolvedModule.startsWith("src/registration/") ||
+    resolvedModule.startsWith("src/api/") ||
+    moduleMatchesStem(resolvedModule, "src/commands/status") ||
+    resolvedModule.startsWith("src/commands/status-") ||
+    (resolvedModule.startsWith("src/hosts/") &&
+      ![
+        "src/hosts/contracts",
+        "src/hosts/privacy",
+        "src/hosts/status",
+      ].some((stem) => moduleMatchesStem(resolvedModule, stem))) ||
+    (resolvedModule.startsWith("src/system/") &&
+      !moduleMatchesStem(resolvedModule, "src/system/contracts") &&
+      !moduleMatchesStem(resolvedModule, "src/system/runtime-support"))
+  );
+}
+
+function isDoctorReviewedModule(resolvedModule) {
+  if (resolvedModule === undefined) {
+    return false;
+  }
+  return [
+    "src/api/reachability",
+    "src/commands/status-contracts",
+    "src/commands/status-observation",
+    "src/commands/status-output",
+    "src/hosts/claude-code/configuration",
+    "src/hosts/codex/configuration",
+    "src/hosts/contracts",
+    "src/hosts/version",
+    "src/system/runtime-support",
+  ].some((stem) => moduleMatchesStem(resolvedModule, stem));
+}
+
+function isDiagnosticForbiddenModule(resolvedModule) {
   if (resolvedModule === undefined) {
     return false;
   }
@@ -434,9 +616,35 @@ function isStatusForbiddenModule(resolvedModule) {
     /^src\/hosts\/journal-/u.test(resolvedModule) ||
     moduleMatchesStem(resolvedModule, "src/system/denied") ||
     moduleMatchesStem(resolvedModule, "src/system/scopes") ||
-    statusForbiddenModuleStems.some((stem) =>
+    diagnosticForbiddenModuleStems.some((stem) =>
       moduleMatchesStem(resolvedModule, stem),
     )
+  );
+}
+
+function exactDoctorReviewedImport(relativePath, resolvedModule, declaration) {
+  const expected = exactDoctorReviewedImports
+    .get(relativePath)
+    ?.get(resolvedModule);
+  if (expected === undefined || declaration?.type !== "ImportDeclaration") {
+    return false;
+  }
+  return (
+    JSON.stringify(importBindings(declaration)) ===
+    JSON.stringify([...expected].sort())
+  );
+}
+
+function exactDiagnosticHelperImport(relativePath, resolvedModule, declaration) {
+  const expected = exactDiagnosticHelperImports
+    .get(relativePath)
+    ?.get(resolvedModule);
+  if (expected === undefined || declaration?.type !== "ImportDeclaration") {
+    return false;
+  }
+  return (
+    JSON.stringify(importBindings(declaration)) ===
+    JSON.stringify([...expected].sort())
   );
 }
 
@@ -461,12 +669,70 @@ function isUnwiredNativeBoundaryModule(resolvedModule) {
   );
 }
 
-function isAllowedBoundaryReflectReference(relativePath, node, parent) {
+function isExactRuntimeObservationReflectApply(
+  relativePath,
+  member,
+  call,
+  awaited,
+  snapshot,
+) {
+  return (
+    relativePath === "src/system/runtime-support.ts" &&
+    member?.type === "MemberExpression" &&
+    member.computed === false &&
+    member.optional === false &&
+    member.object.type === "Identifier" &&
+    member.object.name === "Reflect" &&
+    member.property.type === "Identifier" &&
+    member.property.name === "apply" &&
+    call?.type === "CallExpression" &&
+    call.callee === member &&
+    call.optional === false &&
+    call.arguments.length === 3 &&
+    call.arguments[0]?.type === "Identifier" &&
+    call.arguments[0].name === "observe" &&
+    call.arguments[1]?.type === "Identifier" &&
+    call.arguments[1].name === "adapter" &&
+    call.arguments[2]?.type === "ArrayExpression" &&
+    call.arguments[2].elements.length === 0 &&
+    awaited?.type === "AwaitExpression" &&
+    awaited.argument === call &&
+    snapshot?.type === "CallExpression" &&
+    snapshot.optional === false &&
+    snapshot.callee.type === "Identifier" &&
+    snapshot.callee.name === "snapshotObservation" &&
+    snapshot.arguments.length === 1 &&
+    snapshot.arguments[0] === awaited
+  );
+}
+
+function isAllowedBoundaryReflectReference(
+  relativePath,
+  node,
+  parent,
+  ancestors,
+) {
+  if (
+    parent?.type === "MemberExpression" &&
+    parent.object === node &&
+    parent.computed === false &&
+    parent.property.type === "Identifier" &&
+    parent.property.name === "apply" &&
+    relativePath === "src/system/runtime-support.ts"
+  ) {
+    return isExactRuntimeObservationReflectApply(
+      relativePath,
+      parent,
+      ancestors.at(-2),
+      ancestors.at(-3),
+      ancestors.at(-4),
+    );
+  }
   const allowedMembers =
     relativePath === "src/adapters/node/native-credential-store.ts"
       ? ["apply", "ownKeys"]
-      : statusReflectionFiles.has(relativePath)
-        ? ["ownKeys"]
+      : diagnosticReflectionMembers.has(relativePath)
+        ? [...diagnosticReflectionMembers.get(relativePath)]
       : [
             "src/credentials/codex-dotenv-projection.ts",
             "src/hosts/codex/adapter.ts",
@@ -681,6 +947,7 @@ function scanText(relativePath, text) {
   const findings = [];
   const seen = new Set();
   const restrictedLocalBindings = new Map();
+  const doctorReviewedLocalBindings = new Set();
 
   function location(offset) {
     let low = 0;
@@ -795,36 +1062,71 @@ function scanText(relativePath, text) {
     }
   }
 
-  function validateStatusReadOnlyImport(
+  function validateDiagnosticReadOnlyImport(
     sourceNode,
     resolvedModule,
     declaration,
   ) {
-    if (!isStatusReadOnlyFile(relativePath) || resolvedModule === undefined) {
+    if (!isDiagnosticReadOnlyFile(relativePath) || resolvedModule === undefined) {
       return;
     }
 
     const reportBoundary = (reason) =>
-      report(sourceNode, "status-read-only-boundary", reason);
+      report(sourceNode, "diagnostic-read-only-boundary", reason);
 
-    if (isStatusForbiddenModule(resolvedModule)) {
+    if (isDiagnosticForbiddenModule(resolvedModule)) {
       reportBoundary(
-        "status modules must not import setup, mutation, reconciliation, process, random, or native adapter capabilities",
+        "diagnostic modules must not import setup, registration, mutation, reconciliation, journal, process, random, native adapter, or host MCP verification capabilities",
+      );
+      return;
+    }
+
+    if (exactDiagnosticHelperImports.has(relativePath)) {
+      if (!exactDiagnosticHelperImport(relativePath, resolvedModule, declaration)) {
+        reportBoundary(
+          "reviewed diagnostic helpers may import only their exact read-only dependencies",
+        );
+      }
+      return;
+    }
+
+    if (
+      isDoctorDiagnosticFile(relativePath) &&
+      isDoctorReviewedModule(resolvedModule)
+    ) {
+      if (!exactDoctorReviewedImport(relativePath, resolvedModule, declaration)) {
+        reportBoundary(
+          "doctor modules may import reviewed status, runtime-support, and MCP probe helpers only through exact file and binding allowlists",
+        );
+      }
+      return;
+    }
+
+    if (
+      isDoctorDiagnosticFile(relativePath) &&
+      isDoctorPrivateModule(resolvedModule)
+    ) {
+      reportBoundary(
+        "doctor modules must not import private credential, API, host, or system implementation modules",
       );
       return;
     }
 
     if (
-      isStatusRenderFile(relativePath) &&
+      isDiagnosticRenderFile(relativePath) &&
       (resolvedModule.startsWith("src/credentials/") ||
         resolvedModule.startsWith("src/api/") ||
         moduleMatchesStem(
           resolvedModule,
-          "src/commands/status-observation",
+          "src/commands/status-observation"
+        ) ||
+        moduleMatchesStem(
+          resolvedModule,
+          "src/commands/doctor-observation",
         ))
     ) {
       reportBoundary(
-        "status renderers may consume only public status contracts, not discovery or secret-bearing modules",
+        "diagnostic renderers may consume only public doctor or status contracts, not observation or secret-bearing modules",
       );
       return;
     }
@@ -842,7 +1144,7 @@ function scanText(relativePath, text) {
           JSON.stringify([...exactStatusCodexContractImports].sort())
       ) {
         reportBoundary(
-          "status may import only the reviewed read-only Codex projection status symbols",
+          "diagnostics may import only the reviewed read-only Codex projection status symbols",
         );
       }
       return;
@@ -852,20 +1154,20 @@ function scanText(relativePath, text) {
       resolvedModule,
       "src/system/contracts",
     )
-      ? statusForbiddenSystemContractBindings
+      ? diagnosticForbiddenSystemContractBindings
       : moduleMatchesStem(resolvedModule, "src/hosts/contracts")
-        ? statusForbiddenHostContractBindings
+        ? diagnosticForbiddenHostContractBindings
         : null;
     if (broadContract !== null) {
       if (declaration?.type !== "ImportDeclaration") {
         reportBoundary(
-          "status modules must not re-export broad capability contracts",
+          "diagnostic modules must not re-export broad capability contracts",
         );
         return;
       }
       if (declaration.specifiers.length === 0) {
         reportBoundary(
-          "status modules require exact named imports from broad capability contracts",
+          "diagnostic modules require exact named imports from broad capability contracts",
         );
         return;
       }
@@ -876,7 +1178,7 @@ function scanText(relativePath, text) {
           broadContract.has(imported)
         ) {
           reportBoundary(
-            "status modules must not import mutation-capable, process, random, or full-system contracts",
+            "diagnostic modules must not import mutation-capable, POST-capable network, process, random, or full-system contracts",
           );
           return;
         }
@@ -885,13 +1187,13 @@ function scanText(relativePath, text) {
 
     if (moduleMatchesStem(resolvedModule, "src/runtime")) {
       if (
-        !isStatusRenderFile(relativePath) ||
+        !isDiagnosticRenderFile(relativePath) ||
         declaration?.type !== "ImportDeclaration" ||
         JSON.stringify(importBindings(declaration)) !==
-          JSON.stringify(exactStatusDiagnosticRuntimeImports)
+          JSON.stringify(exactDiagnosticRuntimeImports)
       ) {
         reportBoundary(
-          "only status renderers may type-import the exact DiagnosticRuntime contract; CliRuntime and runtime values are forbidden",
+          "only diagnostic renderers may type-import the exact DiagnosticRuntime contract; CliRuntime and runtime values are forbidden",
         );
       }
       return;
@@ -949,7 +1251,7 @@ function scanText(relativePath, text) {
       }
     }
 
-    validateStatusReadOnlyImport(node, resolvedModule, importNode);
+    validateDiagnosticReadOnlyImport(node, resolvedModule, importNode);
 
     if (resolvedModule?.startsWith("src/adapters/node/")) {
       const insideAdapter = relativePath.startsWith("src/adapters/node/");
@@ -1096,6 +1398,17 @@ function scanText(relativePath, text) {
       validateRestrictedReexport(node);
     } else if (node.type === "ExportNamedDeclaration") {
       validateRestrictedReexport(node);
+      if (isDoctorDiagnosticFile(relativePath)) {
+        for (const specifier of node.specifiers) {
+          if (doctorReviewedLocalBindings.has(specifier.local.name)) {
+            report(
+              specifier,
+              "diagnostic-read-only-boundary",
+              "reviewed diagnostic helper bindings must not be re-exported",
+            );
+          }
+        }
+      }
     } else if (node.type === "TSImportEqualsDeclaration") {
       report(
         node,
@@ -1107,6 +1420,18 @@ function scanText(relativePath, text) {
         node,
         "dynamic-import",
         "dynamic imports are outside the static capability boundary",
+      );
+    }
+
+    if (
+      isDiagnosticReadOnlyFile(relativePath) &&
+      node.type === "Literal" &&
+      node.value === "POST"
+    ) {
+      report(
+        node,
+        "diagnostic-read-only-boundary",
+        "diagnostic modules must not construct POST-capable network requests",
       );
     }
 
@@ -1208,6 +1533,7 @@ function scanText(relativePath, text) {
               "src/commands/setup-credential-plan.ts",
               "src/commands/setup-host-execution.ts",
               "src/commands/setup-registration-execution.ts",
+              "src/commands/doctor-output.ts",
               "src/api/reachability.ts",
               "src/credentials/codex-containment.ts",
               "src/credentials/codex-dotenv-projection.ts",
@@ -1221,6 +1547,7 @@ function scanText(relativePath, text) {
               "src/hosts/codex/output.ts",
               "src/hosts/mcp-verification.ts",
               "src/system/credential-environment.ts",
+              "src/system/runtime-support.ts",
             ].includes(relativePath) &&
             ["getPrototypeOf", "getOwnPropertyDescriptor"].includes(
               propertyName,
@@ -1256,12 +1583,12 @@ function scanText(relativePath, text) {
             "src/adapters/node/native-credential-store.ts",
             "src/data/uint8-array.ts",
           ].includes(relativePath) ||
-          statusReflectionFiles.has(relativePath)) &&
+          diagnosticReflectionMembers.has(relativePath)) &&
         objectName === "Reflect" &&
         (relativePath === "src/adapters/node/native-credential-store.ts"
           ? ["apply", "ownKeys"]
-          : statusReflectionFiles.has(relativePath)
-            ? ["ownKeys"]
+          : diagnosticReflectionMembers.has(relativePath)
+            ? [...diagnosticReflectionMembers.get(relativePath)]
           : ["apply"]
         ).includes(propertyName) &&
         !(
@@ -1348,7 +1675,12 @@ function scanText(relativePath, text) {
       } else {
         const rule = reservedGlobals.get(node.name);
         const allowedBoundaryReflect =
-          isAllowedBoundaryReflectReference(relativePath, node, parent);
+          isAllowedBoundaryReflectReference(
+            relativePath,
+            node,
+            parent,
+            ancestors,
+          );
         const allowedNetworkFetch = isAllowedNetworkFetchReference(
           relativePath,
           node,
@@ -1387,14 +1719,27 @@ function scanText(relativePath, text) {
   }
 
   for (const statement of program.body) {
+    if (statement.type !== "ImportDeclaration") {
+      continue;
+    }
+    const resolvedModule = resolvedRelativeModule(
+      relativePath,
+      statement.source.value,
+    );
     if (
-      statement.type !== "ImportDeclaration" ||
-      statement.importKind === "type"
+      isDoctorDiagnosticFile(relativePath) &&
+      isDoctorReviewedModule(resolvedModule) &&
+      exactDoctorReviewedImport(relativePath, resolvedModule, statement)
     ) {
+      for (const specifier of statement.specifiers) {
+        doctorReviewedLocalBindings.add(specifier.local.name);
+      }
+    }
+    if (statement.importKind === "type") {
       continue;
     }
     const restrictions = restrictionsForModule(
-      resolvedRelativeModule(relativePath, statement.source.value),
+      resolvedModule,
     );
     for (const specifier of statement.specifiers) {
       if (restrictions.length === 0) {
@@ -2088,104 +2433,339 @@ const negativeFixtures = [
     "dynamic-code",
   ],
   [
+    "src/api/reachability.ts",
+    'import * as origin from "../credentials/origin.js"; void origin;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/api/reachability.ts",
+    'export { parseStrictJsonObject } from "../data/strict-json-object.js";',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/system/runtime-support.ts",
+    'import type { ReadOnlyNetworkAdapter } from "./contracts.js"; type Network = ReadOnlyNetworkAdapter;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
     "src/commands/status-observation.ts",
     'import { createSetupRegistrationExecutionAttempt } from "./setup-registration-execution.js";',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-observation.ts",
     'import { runExclusiveObservedCredentialSetup as observe } from "../credentials/store-writer.js"; void observe;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-observation.ts",
     'import * as journal from "../hosts/journal-codec.js"; void journal;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-observation.ts",
     'export * from "../hosts/codex/commands.js";',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-observation.ts",
     'import { nodeRandom } from "../adapters/node/random.js"; void nodeRandom;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-contracts.ts",
     'import type { ProcessAdapter as StatusProcess } from "../system/contracts.js"; type Process = StatusProcess;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/hosts/status.ts",
     'import type { HostMutationAdapter as Inspector } from "./contracts.js"; type Adapter = Inspector;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-observation.ts",
     'import * as projection from "../credentials/codex-dotenv-projection.js"; void projection;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/credentials/codex-dotenv-status.ts",
     'import * as contracts from "./codex-dotenv-contracts.js"; void contracts;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/credentials/codex-dotenv-status.ts",
     'export type { CodexDotenvProjectionAdapter } from "./codex-dotenv-contracts.js";',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-output.ts",
     'import type { ResolvedCredential } from "../credentials/discovery.js"; type Credential = ResolvedCredential;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-output.ts",
     'import type { ApiKey as DisplayKey } from "../credentials/schema.js"; type Key = DisplayKey;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-output.ts",
     'import * as discovery from "../credentials/discovery.js"; void discovery;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-output.ts",
     'export * from "../credentials/discovery.js";',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-output.ts",
     'import { observeStatus } from "./status-observation.js"; void observeStatus;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-output.ts",
     'import type { CliRuntime } from "../runtime.js"; type Runtime = CliRuntime;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-output.ts",
     'import type { DiagnosticRuntime, CliRuntime } from "../runtime.js"; type Runtime = DiagnosticRuntime & CliRuntime;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-output.ts",
     'import { DiagnosticRuntime } from "../runtime.js"; void DiagnosticRuntime;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-observation.ts",
     'import type { DiagnosticRuntime } from "../runtime.js"; type Runtime = DiagnosticRuntime;',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
   ],
   [
     "src/commands/status-contracts.ts",
     'export type { DiagnosticRuntime } from "../runtime.js";',
-    "status-read-only-boundary",
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import { createSetupRegistrationExecutionAttempt as inspect } from "./setup-registration-execution.js"; void inspect;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import { registerAgent as observe } from "../api/agent-registration.js"; void observe;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-contracts.ts",
+    'import type { ResolvedCredential as PublicCredential } from "../credentials/discovery.js"; type Credential = PublicCredential;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import { createHostPreflightPlan as diagnose } from "../hosts/planner.js"; void diagnose;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import type { HostMcpVerificationAdapter as DiagnosticMcp } from "../hosts/mcp-verification.js"; type Mcp = DiagnosticMcp;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'export * from "../hosts/mcp-verification.js";',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import { doctorScope as observe } from "../system/scopes.js"; void observe;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import type { NetworkAdapter as ReadOnlyNetwork } from "../system/contracts.js"; type Network = ReadOnlyNetwork;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import type { NetworkRequest as SafeRequest } from "../system/contracts.js"; type Request = SafeRequest;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import type { FileSystemAdapter as ReadOnlyFiles } from "../system/contracts.js"; type Files = ReadOnlyFiles;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import type { RandomAdapter as DeterministicInput } from "../system/contracts.js"; type Random = DeterministicInput;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import type { HostMutationAdapter as InspectionOnlyHost } from "../hosts/contracts.js"; type Host = InspectionOnlyHost;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import { createDeniedSystemCapabilities as system } from "../system/denied.js"; void system;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import { createNativeCredentialStore as store } from "../adapters/node/native-credential-store.js"; void store;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import { createStatusCommand as observe } from "./status.js"; void observe;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-contracts.ts",
+    'export type { NetworkAdapter as DoctorNetwork } from "../system/contracts.js";',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'const request = { method: "POST" as const }; void request;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'import type { CliRuntime as DiagnosticRuntime } from "../runtime.js"; type Runtime = DiagnosticRuntime;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'import { DiagnosticRuntime } from "../runtime.js"; void DiagnosticRuntime;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import type { DiagnosticRuntime } from "../runtime.js"; type Runtime = DiagnosticRuntime;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'import { observeStatus as createStatusJsonEnvelope } from "./status-observation.js"; void createStatusJsonEnvelope;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'import { renderStatusJson } from "./status-output.js"; void renderStatusJson;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'import { SUPPORTED_NODE_RUNTIME_RANGES } from "../system/runtime-support.js"; void SUPPORTED_NODE_RUNTIME_RANGES;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'import * as claudeConfiguration from "../hosts/claude-code/configuration.js"; void claudeConfiguration;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'export * from "../hosts/claude-code/configuration.js";',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'import { CLAUDE_CODE_PLUGIN_VERSION } from "../hosts/claude-code/configuration.js"; void CLAUDE_CODE_PLUGIN_VERSION;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'export { CLAUDE_CODE_MINIMUM_VERSION as minimumVersion } from "../hosts/claude-code/configuration.js";',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'import { CODEX_DESIRED_CONFIGURATION, CODEX_MINIMUM_VERSION, CODEX_PLUGIN_COMPATIBLE_MAXIMUM_EXCLUSIVE, CODEX_PLUGIN_VERSION } from "../hosts/codex/configuration.js"; void CODEX_DESIRED_CONFIGURATION; void CODEX_MINIMUM_VERSION; void CODEX_PLUGIN_COMPATIBLE_MAXIMUM_EXCLUSIVE; void CODEX_PLUGIN_VERSION;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'export { compareCanonicalVersions as compareVersions } from "../hosts/version.js";',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'import { compareCanonicalVersions as compareVersions } from "../hosts/version.js"; export { compareVersions };',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'export * from "./status-output.js";',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'import { createStatusJsonEnvelope as envelope } from "./status-output.js"; export { envelope };',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import * as status from "./status-observation.js"; void status;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import { observeStatus, type StatusObservationDependencies, type PrivateStatusState } from "./status-observation.js"; void observeStatus; type State = [StatusObservationDependencies, PrivateStatusState];',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import { probeApiReachability } from "../api/reachability.js"; void probeApiReachability;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-contracts.ts",
+    'export type { McpAuthenticationBoundaryResult } from "../api/reachability.js";',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import { observeRuntimePlatformSupport, type RuntimePlatformSupportResult } from "../system/runtime-support.js"; void observeRuntimePlatformSupport; type Result = RuntimePlatformSupportResult;',
+    "diagnostic-read-only-boundary",
+  ],
+  [
+    "src/system/runtime-support.ts",
+    'Reflect["apply"](() => undefined, undefined, []);',
+    "dynamic-code",
+  ],
+  [
+    "src/system/runtime-support.ts",
+    'const apply = Reflect.apply; apply(() => undefined, undefined, []);',
+    "dynamic-code",
+  ],
+  [
+    "src/system/runtime-support.ts",
+    'Object["getPrototypeOf"]({});',
+    "dynamic-code",
+  ],
+  [
+    "src/system/runtime-support.ts",
+    'async function check(adapter: object) { const observe = () => undefined; await Reflect.apply(observe, adapter, []); }',
+    "dynamic-code",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'Reflect["ownKeys"]({});',
+    "dynamic-code",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'const ownKeys = Reflect.ownKeys; ownKeys({});',
+    "dynamic-code",
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'Object["getOwnPropertyDescriptor"]({}, "value");',
+    "dynamic-code",
   ],
 ];
 
@@ -2308,6 +2888,30 @@ const positiveFixtures = [
   [
     "src/commands/status-observation.ts",
     'import { observeCodexDotenvStatus, type CodexDotenvStatusObservationAdapter } from "../credentials/codex-dotenv-status.js"; void observeCodexDotenvStatus; type Adapter = CodexDotenvStatusObservationAdapter;',
+  ],
+  [
+    "src/system/runtime-support.ts",
+    'async function check(adapter: object) { const observe = () => undefined; Object.getOwnPropertyDescriptor({}, "observe"); Object.getPrototypeOf({}); Reflect.ownKeys({}); snapshotObservation(await Reflect.apply(observe, adapter, [])); }',
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import { probeMcpAuthenticationBoundary, type McpAuthenticationBoundaryResult } from "../api/reachability.js"; import { observeRuntimePlatformSupport, type RuntimePlatformSupportResult, type RuntimeSupportObservationAdapter } from "../system/runtime-support.js"; import { observeStatus, type StatusObservationDependencies } from "./status-observation.js"; import type { StatusReportV1 } from "./status-contracts.js"; import type { DoctorCapabilities } from "../system/contracts.js"; void probeMcpAuthenticationBoundary; void observeRuntimePlatformSupport; void observeStatus; type Dependencies = [McpAuthenticationBoundaryResult, RuntimePlatformSupportResult, RuntimeSupportObservationAdapter, StatusObservationDependencies, StatusReportV1, DoctorCapabilities];',
+  ],
+  [
+    "src/commands/doctor-contracts.ts",
+    'import type { McpAuthenticationBoundaryResult } from "../api/reachability.js"; import type { HostId } from "../hosts/contracts.js"; import type { RuntimePlatformSupportResult } from "../system/runtime-support.js"; import type { StatusJsonSuccessEnvelope, StatusReportV1 } from "./status-contracts.js"; type Report = [McpAuthenticationBoundaryResult, HostId, RuntimePlatformSupportResult, StatusJsonSuccessEnvelope, StatusReportV1];',
+  ],
+  [
+    "src/commands/doctor-output.ts",
+    'import { createStatusJsonEnvelope } from "./status-output.js"; import { CLAUDE_CODE_MINIMUM_VERSION, CLAUDE_CODE_PLUGIN_COMPATIBLE_MAXIMUM_EXCLUSIVE, CLAUDE_CODE_PLUGIN_VERSION } from "../hosts/claude-code/configuration.js"; import { CODEX_MINIMUM_VERSION, CODEX_PLUGIN_COMPATIBLE_MAXIMUM_EXCLUSIVE, CODEX_PLUGIN_VERSION } from "../hosts/codex/configuration.js"; import { compareCanonicalVersions } from "../hosts/version.js"; import { RECOGNIZED_RUNTIME_TARGETS, RELEASED_RUNTIME_TARGETS, type ReleasedRuntimePlatformTarget, type RuntimePlatformTarget } from "../system/runtime-support.js"; import type { DiagnosticRuntime } from "../runtime.js"; import type { DoctorReportV1 } from "./doctor-contracts.js"; Object.getOwnPropertyDescriptor({}, "value"); Object.getPrototypeOf({}); Reflect.ownKeys({}); void createStatusJsonEnvelope; void CLAUDE_CODE_MINIMUM_VERSION; void CLAUDE_CODE_PLUGIN_COMPATIBLE_MAXIMUM_EXCLUSIVE; void CLAUDE_CODE_PLUGIN_VERSION; void CODEX_MINIMUM_VERSION; void CODEX_PLUGIN_COMPATIBLE_MAXIMUM_EXCLUSIVE; void CODEX_PLUGIN_VERSION; void compareCanonicalVersions; void RECOGNIZED_RUNTIME_TARGETS; void RELEASED_RUNTIME_TARGETS; type Output = [DiagnosticRuntime, DoctorReportV1, ReleasedRuntimePlatformTarget, RuntimePlatformTarget];',
+  ],
+  [
+    "src/commands/doctor-observation.ts",
+    'import { CLAUDE_CODE_PLUGIN_VERSION } from "../hosts/claude-code/configuration.js"; import { CODEX_PLUGIN_VERSION } from "../hosts/codex/configuration.js"; import { HOST_IDS, type HostId } from "../hosts/contracts.js"; import { compareCanonicalVersions } from "../hosts/version.js"; void CLAUDE_CODE_PLUGIN_VERSION; void CODEX_PLUGIN_VERSION; void HOST_IDS; void compareCanonicalVersions; type Client = HostId;',
+  ],
+  [
+    "src/api/reachability.ts",
+    'import type { ReadOnlyNetworkAdapter, ReadOnlyNetworkRequest } from "../system/contracts.js"; const request: ReadOnlyNetworkRequest = { url: "https://mcp.plurum.ai/mcp", method: "GET", headers: {}, timeoutMs: 1, maxResponseBytes: 1, redirect: "error" }; type Network = ReadOnlyNetworkAdapter; void request; type Pair = [Network];',
   ],
 ];
 

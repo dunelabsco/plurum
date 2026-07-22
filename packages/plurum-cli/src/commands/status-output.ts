@@ -254,7 +254,9 @@ function selectedClients(value: readonly HostId[]): readonly HostId[] {
   return Object.freeze(copied);
 }
 
-function successEnvelope(report: StatusReportV1): StatusJsonSuccessEnvelope {
+export function createStatusJsonEnvelope(
+  report: StatusReportV1,
+): StatusJsonSuccessEnvelope {
   const selected = selectedClients(report.selectedClients);
   if (
     report.schemaVersion !== STATUS_REPORT_SCHEMA_VERSION ||
@@ -378,11 +380,11 @@ function shown(value: string | number | boolean | null): string {
 }
 
 export function renderStatusJson(report: StatusReportV1): string {
-  return `${JSON.stringify(successEnvelope(report))}\n`;
+  return `${JSON.stringify(createStatusJsonEnvelope(report))}\n`;
 }
 
 export function renderStatusText(report: StatusReportV1): string {
-  const envelope = successEnvelope(report);
+  const envelope = createStatusJsonEnvelope(report);
   const result = envelope.result;
   const lines = [
     "Plurum status",
@@ -422,7 +424,7 @@ export function renderStatusText(report: StatusReportV1): string {
       `    MCP endpoint: ${shown(client.mcp.endpoint)}`,
     );
   }
-  lines.push("No changes were made.");
+  lines.push("No local configuration changes were made.");
   return `${lines.join("\n")}\n`;
 }
 

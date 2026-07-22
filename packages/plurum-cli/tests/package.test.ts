@@ -3,6 +3,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { CLI_VERSION } from "../src/version.js";
+import {
+  SUPPORTED_NODE_RUNTIME_RANGES,
+} from "../src/system/runtime-support.js";
 
 interface PackageJson {
   readonly name: string;
@@ -34,7 +37,9 @@ describe("package safety invariants", () => {
     expect(packageJson.type).toBe("module");
     expect(packageJson.bin).toEqual({ plurum: "./dist/index.js" });
     expect(packageJson.license).toBe("Apache-2.0");
-    expect(packageJson.engines.node).toBe("^22.12.0 || ^24.0.0");
+    expect(packageJson.engines.node).toBe(
+      SUPPORTED_NODE_RUNTIME_RANGES.join(" || "),
+    );
   });
 
   it("ships only the runtime build and required package documents", () => {

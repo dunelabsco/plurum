@@ -732,8 +732,8 @@ describe("portable status observation", () => {
     });
     expect(report.clients[1]).toMatchObject({
       client: "codex",
-      status: "incomplete",
-      reason: "configuration-incomplete",
+      status: "healthy",
+      reason: "configuration-healthy",
       credentialProjection: "unavailable",
     });
     expectNoPrivateCanaries(report);
@@ -741,11 +741,11 @@ describe("portable status observation", () => {
 
   it.each([
     ["exact", "exact", "healthy", "configuration-healthy"],
-    ["absent", "absent", "incomplete", "configuration-incomplete"],
-    ["mismatched", "mismatched", "mismatched", "configuration-mismatched"],
-    ["ambiguous", "ambiguous", "duplicated", "ambiguous-configuration"],
-    ["unsafe", "unsafe", "unknown", "inspection-unavailable"],
-    ["credential-unavailable", "unavailable", "incomplete", "configuration-incomplete"],
+    ["absent", "absent", "healthy", "configuration-healthy"],
+    ["mismatched", "mismatched", "healthy", "configuration-healthy"],
+    ["ambiguous", "ambiguous", "healthy", "configuration-healthy"],
+    ["unsafe", "unsafe", "healthy", "configuration-healthy"],
+    ["credential-unavailable", "unavailable", "healthy", "configuration-healthy"],
   ] as const)(
     "maps Codex projection %s to public projection %s and host status %s",
     async (fixture, projection, status, reason) => {
@@ -785,8 +785,8 @@ describe("portable status observation", () => {
     const report = await observe(harness, "codex");
 
     expect(report.clients[0]).toMatchObject({
-      status: "incomplete",
-      reason: "configuration-incomplete",
+      status: "healthy",
+      reason: "configuration-healthy",
       credentialProjection: "unavailable",
     });
     expectNoPrivateCanaries(report);

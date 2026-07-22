@@ -1,13 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  PLURUM_MCP_ENDPOINT,
   probeApiReachability,
+  probeMcpAuthenticationBoundary,
   type ApiReachabilityResult,
+  type McpAuthenticationBoundaryResult,
 } from "../src/api/reachability.js";
 import {
   normalizeApiOrigin,
   type ApiOrigin,
 } from "../src/credentials/origin.js";
+import {
+  CLAUDE_CODE_MCP_ENDPOINT,
+} from "../src/hosts/claude-code/configuration.js";
+import { CODEX_MCP_ENDPOINT } from "../src/hosts/codex/configuration.js";
 import type {
   NetworkResponse,
   ReadOnlyNetworkAdapter,
@@ -53,7 +60,9 @@ function fakeNetwork(
   });
 }
 
-function serialized(result: ApiReachabilityResult): string {
+function serialized(
+  result: ApiReachabilityResult | McpAuthenticationBoundaryResult,
+): string {
   return JSON.stringify(result);
 }
 
@@ -248,5 +257,195 @@ describe("API reachability", () => {
       ),
     ).resolves.toEqual({ reachability: "reachable", health: "healthy" });
     expect(fake.requests[0]?.url).toBe("http://127.0.0.1:43197/health");
+  });
+});
+
+describe("MCP authentication-boundary reachability", () => {
+  it("makes one exact bounded unauthenticated request to the fixed MCP endpoint", async () => {
+    const fake = fakeNetwork(async () =>
+      response(
+        401,
+        encode({ error: "Invalid or missing API key" }),
+        Object.freeze({
+          "content-type": "application/json",
+          "WWW-Authenticate": 'Bearer realm="plurum"',
+        }),
+      ),
+    );
+
+    await expect(
+      probeMcpAuthenticationBoundary(fake.network),
+    ).resolves.toEqual({ reachability: "reachable", health: "healthy" });
+    expect(PLURUM_MCP_ENDPOINT).toBe("https://mcp.plurum.ai/mcp");
+    expect(PLURUM_MCP_ENDPOINT).toBe(CLAUDE_CODE_MCP_ENDPOINT);
+    expect(PLURUM_MCP_ENDPOINT).toBe(CODEX_MCP_ENDPOINT);
+    expect(fake.requests).toEqual([
+      {
+        url: PLURUM_MCP_ENDPOINT,
+        method: "GET",
+        headers: { Accept: "application/json" },
+        timeoutMs: 12_000,
+        maxResponseBytes: 4_096,
+        redirect: "error",
+      },
+    ]);
+    expect("body" in (fake.requests[0] ?? {})).toBe(false);
+    expect(
+      Object.keys(fake.requests[0]?.headers ?? {}).some(
+        (name) => name.toLowerCase() === "authorization",
+      ),
+    ).toBe(false);
+  });
+
+  it.each(["www-authenticate", "WwW-aUtHeNtIcAtE"])(
+    "matches the single challenge header name case-insensitively: %s",
+    async (name) => {
+      const fake = fakeNetwork(async () =>
+        response(
+          401,
+          new Uint8Array(),
+          Object.freeze({ [name]: 'Bearer realm="plurum"' }),
+        ),
+      );
+
+      await expect(
+        probeMcpAuthenticationBoundary(fake.network),
+      ).resolves.toEqual({ reachability: "reachable", health: "healthy" });
+    },
+  );
+
+  it.each([
+    Object.freeze({}),
+    Object.freeze({ "www-authenticate": "Bearer" }),
+    Object.freeze({ "www-authenticate": 'bearer realm="plurum"' }),
+    Object.freeze({ "www-authenticate": 'Bearer realm="other"' }),
+    Object.freeze({
+      "WWW-Authenticate": 'Bearer realm="plurum"',
+      "www-authenticate": 'Bearer realm="plurum"',
+    }),
+  ])("treats a 401 with a missing, inexact, or duplicate challenge as unhealthy", async (headers) => {
+    const fake = fakeNetwork(async () => response(401, new Uint8Array(), headers));
+
+    await expect(
+      probeMcpAuthenticationBoundary(fake.network),
+    ).resolves.toEqual({ reachability: "reachable", health: "unhealthy" });
+  });
+
+  it.each([100, 200, 400, 403, 500, 599])(
+    "reports structurally valid HTTP %s as reachable but unhealthy",
+    async (status) => {
+      const fake = fakeNetwork(async () =>
+        response(
+          status,
+          encode({ reflected: SECRET }),
+          Object.freeze({
+            "www-authenticate": 'Bearer realm="plurum"',
+          }),
+        ),
+      );
+
+      const result = await probeMcpAuthenticationBoundary(fake.network);
+
+      expect(result).toEqual({
+        reachability: "reachable",
+        health: "unhealthy",
+      });
+      expect(serialized(result)).not.toContain(SECRET);
+    },
+  );
+
+  it("maps transport failure to a fixed unavailable result", async () => {
+    const fake = fakeNetwork(async () => {
+      throw new Error(SECRET);
+    });
+
+    const result = await probeMcpAuthenticationBoundary(fake.network);
+
+    expect(result).toEqual({ reachability: "unavailable", health: "unknown" });
+    expect(serialized(result)).not.toContain(SECRET);
+  });
+
+  it.each([
+    null,
+    { status: 99, headers: {}, body: new Uint8Array() },
+    { status: 600, headers: {}, body: new Uint8Array() },
+    { status: 401, headers: [], body: new Uint8Array() },
+    { status: 401, headers: {}, body: SECRET },
+    { status: 401, headers: {}, body: new Uint8Array(4_097) },
+    { status: 401, headers: {}, body: new Uint8Array(), extra: true },
+  ] as const)("fails closed for malformed network response %p", async (value) => {
+    const fake = fakeNetwork(async () => value as NetworkResponse);
+
+    await expect(
+      probeMcpAuthenticationBoundary(fake.network),
+    ).resolves.toEqual({ reachability: "unavailable", health: "unknown" });
+  });
+
+  it("rejects response and header accessors without invoking them", async () => {
+    let responseReads = 0;
+    let headerReads = 0;
+    const maliciousHeaders = Object.defineProperty({}, "www-authenticate", {
+      enumerable: true,
+      get() {
+        headerReads += 1;
+        throw new Error(SECRET);
+      },
+    });
+    const maliciousResponse = Object.defineProperty(
+      {
+        status: 401,
+        body: new Uint8Array(),
+      },
+      "headers",
+      {
+        enumerable: true,
+        get() {
+          responseReads += 1;
+          throw new Error(SECRET);
+        },
+      },
+    );
+
+    const responseFake = fakeNetwork(
+      async () => maliciousResponse as unknown as NetworkResponse,
+    );
+    const headerFake = fakeNetwork(async () =>
+      response(
+        401,
+        new Uint8Array(),
+        maliciousHeaders as Readonly<Record<string, string>>,
+      ),
+    );
+
+    await expect(
+      probeMcpAuthenticationBoundary(responseFake.network),
+    ).resolves.toEqual({ reachability: "unavailable", health: "unknown" });
+    await expect(
+      probeMcpAuthenticationBoundary(headerFake.network),
+    ).resolves.toEqual({ reachability: "unavailable", health: "unknown" });
+    expect(responseReads).toBe(0);
+    expect(headerReads).toBe(0);
+  });
+
+  it("wipes the owned bounded response-body copy after classification", async () => {
+    const fill = vi.spyOn(Uint8Array.prototype, "fill");
+    try {
+      const fake = fakeNetwork(async () =>
+        response(
+          401,
+          encode({ reflected: SECRET }),
+          Object.freeze({
+            "www-authenticate": 'Bearer realm="plurum"',
+          }),
+        ),
+      );
+
+      await expect(
+        probeMcpAuthenticationBoundary(fake.network),
+      ).resolves.toEqual({ reachability: "reachable", health: "healthy" });
+      expect(fill).toHaveBeenCalledWith(0);
+    } finally {
+      fill.mockRestore();
+    }
   });
 });

@@ -214,7 +214,7 @@ describe("status output", () => {
         "    credential projection: exact",
         "    MCP state: plugin",
         '    MCP endpoint: "https://mcp.plurum.ai/mcp"',
-        "No changes were made.",
+        "No local configuration changes were made.",
         "",
       ].join("\n"),
     );

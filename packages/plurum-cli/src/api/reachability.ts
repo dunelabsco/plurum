@@ -23,6 +23,18 @@ export type ApiReachabilityResult =
       readonly health: "unknown";
     }>;
 
+export const PLURUM_MCP_ENDPOINT = "https://mcp.plurum.ai/mcp" as const;
+
+export type McpAuthenticationBoundaryResult =
+  | Readonly<{
+      readonly reachability: "reachable";
+      readonly health: "healthy" | "unhealthy";
+    }>
+  | Readonly<{
+      readonly reachability: "unavailable";
+      readonly health: "unknown";
+    }>;
+
 const REQUEST_TIMEOUT_MS = 12_000;
 const MAX_RESPONSE_BYTES = 4_096;
 const MAX_HEADER_COUNT = 128;
@@ -44,6 +56,19 @@ const UNAVAILABLE = Object.freeze({
   reachability: "unavailable" as const,
   health: "unknown" as const,
 });
+const MCP_AUTHENTICATION_HEALTHY = Object.freeze({
+  reachability: "reachable" as const,
+  health: "healthy" as const,
+});
+const MCP_AUTHENTICATION_UNHEALTHY = Object.freeze({
+  reachability: "reachable" as const,
+  health: "unhealthy" as const,
+});
+const MCP_AUTHENTICATION_UNAVAILABLE = Object.freeze({
+  reachability: "unavailable" as const,
+  health: "unknown" as const,
+});
+const MCP_AUTHENTICATION_CHALLENGE = 'Bearer realm="plurum"';
 
 interface ResponseSnapshot {
   readonly status: number;
@@ -184,6 +209,22 @@ function hasJsonContentType(
   return contentType !== undefined && JSON_CONTENT_TYPE.test(contentType);
 }
 
+function hasExactMcpAuthenticationChallenge(
+  headers: Readonly<Record<string, string>>,
+): boolean {
+  let challenge: string | undefined;
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() !== "www-authenticate") {
+      continue;
+    }
+    if (challenge !== undefined) {
+      return false;
+    }
+    challenge = value;
+  }
+  return challenge === MCP_AUTHENTICATION_CHALLENGE;
+}
+
 function exactHealthyBody(body: Uint8Array): boolean {
   try {
     const text = new TextDecoder("utf-8", {
@@ -265,6 +306,43 @@ export async function probeApiReachability(
       exactHealthyBody(response.body)
       ? HEALTHY
       : UNHEALTHY;
+  } finally {
+    wipe(response.body);
+  }
+}
+
+/*
+ * This deliberately checks only the hosted MCP HTTP authentication edge. It
+ * sends no credential and does not initialize an MCP session, list tools, or
+ * claim that a configured host has loaded the plugin.
+ */
+export async function probeMcpAuthenticationBoundary(
+  network: ReadOnlyNetworkAdapter,
+): Promise<McpAuthenticationBoundaryResult> {
+  const request: ReadOnlyNetworkRequest = Object.freeze({
+    url: PLURUM_MCP_ENDPOINT,
+    method: "GET" as const,
+    headers: Object.freeze({ Accept: "application/json" }),
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    maxResponseBytes: MAX_RESPONSE_BYTES,
+    redirect: "error" as const,
+  });
+
+  let response: ResponseSnapshot | undefined;
+  try {
+    response = snapshotResponse(await network.request(request));
+  } catch {
+    return MCP_AUTHENTICATION_UNAVAILABLE;
+  }
+  if (response === undefined) {
+    return MCP_AUTHENTICATION_UNAVAILABLE;
+  }
+
+  try {
+    return response.status === 401 &&
+      hasExactMcpAuthenticationChallenge(response.headers)
+      ? MCP_AUTHENTICATION_HEALTHY
+      : MCP_AUTHENTICATION_UNHEALTHY;
   } finally {
     wipe(response.body);
   }

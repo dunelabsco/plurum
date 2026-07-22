@@ -1,11 +1,11 @@
-import { Readable } from "node:stream";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 
 import { runCli } from "../src/cli.js";
-import { createStatusCommand } from "../src/commands/status.js";
+import { createDoctorCommand } from "../src/commands/doctor.js";
 import type { CommandHandlers } from "../src/commands/types.js";
 import type { CodexDotenvProjectionStatus } from "../src/credentials/codex-dotenv-contracts.js";
 import type { LegacyCredentialReadAdapter } from "../src/credentials/legacy-reader-contracts.js";
@@ -36,6 +36,9 @@ import type {
   NetworkResponse,
   SystemCapabilities,
 } from "../src/system/contracts.js";
+import type {
+  RuntimeSupportObservation,
+} from "../src/system/runtime-support.js";
 import { createInMemoryCredentialStore } from "./support/in-memory-credential-store.js";
 import { snapshotIsolatedTree } from "./support/isolated-tree-snapshot.js";
 import { createTestSystem } from "./support/system.js";
@@ -45,11 +48,12 @@ import {
 } from "./support/test-root.js";
 
 const ORIGIN = "https://api.plurum.ai";
-const KEY = "plrm_live_STATUS_COMMAND_CANONICAL_KEY";
-const AGENT_ID = "00000000-0000-4000-8000-000000000049";
+const MCP_ENDPOINT = "https://mcp.plurum.ai/mcp";
+const KEY = "plrm_live_DOCTOR_COMMAND_CANONICAL_KEY";
+const AGENT_ID = "00000000-0000-4000-8000-000000000050";
 const AGENT_NAME = "Codex";
-const USERNAME = "status-agent";
-const TIMESTAMP = "2026-07-21T12:01:00.000Z";
+const USERNAME = "doctor-agent";
+const TIMESTAMP = "2026-07-22T12:01:00.000Z";
 const DESIRED: Readonly<Record<HostId, DesiredHostConfiguration>> =
   Object.freeze({
     "claude-code": CLAUDE_CODE_DESIRED_CONFIGURATION,
@@ -89,6 +93,16 @@ function jsonResponse(body: unknown): NetworkResponse {
   });
 }
 
+function mcpChallengeResponse(): NetworkResponse {
+  return Object.freeze({
+    status: 401,
+    headers: Object.freeze({
+      "www-authenticate": 'Bearer realm="plurum"',
+    }),
+    body: new TextEncoder().encode("authentication required"),
+  });
+}
+
 function healthyConfiguration(host: HostId): HostConfiguration {
   const desired = DESIRED[host];
   return deepFreeze({
@@ -116,7 +130,7 @@ function healthyConfiguration(host: HostId): HostConfiguration {
 function healthyInspection(host: HostId): HostInspection {
   const desired = DESIRED[host];
   const executable =
-    host === "claude-code" ? "/trusted/bin/claude" : "/trusted/bin/codex";
+    host === "claude-code" ? "/fake/bin/claude" : "/fake/bin/codex";
   return deepFreeze({
     host,
     status: "available" as const,
@@ -149,7 +163,15 @@ function healthyInspection(host: HostId): HostInspection {
   });
 }
 
-function createFixture(projection: CodexDotenvProjectionStatus) {
+function createFixture(
+  runtimeObservation: RuntimeSupportObservation = Object.freeze({
+    status: "available" as const,
+    runtime: "node" as const,
+    version: "22.12.0",
+    target: "darwin-arm64",
+  }),
+  projection: CodexDotenvProjectionStatus = "exact",
+) {
   const document = serializeCredentialDocument(
     validateCredentialDocument({
       schema_version: 1,
@@ -160,7 +182,7 @@ function createFixture(projection: CodexDotenvProjectionStatus) {
       agent_name: AGENT_NAME,
       username: USERNAME,
       registration_request_id: null,
-      created_at: "2026-07-21T12:00:00.000Z",
+      created_at: "2026-07-22T12:00:00.000Z",
       updated_at: TIMESTAMP,
       activated_at: TIMESTAMP,
     }),
@@ -171,40 +193,43 @@ function createFixture(projection: CodexDotenvProjectionStatus) {
     "claude-code": healthyInspection("claude-code"),
     codex: healthyInspection("codex"),
   });
-  const state = deepFreeze({
-    filesystem: { revision: "memory-fs-v1", entries: [] as readonly string[] },
+  const semanticState = deepFreeze({
     credential: { document, legacy: "missing", codexProjection: projection },
     hosts: inspections,
   });
 
   const filesystemMutation = vi.fn(async (): Promise<never> => {
-    throw new Error("status must not mutate the filesystem");
+    throw new Error("doctor must not mutate the filesystem");
   });
   const processRun = vi.fn(async (): Promise<never> => {
-    throw new Error("status must not run a process");
+    throw new Error("doctor must not run a process");
   });
   const random = vi.fn((): never => {
-    throw new Error("status must not use randomness");
+    throw new Error("doctor must not use randomness");
   });
   const hostApply = vi.fn(async (): Promise<never> => {
-    throw new Error("status must not apply host changes");
+    throw new Error("doctor must not apply host changes");
   });
   const hostRollback = vi.fn(async (): Promise<never> => {
-    throw new Error("status must not roll back host changes");
+    throw new Error("doctor must not roll back host changes");
   });
+  const networkRequests: NetworkRequest[] = [];
   const scopeObservations: unknown[] = [];
+  const runtimeObserve = vi.fn(async () => runtimeObservation);
+  const legacyRead = vi.fn(async () =>
+    Object.freeze({ status: "missing" as const })
+  );
+  const projectionObserve = vi.fn(async () =>
+    Object.freeze({ status: projection })
+  );
+  const inspectClaude = vi.fn(async () => inspections["claude-code"]);
+  const inspectCodex = vi.fn(async () => inspections.codex);
   const base = createTestSystem();
   const inspection = Object.freeze({
     "claude-code": Object.freeze<HostInspectionAdapter>({
-      async inspect() {
-        return inspections["claude-code"];
-      },
+      inspect: inspectClaude,
     }),
-    codex: Object.freeze<HostInspectionAdapter>({
-      async inspect() {
-        return inspections.codex;
-      },
-    }),
+    codex: Object.freeze<HostInspectionAdapter>({ inspect: inspectCodex }),
   });
   const mutableHost = (host: HostId): HostMutationAdapter =>
     Object.freeze({
@@ -227,11 +252,15 @@ function createFixture(projection: CodexDotenvProjectionStatus) {
     hash: Object.freeze({
       sha256: () => new Uint8Array(32).fill(0x2a),
     }),
-    credentialEnvironment: Object.freeze({
-      read: () => Object.freeze({}),
+    platform: Object.freeze({
+      ...base.platform,
+      os: "darwin" as const,
+      arch: "arm64",
     }),
+    credentialEnvironment: Object.freeze({ read: () => Object.freeze({}) }),
     network: Object.freeze({
       async request(request: NetworkRequest) {
+        networkRequests.push(request);
         if (request.url === `${ORIGIN}/api/v1/agents/me`) {
           return jsonResponse({
             id: AGENT_ID,
@@ -242,6 +271,9 @@ function createFixture(projection: CodexDotenvProjectionStatus) {
         }
         if (request.url === `${ORIGIN}/health`) {
           return jsonResponse({ status: "healthy", version: "0.2.0" });
+        }
+        if (request.url === MCP_ENDPOINT) {
+          return mcpChallengeResponse();
         }
         throw new Error("unexpected fake network request");
       },
@@ -255,29 +287,24 @@ function createFixture(projection: CodexDotenvProjectionStatus) {
     }),
   });
 
-  const statusCommand = createStatusCommand(
+  const doctorCommand = createDoctorCommand(
     Object.freeze({
+      runtimeSupport: Object.freeze({ observe: runtimeObserve }),
       canonicalStore: canonical.adapter,
       legacyStore: Object.freeze<LegacyCredentialReadAdapter>({
-        async read() {
-          return Object.freeze({ status: "missing" as const });
-        },
+        read: legacyRead,
       }),
-      codexProjection: Object.freeze({
-        async observe() {
-          return Object.freeze({ status: projection });
-        },
-      }),
+      codexProjection: Object.freeze({ observe: projectionObserve }),
     }),
   );
   const handlers = Object.freeze<CommandHandlers>({
     setup: () => {
       throw new Error("unexpected setup");
     },
-    doctor: () => {
-      throw new Error("unexpected doctor");
+    status: () => {
+      throw new Error("unexpected status");
     },
-    status(invocation) {
+    doctor(invocation) {
       const scoped = invocation.runtime.system;
       const hostAdapters = Object.values(scoped.hosts.inspection);
       scopeObservations.push(
@@ -293,7 +320,7 @@ function createFixture(projection: CodexDotenvProjectionStatus) {
           hostRollback: hostAdapters.some((adapter) => "rollback" in adapter),
         }),
       );
-      return statusCommand(invocation);
+      return doctorCommand(invocation);
     },
   });
 
@@ -301,6 +328,15 @@ function createFixture(projection: CodexDotenvProjectionStatus) {
     system,
     handlers,
     scopeObservations,
+    networkRequests,
+    canonical,
+    observers: Object.freeze({
+      runtimeObserve,
+      legacyRead,
+      projectionObserve,
+      inspectClaude,
+      inspectCodex,
+    }),
     forbidden: Object.freeze({
       filesystemMutation,
       processRun,
@@ -310,11 +346,8 @@ function createFixture(projection: CodexDotenvProjectionStatus) {
     }),
     snapshot: () =>
       deepFreeze({
-        ...state,
-        credential: {
-          ...state.credential,
-          bytes: [...credentialBytes],
-        },
+        ...semanticState,
+        credentialBytes: [...credentialBytes],
       }),
   });
 }
@@ -353,8 +386,8 @@ async function invoke(
   });
 }
 
-function expectSafeAndUnchanged(fixture: Fixture, before: unknown): void {
-  expect(fixture.scopeObservations).toHaveLength(2);
+function expectScopeSafe(fixture: Fixture, expectedRuns: number): void {
+  expect(fixture.scopeObservations).toHaveLength(expectedRuns);
   for (const observation of fixture.scopeObservations) {
     expect(observation).toEqual({
       stdin: false,
@@ -369,19 +402,16 @@ function expectSafeAndUnchanged(fixture: Fixture, before: unknown): void {
   Object.values(fixture.forbidden).forEach((spy) =>
     expect(spy).not.toHaveBeenCalled(),
   );
-  const after = fixture.snapshot();
-  expectDeepFrozen(after);
-  expect(after).toEqual(before);
 }
 
-describe("status command integration", () => {
-  it("repeats a fully healthy canonical text observation without input or mutation", async () => {
-    const fixture = createFixture("exact");
+describe("doctor command integration", () => {
+  it("repeats a healthy text diagnosis through only read-only fake capabilities", async () => {
+    const fixture = createFixture();
     const before = fixture.snapshot();
     expectDeepFrozen(before);
 
-    const first = await invoke(fixture, ["status"]);
-    const second = await invoke(fixture, ["status"]);
+    const first = await invoke(fixture, ["doctor"]);
+    const second = await invoke(fixture, ["doctor"]);
 
     expect(second).toEqual(first);
     expect(first.exitCode).toBe(ExitCode.Success);
@@ -389,19 +419,47 @@ describe("status command integration", () => {
     expect(first.stderr).toBe("");
     expect(first.stdout).toContain("overall: healthy");
     expect(first.stdout).toContain(
-      "No local configuration changes were made.",
+      "MCP protocol initialization and tool inventory were not checked.",
+    );
+    expect(first.stdout).toMatch(
+      /No local configuration changes were made\.\n$/u,
     );
     expect(first.stdout).not.toContain(KEY);
-    expectSafeAndUnchanged(fixture, before);
+    expectScopeSafe(fixture, 2);
+    expect(fixture.snapshot()).toEqual(before);
+    expect(fixture.observers.runtimeObserve).toHaveBeenCalledTimes(2);
+    expect(fixture.observers.inspectClaude).toHaveBeenCalledTimes(2);
+    expect(fixture.observers.inspectCodex).toHaveBeenCalledTimes(2);
+
+    const mcpRequests = fixture.networkRequests.filter(
+      (request) => request.url === MCP_ENDPOINT,
+    );
+    expect(mcpRequests).toHaveLength(2);
+    for (const request of mcpRequests) {
+      expect(request).toEqual({
+        url: MCP_ENDPOINT,
+        method: "GET",
+        headers: { Accept: "application/json" },
+        timeoutMs: 12_000,
+        maxResponseBytes: 4_096,
+        redirect: "error",
+      });
+      expect(request.headers).not.toHaveProperty("Authorization");
+      expect(request).not.toHaveProperty("body");
+    }
   });
 
-  it("repeats an ok:true attention JSON observation with exit 1", async () => {
-    const fixture = createFixture("absent");
+  it("short-circuits unsupported runtime before credentials, hosts, or network", async () => {
+    const fixture = createFixture(Object.freeze({
+      status: "available" as const,
+      runtime: "node" as const,
+      version: "20.19.0",
+      target: "darwin-arm64",
+    }));
     const before = fixture.snapshot();
-    expectDeepFrozen(before);
 
-    const first = await invoke(fixture, ["status", "--json"]);
-    const second = await invoke(fixture, ["status", "--json"]);
+    const first = await invoke(fixture, ["doctor", "--json"]);
+    const second = await invoke(fixture, ["doctor", "--json"]);
 
     expect(second).toEqual(first);
     expect(first.exitCode).toBe(ExitCode.OperationalFailure);
@@ -411,36 +469,132 @@ describe("status command integration", () => {
     expect(JSON.parse(first.stdout)).toMatchObject({
       schema_version: 1,
       ok: true,
-      command: "status",
+      command: "doctor",
       result: {
         overall: "attention-required",
-        credential: { state: "ready", sources: ["canonical"] },
-        clients: [
-          { client: "claude-code", status: "healthy" },
+        runtime_platform: {
+          status: "unsupported",
+          reason: "node-version",
+        },
+        status: null,
+        mcp: null,
+        findings: [
           {
-            client: "codex",
-            status: "healthy",
-            credential_projection: "absent",
+            check: "runtime-platform",
+            outcome: "attention",
+            guidance: ["update-runtime"],
           },
+          { check: "status", outcome: "not-checked" },
+          {
+            check: "mcp-authentication-boundary",
+            outcome: "not-checked",
+          },
+          { check: "mcp-protocol", outcome: "not-checked" },
         ],
       },
     });
-    expectSafeAndUnchanged(fixture, before);
+    expectScopeSafe(fixture, 2);
+    expect(fixture.snapshot()).toEqual(before);
+    expect(fixture.observers.runtimeObserve).toHaveBeenCalledTimes(2);
+    expect(fixture.canonical.trace.operations()).toEqual([]);
+    expect(fixture.observers.legacyRead).not.toHaveBeenCalled();
+    expect(fixture.observers.projectionObserve).not.toHaveBeenCalled();
+    expect(fixture.observers.inspectClaude).not.toHaveBeenCalled();
+    expect(fixture.observers.inspectCodex).not.toHaveBeenCalled();
+    expect(fixture.networkRequests).toEqual([]);
+  });
+
+  it("separates host/plugin health from unsafe Codex projection", async () => {
+    const fixture = createFixture(
+      Object.freeze({
+        status: "available" as const,
+        runtime: "node" as const,
+        version: "22.12.0",
+        target: "darwin-arm64",
+      }),
+      "unsafe",
+    );
+
+    const result = await invoke(fixture, ["doctor", "--json"]);
+    const envelope = JSON.parse(result.stdout);
+    const codexFindings = envelope.result.findings.filter(
+      (entry: { client: string | null }) => entry.client === "codex",
+    );
+
+    expect(result.exitCode).toBe(ExitCode.OperationalFailure);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).not.toContain(KEY);
+    expect(codexFindings).toEqual([
+      {
+        check: "host",
+        outcome: "pass",
+        reason: "host-supported",
+        client: "codex",
+        guidance: [],
+      },
+      {
+        check: "plugin-configuration",
+        outcome: "pass",
+        reason: "plugin-configuration-healthy",
+        client: "codex",
+        guidance: [],
+      },
+      {
+        check: "local-registration",
+        outcome: "pass",
+        reason: "local-plugin-registration-healthy",
+        client: "codex",
+        guidance: [],
+      },
+      {
+        check: "credential-projection",
+        outcome: "attention",
+        reason: "credential-projection-unsafe",
+        client: "codex",
+        guidance: ["secure-credential-source-manually"],
+      },
+    ]);
+    expectScopeSafe(fixture, 1);
+  });
+
+  it("keeps setup guidance within the requested client scope", async () => {
+    const fixture = createFixture(
+      Object.freeze({
+        status: "available" as const,
+        runtime: "node" as const,
+        version: "22.12.0",
+        target: "darwin-arm64",
+      }),
+      "absent",
+    );
+
+    const result = await invoke(fixture, [
+      "doctor",
+      "--client",
+      "codex",
+    ]);
+
+    expect(result.exitCode).toBe(ExitCode.OperationalFailure);
+    expect(result.stdout).toContain("plurum setup --client codex");
+    expect(result.stdout).not.toContain("plurum setup --client all");
+    expect(fixture.observers.inspectClaude).not.toHaveBeenCalled();
+    expect(fixture.observers.inspectCodex).toHaveBeenCalledOnce();
+    expectScopeSafe(fixture, 1);
   });
 });
 
 describe.runIf(isIsolatedTestEnvironmentSafe())(
-  "status command disposable-home boundary",
+  "doctor command disposable-home boundary",
   () => {
-    it("leaves an actual sentinel-protected temporary home byte-for-byte unchanged", async () => {
+    it("leaves a sentinel-protected temporary home byte-for-byte unchanged", async () => {
       const isolated = await createIsolatedTestRoot();
       try {
         await writeFile(
-          join(isolated.paths.plurum, "status-marker.txt"),
-          "status must leave this disposable home unchanged\n",
+          join(isolated.paths.plurum, "doctor-marker.txt"),
+          "doctor must leave this disposable home unchanged\n",
           { encoding: "utf8", flag: "wx", mode: 0o600 },
         );
-        const baseFixture = createFixture("exact");
+        const baseFixture = createFixture();
         const fixture: Fixture = Object.freeze({
           ...baseFixture,
           system: Object.freeze({
@@ -457,12 +611,13 @@ describe.runIf(isIsolatedTestEnvironmentSafe())(
           isolated.paths.root,
         );
 
-        const first = await invoke(fixture, ["status"]);
-        const second = await invoke(fixture, ["status"]);
+        const first = await invoke(fixture, ["doctor"]);
+        const second = await invoke(fixture, ["doctor"]);
 
         expect(first.exitCode).toBe(ExitCode.Success);
         expect(second).toEqual(first);
-        expectSafeAndUnchanged(fixture, semanticBefore);
+        expectScopeSafe(fixture, 2);
+        expect(fixture.snapshot()).toEqual(semanticBefore);
         expect(await snapshotIsolatedTree(isolated.paths.root)).toEqual(
           filesystemBefore,
         );
