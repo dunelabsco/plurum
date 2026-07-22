@@ -578,7 +578,7 @@ function inspectPackage(
   }
   const rootIdentity = directDirectory(packageRoot);
   const trustedOwner = rootIdentity.owner;
-  const enforcePosixTrust = TARGET_PACKAGE_METADATA[target].os !== "win32";
+  const enforcePosixTrust = sep === "/";
   const nodeModulesRoot = dirname(packageRoot);
   if (basename(nodeModulesRoot) !== "node_modules") {
     throw new Error("Plurum package is outside an npm install tree");

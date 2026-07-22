@@ -560,6 +560,18 @@ describe("native credential package resolver", () => {
     expect(loader).not.toHaveBeenCalled();
   });
 
+  it("derives POSIX trust from the filesystem rather than the package target", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const fixture = createFixture({ target: "win32-x64-msvc" });
+    chmodSync(fixture.artifactPath, 0o666);
+    const loader = vi.fn(() => createNativeModule("win32-x64-msvc"));
+
+    expect(loadFixture(fixture, loader)).toEqual(unavailable());
+    expect(loader).not.toHaveBeenCalled();
+  });
+
   it("rejects linked package paths and artifact paths", () => {
     if (process.platform === "win32") {
       return;

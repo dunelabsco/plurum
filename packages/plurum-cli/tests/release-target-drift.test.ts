@@ -8,6 +8,7 @@ import { CLI_VERSION } from "../src/version.js";
 import {
   RECOGNIZED_RUNTIME_TARGETS,
   RELEASED_RUNTIME_TARGETS,
+  SUPPORTED_NODE_RUNTIME_RANGES,
 } from "../src/system/runtime-support.js";
 
 interface NativeWorkflowRow {
@@ -42,6 +43,41 @@ const packageMetadata = JSON.parse(
 ) as Readonly<{
   optionalDependencies?: Readonly<Record<string, string>>;
 }>;
+const packageLock = JSON.parse(
+  readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"),
+) as Readonly<{
+  packages: Readonly<
+    Record<
+      string,
+      Readonly<{
+        version?: string;
+        cpu?: readonly string[];
+        libc?: readonly string[];
+        license?: string;
+        optional?: boolean;
+        os?: readonly string[];
+        engines?: Readonly<{ node?: string }>;
+        optionalDependencies?: Readonly<Record<string, string>>;
+      }>
+    >
+  >;
+}>;
+
+const nativeLockPlatformByTarget = Object.freeze({
+  "darwin-arm64": Object.freeze({ os: "darwin", cpu: "arm64", libc: null }),
+  "darwin-x64": Object.freeze({ os: "darwin", cpu: "x64", libc: null }),
+  "linux-arm64-gnu": Object.freeze({
+    os: "linux",
+    cpu: "arm64",
+    libc: "glibc",
+  }),
+  "linux-x64-gnu": Object.freeze({
+    os: "linux",
+    cpu: "x64",
+    libc: "glibc",
+  }),
+  "win32-x64-msvc": Object.freeze({ os: "win32", cpu: "x64", libc: null }),
+} as const);
 
 function source(relativePath: string): readonly string[] {
   const text = readFileSync(new URL(relativePath, import.meta.url), "utf8");
@@ -410,6 +446,43 @@ describe("native release target drift", () => {
     }
   });
 
+  it("keeps every native optional dependency represented in the npm lock", () => {
+    const packageNames = exactUnique(
+      Object.values(NATIVE_CREDENTIAL_PACKAGE_BY_TARGET),
+      "native package names",
+    );
+    const expectedLockPaths = packageNames.map(
+      (name) => `node_modules/${name}`,
+    );
+    const nativeLockPaths = Object.keys(packageLock.packages)
+      .filter((path) => path.startsWith("node_modules/@dunelabs/plurum-native-"))
+      .sort();
+
+    expect(packageLock.packages[""]?.optionalDependencies).toEqual(
+      packageMetadata.optionalDependencies,
+    );
+    expect(nativeLockPaths).toEqual(expectedLockPaths);
+
+    for (const target of RELEASED_RUNTIME_TARGETS) {
+      const name = NATIVE_CREDENTIAL_PACKAGE_BY_TARGET[target];
+      const platform = nativeLockPlatformByTarget[target];
+      const locked = packageLock.packages[`node_modules/${name}`];
+
+      expect(locked).toBeDefined();
+      expect(locked?.version).toBe(CLI_VERSION);
+      expect(locked?.license).toBe("Apache-2.0");
+      expect(locked?.optional).toBe(true);
+      expect(locked?.os).toEqual([platform.os]);
+      expect(locked?.cpu).toEqual([platform.cpu]);
+      expect(locked?.libc).toEqual(
+        platform.libc === null ? undefined : [platform.libc],
+      );
+      expect(locked?.engines).toEqual({
+        node: SUPPORTED_NODE_RUNTIME_RANGES.join(" || "),
+      });
+    }
+  });
+
   it("keeps the native CI matrix bound to build and ABI verification", () => {
     expect(exactLineCount(nativeWorkflowJob, "    runs-on: ${{ matrix.os }}")).toBe(1);
     expect(
@@ -714,6 +787,83 @@ describe("native release target drift", () => {
       exactLineCount(
         nativePackageAssembler,
         "    const canonicalPath = realpathSync(value);",
+      ),
+    ).toBe(1);
+  });
+
+  it("limits Cargo's non-macOS release hard-link allowance to its isolated sibling", () => {
+    const strictFileCheck = uniqueLine(
+      nativePackageAssembler,
+      "function assertDirectRegularFile(path, label, maxBytes) {",
+    );
+    const cargoFileCheck = uniqueFollowingLine(
+      nativePackageAssembler,
+      "function assertControlledCargoArtifact(path, cargoTarget, descriptor) {",
+      strictFileCheck,
+    );
+    const nextFileCheck = uniqueFollowingLine(
+      nativePackageAssembler,
+      "function assertPortablePackageFileMode(metadata, label) {",
+      cargoFileCheck,
+    );
+    const strictFileCheckBody = nativePackageAssembler.slice(
+      strictFileCheck,
+      cargoFileCheck,
+    );
+    const cargoFileCheckBody = nativePackageAssembler.slice(
+      cargoFileCheck,
+      nextFileCheck,
+    );
+
+    expect(strictFileCheckBody).toContain(
+      "  assert.equal(metadata.nlink, 1, `${label} must have one link`);",
+    );
+    expect(strictFileCheckBody).not.toContain("metadata.nlink === 2");
+    expect(cargoFileCheckBody).toContain(
+      '    join(releaseDirectory, descriptor.binary),',
+    );
+    expect(cargoFileCheckBody).toContain(
+      '    process.platform === "linux" || process.platform === "win32",',
+    );
+    expect(cargoFileCheckBody).toContain(
+      "    `${label} may only use Cargo's second release link on Linux or Windows`,",
+    );
+    expect(cargoFileCheckBody).toContain(
+      "  assert.equal(metadata.nlink, 2, `${label} must have one or two links`);",
+    );
+    expect(cargoFileCheckBody).toContain(
+      '  const dependenciesDirectory = join(releaseDirectory, "deps");',
+    );
+    expect(cargoFileCheckBody).toContain(
+      "  const dependencyArtifact = join(dependenciesDirectory, descriptor.binary);",
+    );
+    expect(cargoFileCheckBody).toContain(
+      '    "Cargo dependency artifact must account for the second release link",',
+    );
+    expect(cargoFileCheckBody).toContain(
+      '    "Cargo release links must identify the same artifact",',
+    );
+    expect(
+      nativePackageAssembler.filter((line) =>
+        line.includes("assertDirectOwnedRegularFile("),
+      ),
+    ).toHaveLength(4);
+
+    expect(
+      exactLineCount(
+        nativePackageAssembler,
+        "  const cargoMetadata = assertControlledCargoArtifact(",
+      ),
+    ).toBe(1);
+    expect(
+      nativePackageAssembler.filter(
+        (line) => line.trim() === "assertControlledCargoArtifact(",
+      ),
+    ).toHaveLength(2);
+    expect(
+      exactLineCount(
+        nativePackageAssembler,
+        "    const stagedMetadata = assertDirectRegularFile(",
       ),
     ).toBe(1);
   });

@@ -145,16 +145,85 @@ function pathExists(path) {
   }
 }
 
-function assertDirectRegularFile(path, label, maxBytes) {
+function assertDirectOwnedRegularFile(path, label, maxBytes) {
   const metadata = lstatSync(path);
   assert.equal(metadata.isSymbolicLink(), false, `${label} must not be a symlink`);
   assert.equal(metadata.isFile(), true, `${label} must be a regular file`);
-  assert.equal(metadata.nlink, 1, `${label} must have one link`);
   assert.equal(metadata.size > 0, true, `${label} must not be empty`);
   assert.equal(metadata.size <= maxBytes, true, `${label} exceeded its byte limit`);
   if (process.platform !== "win32") {
     assert.equal(metadata.uid, process.getuid?.(), `${label} must be user-owned`);
   }
+  return metadata;
+}
+
+function assertDirectRegularFile(path, label, maxBytes) {
+  const metadata = assertDirectOwnedRegularFile(path, label, maxBytes);
+  assert.equal(metadata.nlink, 1, `${label} must have one link`);
+  return metadata;
+}
+
+function assertControlledCargoArtifact(path, cargoTarget, descriptor) {
+  const label = "Cargo native artifact";
+  const releaseDirectory = join(cargoTarget, "release");
+  assert.equal(
+    path,
+    join(releaseDirectory, descriptor.binary),
+    `${label} must use the fixed release path`,
+  );
+  assertDirectDirectory(releaseDirectory, "isolated Cargo release directory");
+  assert.equal(
+    realpathSync(releaseDirectory),
+    resolve(releaseDirectory),
+    "isolated Cargo release directory must be direct",
+  );
+  assert.equal(realpathSync(path), resolve(path), `${label} must be direct`);
+  const metadata = assertDirectOwnedRegularFile(
+    path,
+    label,
+    MAX_NATIVE_ARTIFACT_BYTES,
+  );
+  if (metadata.nlink === 1) {
+    return metadata;
+  }
+
+  assert.equal(
+    process.platform === "linux" || process.platform === "win32",
+    true,
+    `${label} may only use Cargo's second release link on Linux or Windows`,
+  );
+  assert.equal(metadata.nlink, 2, `${label} must have one or two links`);
+  const dependenciesDirectory = join(releaseDirectory, "deps");
+  assertDirectDirectory(
+    dependenciesDirectory,
+    "isolated Cargo release dependencies directory",
+  );
+  assert.equal(
+    realpathSync(dependenciesDirectory),
+    resolve(dependenciesDirectory),
+    "isolated Cargo release dependencies directory must be direct",
+  );
+  const dependencyArtifact = join(dependenciesDirectory, descriptor.binary);
+  assert.equal(
+    realpathSync(dependencyArtifact),
+    resolve(dependencyArtifact),
+    "Cargo dependency artifact must be direct",
+  );
+  const dependencyMetadata = assertDirectOwnedRegularFile(
+    dependencyArtifact,
+    "Cargo dependency artifact",
+    MAX_NATIVE_ARTIFACT_BYTES,
+  );
+  assert.equal(
+    dependencyMetadata.nlink,
+    2,
+    "Cargo dependency artifact must account for the second release link",
+  );
+  assert.deepEqual(
+    fileIdentity(dependencyMetadata),
+    fileIdentity(metadata),
+    "Cargo release links must identify the same artifact",
+  );
   return metadata;
 }
 
@@ -781,21 +850,20 @@ export function assembleNativeTargetPackage(options = {}) {
   );
 
   const cargoBinary = join(isolation.cargoTarget, "release", descriptor.binary);
-  assert.equal(realpathSync(cargoBinary), resolve(cargoBinary));
-  const cargoMetadata = assertDirectRegularFile(
+  const cargoMetadata = assertControlledCargoArtifact(
     cargoBinary,
-    "Cargo native artifact",
-    MAX_NATIVE_ARTIFACT_BYTES,
+    isolation.cargoTarget,
+    descriptor,
   );
   const cargoIdentity = fileIdentity(cargoMetadata);
   const cargoBytes = readFileSync(cargoBinary);
   assert.equal(cargoBytes.byteLength, cargoMetadata.size);
   assert.deepEqual(
     fileIdentity(
-      assertDirectRegularFile(
+      assertControlledCargoArtifact(
         cargoBinary,
-        "Cargo native artifact",
-        MAX_NATIVE_ARTIFACT_BYTES,
+        isolation.cargoTarget,
+        descriptor,
       ),
     ),
     cargoIdentity,
@@ -890,10 +958,10 @@ export function assembleNativeTargetPackage(options = {}) {
     assert.equal(sha256(readFileSync(stagedArtifact)), cargoDigest);
     assert.deepEqual(
       fileIdentity(
-        assertDirectRegularFile(
+        assertControlledCargoArtifact(
           cargoBinary,
-          "Cargo native artifact",
-          MAX_NATIVE_ARTIFACT_BYTES,
+          isolation.cargoTarget,
+          descriptor,
         ),
       ),
       cargoIdentity,
