@@ -49,6 +49,15 @@ is not wired to the process runtime. This core still has no production/native
 credential adapter or command wiring, so normal setup apply remains explicitly
 unavailable.
 
+An isolated status core now composes canonical and legacy credential
+discovery, agent validation, fixed API health probing, semantic host
+inspection, and the Codex credential projection into one versioned report.
+Text and JSON renderers expose only allowlisted fields, reject credential- or
+path-shaped values, and return a nonzero result when the observation needs
+attention. The default status handler remains unavailable until the native
+read-only credential, host, Codex, filesystem, and network composition passes
+the disposable-home release tests.
+
 The completed CLI will expose only:
 
 ```text
@@ -58,7 +67,8 @@ plurum doctor
 ```
 
 `setup` will perform the complete recoverable onboarding flow. `status` and
-`doctor` will remain read-only. The CLI will not install a local MCP runtime.
+`doctor` will remain locally non-mutating. The CLI will not install a local MCP
+runtime.
 
 ## Safety boundary
 
@@ -72,11 +82,14 @@ native semantic bridge and platform adapters now exercise those cores in
 isolated tests. They remain deliberately unwired from commands: the package has
 no native artifact resolver or runtime import, so no command can access a real
 credential path.
-Portable read-only command code cannot mutate local or product state or use the
-generic process capability. Native host inspection remains a separate,
-narrowly bounded semantic capability that may perform only each host's fixed
-read operations. Status and doctor are restricted to GET requests; any later
-protocol-level MCP diagnostic will require its own narrowly defined capability.
+Portable read-only command code cannot mutate local state, call product write
+endpoints, or use the generic process capability. Native host inspection
+remains a separate, narrowly bounded semantic capability that may perform only
+each host's fixed read operations. Status and doctor are restricted to GET
+requests. Authenticated validation currently advances server-maintained agent
+activity metadata, so locally read-only does not mean remotely side-effect-free.
+Any later protocol-level MCP diagnostic will require its own narrowly defined
+capability.
 Dry-run setup resolves credential destination names and uses only semantic host
 inspection. It cannot directly read arbitrary file contents, credential
 sources, stdin, authenticated network state, randomness, or host-mutation

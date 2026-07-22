@@ -101,9 +101,80 @@ const exactCodexCredentialBoundaryImports = new Map([
       ],
     ]),
   ],
+  [
+    "src/commands/status-observation.ts",
+    new Map([
+      [
+        "src/credentials/codex-dotenv-status.js",
+        [
+          "observeCodexDotenvStatus",
+          "type:CodexDotenvStatusObservationAdapter",
+        ],
+      ],
+    ]),
+  ],
 ]);
 const exactHostExecutionDisplayImports = new Map([
   ["src/commands/setup-display.js", ["setupDisplayText"]],
+]);
+const statusReadOnlyFiles = new Set([
+  "src/hosts/status.ts",
+  "src/api/reachability.ts",
+  "src/credentials/codex-dotenv-status.ts",
+]);
+const statusReflectionFiles = new Set([
+  "src/api/reachability.ts",
+  "src/credentials/codex-dotenv-status.ts",
+]);
+const statusForbiddenModuleStems = Object.freeze([
+  "src/api/agent-registration",
+  "src/api/agent-username",
+  "src/credentials/codex-containment",
+  "src/credentials/codex-dotenv-projection",
+  "src/credentials/codex-dotenv-setup-observation",
+  "src/credentials/store-mutation-contracts",
+  "src/credentials/store-observer",
+  "src/credentials/store-transaction",
+  "src/credentials/store-writer",
+  "src/hosts/claude-code/adapter",
+  "src/hosts/claude-code/commands",
+  "src/hosts/codex/adapter",
+  "src/hosts/codex/commands",
+  "src/hosts/process-policy",
+  "src/hosts/reconciler",
+  "src/system/host-mutation-boundary",
+]);
+const statusForbiddenSystemContractBindings = new Set([
+  "DirectoryHandleAdapter",
+  "FileSystemAdapter",
+  "HostCapabilities",
+  "NetworkAdapter",
+  "PlanningCapabilities",
+  "ProcessAdapter",
+  "ProcessRequest",
+  "ProcessResult",
+  "RandomAdapter",
+  "SetupCapabilities",
+  "SetupPreflightCapabilities",
+  "SystemCapabilities",
+  "WritableFileHandleAdapter",
+]);
+const statusForbiddenHostContractBindings = new Set([
+  "HostAction",
+  "HostActionKind",
+  "HostApplyRequest",
+  "HostMutationAdapter",
+  "HostMutationResult",
+  "HostRollbackRecipe",
+  "HostRollbackRequest",
+  "ReconciliationPlan",
+]);
+const exactStatusCodexContractImports = Object.freeze([
+  "CODEX_DOTENV_PROJECTION_STATUSES",
+  "type:CodexDotenvProjectionStatus",
+]);
+const exactStatusDiagnosticRuntimeImports = Object.freeze([
+  "type:DiagnosticRuntime",
 ]);
 const sourceModuleExtensions = Object.freeze([
   "",
@@ -280,7 +351,10 @@ const restrictedCapabilityImports = Object.freeze([
   Object.freeze({
     module: "src/hosts/planner",
     binding: "createHostPreflightPlan",
-    allowedFiles: new Set(["src/commands/setup-preflight.ts"]),
+    allowedFiles: new Set([
+      "src/commands/setup-preflight.ts",
+      "src/hosts/status.ts",
+    ]),
   }),
   Object.freeze({
     module: "src/hosts/reconciler",
@@ -335,6 +409,43 @@ function moduleMatchesStem(resolvedModule, stem) {
   );
 }
 
+function isStatusReadOnlyFile(relativePath) {
+  return (
+    statusReadOnlyFiles.has(relativePath) ||
+    /^src\/commands\/status(?:-[a-z0-9-]+)?\.ts$/u.test(relativePath)
+  );
+}
+
+function isStatusRenderFile(relativePath) {
+  return /^src\/commands\/status-(?:output|render(?:-[a-z0-9-]+)?)\.ts$/u.test(
+    relativePath,
+  );
+}
+
+function isStatusForbiddenModule(resolvedModule) {
+  if (resolvedModule === undefined) {
+    return false;
+  }
+  return (
+    resolvedModule.startsWith("src/adapters/node/") ||
+    resolvedModule.startsWith("src/registration/") ||
+    moduleMatchesStem(resolvedModule, "src/commands/setup") ||
+    resolvedModule.startsWith("src/commands/setup-") ||
+    /^src\/hosts\/journal-/u.test(resolvedModule) ||
+    moduleMatchesStem(resolvedModule, "src/system/denied") ||
+    moduleMatchesStem(resolvedModule, "src/system/scopes") ||
+    statusForbiddenModuleStems.some((stem) =>
+      moduleMatchesStem(resolvedModule, stem),
+    )
+  );
+}
+
+function importedBindingName(specifier) {
+  return specifier.type === "ImportSpecifier"
+    ? (specifier.imported.name ?? specifier.imported.value)
+    : undefined;
+}
+
 function restrictionsForModule(resolvedModule) {
   if (resolvedModule === undefined) {
     return [];
@@ -354,6 +465,8 @@ function isAllowedBoundaryReflectReference(relativePath, node, parent) {
   const allowedMembers =
     relativePath === "src/adapters/node/native-credential-store.ts"
       ? ["apply", "ownKeys"]
+      : statusReflectionFiles.has(relativePath)
+        ? ["ownKeys"]
       : [
             "src/credentials/codex-dotenv-projection.ts",
             "src/hosts/codex/adapter.ts",
@@ -682,6 +795,109 @@ function scanText(relativePath, text) {
     }
   }
 
+  function validateStatusReadOnlyImport(
+    sourceNode,
+    resolvedModule,
+    declaration,
+  ) {
+    if (!isStatusReadOnlyFile(relativePath) || resolvedModule === undefined) {
+      return;
+    }
+
+    const reportBoundary = (reason) =>
+      report(sourceNode, "status-read-only-boundary", reason);
+
+    if (isStatusForbiddenModule(resolvedModule)) {
+      reportBoundary(
+        "status modules must not import setup, mutation, reconciliation, process, random, or native adapter capabilities",
+      );
+      return;
+    }
+
+    if (
+      isStatusRenderFile(relativePath) &&
+      (resolvedModule.startsWith("src/credentials/") ||
+        resolvedModule.startsWith("src/api/") ||
+        moduleMatchesStem(
+          resolvedModule,
+          "src/commands/status-observation",
+        ))
+    ) {
+      reportBoundary(
+        "status renderers may consume only public status contracts, not discovery or secret-bearing modules",
+      );
+      return;
+    }
+
+    if (
+      moduleMatchesStem(
+        resolvedModule,
+        "src/credentials/codex-dotenv-contracts",
+      )
+    ) {
+      if (
+        relativePath !== "src/credentials/codex-dotenv-status.ts" ||
+        declaration?.type !== "ImportDeclaration" ||
+        JSON.stringify(importBindings(declaration)) !==
+          JSON.stringify([...exactStatusCodexContractImports].sort())
+      ) {
+        reportBoundary(
+          "status may import only the reviewed read-only Codex projection status symbols",
+        );
+      }
+      return;
+    }
+
+    const broadContract = moduleMatchesStem(
+      resolvedModule,
+      "src/system/contracts",
+    )
+      ? statusForbiddenSystemContractBindings
+      : moduleMatchesStem(resolvedModule, "src/hosts/contracts")
+        ? statusForbiddenHostContractBindings
+        : null;
+    if (broadContract !== null) {
+      if (declaration?.type !== "ImportDeclaration") {
+        reportBoundary(
+          "status modules must not re-export broad capability contracts",
+        );
+        return;
+      }
+      if (declaration.specifiers.length === 0) {
+        reportBoundary(
+          "status modules require exact named imports from broad capability contracts",
+        );
+        return;
+      }
+      for (const specifier of declaration.specifiers) {
+        const imported = importedBindingName(specifier);
+        if (
+          imported === undefined ||
+          broadContract.has(imported)
+        ) {
+          reportBoundary(
+            "status modules must not import mutation-capable, process, random, or full-system contracts",
+          );
+          return;
+        }
+      }
+    }
+
+    if (moduleMatchesStem(resolvedModule, "src/runtime")) {
+      if (
+        !isStatusRenderFile(relativePath) ||
+        declaration?.type !== "ImportDeclaration" ||
+        JSON.stringify(importBindings(declaration)) !==
+          JSON.stringify(exactStatusDiagnosticRuntimeImports)
+      ) {
+        reportBoundary(
+          "only status renderers may type-import the exact DiagnosticRuntime contract; CliRuntime and runtime values are forbidden",
+        );
+      }
+      return;
+    }
+  }
+
   function validateModule(node, specifier, importNode) {
     let resolvedModule;
     if (specifier.toLowerCase().endsWith(".node")) {
@@ -732,6 +948,8 @@ function scanText(relativePath, text) {
         );
       }
     }
+
+    validateStatusReadOnlyImport(node, resolvedModule, importNode);
 
     if (resolvedModule?.startsWith("src/adapters/node/")) {
       const insideAdapter = relativePath.startsWith("src/adapters/node/");
@@ -990,9 +1208,11 @@ function scanText(relativePath, text) {
               "src/commands/setup-credential-plan.ts",
               "src/commands/setup-host-execution.ts",
               "src/commands/setup-registration-execution.ts",
+              "src/api/reachability.ts",
               "src/credentials/codex-containment.ts",
               "src/credentials/codex-dotenv-projection.ts",
               "src/credentials/codex-dotenv-setup-observation.ts",
+              "src/credentials/codex-dotenv-status.ts",
               "src/credentials/store-observer.ts",
               "src/data/uint8-array.ts",
               "src/hosts/claude-code/adapter.ts",
@@ -1032,13 +1252,16 @@ function scanText(relativePath, text) {
         );
       }
       if (
-        [
-          "src/adapters/node/native-credential-store.ts",
-          "src/data/uint8-array.ts",
-        ].includes(relativePath) &&
+        ([
+            "src/adapters/node/native-credential-store.ts",
+            "src/data/uint8-array.ts",
+          ].includes(relativePath) ||
+          statusReflectionFiles.has(relativePath)) &&
         objectName === "Reflect" &&
         (relativePath === "src/adapters/node/native-credential-store.ts"
           ? ["apply", "ownKeys"]
+          : statusReflectionFiles.has(relativePath)
+            ? ["ownKeys"]
           : ["apply"]
         ).includes(propertyName) &&
         !(
@@ -1844,6 +2067,126 @@ const negativeFixtures = [
   ["src/example.ts", "(() => {}).constructor('return process')();", "dynamic-code"],
   ["src/example.ts", 'Date["now"]();', "clock-global"],
   ["src/example.ts", 'Math["random"]();', "random-global"],
+  [
+    "src/api/reachability.ts",
+    "Object.getOwnPropertyDescriptors({});",
+    "dynamic-code",
+  ],
+  [
+    "src/api/reachability.ts",
+    "Object.setPrototypeOf({}, null);",
+    "dynamic-code",
+  ],
+  [
+    "src/api/reachability.ts",
+    "Reflect.apply(() => undefined, undefined, []);",
+    "dynamic-code",
+  ],
+  [
+    "src/api/reachability.ts",
+    "const getPrototype = Object.getPrototypeOf; getPrototype({});",
+    "dynamic-code",
+  ],
+  [
+    "src/commands/status-observation.ts",
+    'import { createSetupRegistrationExecutionAttempt } from "./setup-registration-execution.js";',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-observation.ts",
+    'import { runExclusiveObservedCredentialSetup as observe } from "../credentials/store-writer.js"; void observe;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-observation.ts",
+    'import * as journal from "../hosts/journal-codec.js"; void journal;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-observation.ts",
+    'export * from "../hosts/codex/commands.js";',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-observation.ts",
+    'import { nodeRandom } from "../adapters/node/random.js"; void nodeRandom;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-contracts.ts",
+    'import type { ProcessAdapter as StatusProcess } from "../system/contracts.js"; type Process = StatusProcess;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/hosts/status.ts",
+    'import type { HostMutationAdapter as Inspector } from "./contracts.js"; type Adapter = Inspector;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-observation.ts",
+    'import * as projection from "../credentials/codex-dotenv-projection.js"; void projection;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/credentials/codex-dotenv-status.ts",
+    'import * as contracts from "./codex-dotenv-contracts.js"; void contracts;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/credentials/codex-dotenv-status.ts",
+    'export type { CodexDotenvProjectionAdapter } from "./codex-dotenv-contracts.js";',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-output.ts",
+    'import type { ResolvedCredential } from "../credentials/discovery.js"; type Credential = ResolvedCredential;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-output.ts",
+    'import type { ApiKey as DisplayKey } from "../credentials/schema.js"; type Key = DisplayKey;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-output.ts",
+    'import * as discovery from "../credentials/discovery.js"; void discovery;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-output.ts",
+    'export * from "../credentials/discovery.js";',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-output.ts",
+    'import { observeStatus } from "./status-observation.js"; void observeStatus;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-output.ts",
+    'import type { CliRuntime } from "../runtime.js"; type Runtime = CliRuntime;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-output.ts",
+    'import type { DiagnosticRuntime, CliRuntime } from "../runtime.js"; type Runtime = DiagnosticRuntime & CliRuntime;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-output.ts",
+    'import { DiagnosticRuntime } from "../runtime.js"; void DiagnosticRuntime;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-observation.ts",
+    'import type { DiagnosticRuntime } from "../runtime.js"; type Runtime = DiagnosticRuntime;',
+    "status-read-only-boundary",
+  ],
+  [
+    "src/commands/status-contracts.ts",
+    'export type { DiagnosticRuntime } from "../runtime.js";',
+    "status-read-only-boundary",
+  ],
 ];
 
 const positiveFixtures = [
@@ -1945,6 +2288,26 @@ const positiveFixtures = [
   [
     "src/data/uint8-array.ts",
     'const getter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), "byteLength")?.get; Reflect.apply(getter, new Uint8Array(), []);',
+  ],
+  [
+    "src/hosts/status.ts",
+    'import { createHostPreflightPlan } from "./planner.js"; createHostPreflightPlan({}, {});',
+  ],
+  [
+    "src/credentials/codex-dotenv-status.ts",
+    'import { CODEX_DOTENV_PROJECTION_STATUSES, type CodexDotenvProjectionStatus } from "./codex-dotenv-contracts.js"; Object.getOwnPropertyDescriptor({}, "key"); Object.getPrototypeOf({}); Reflect.ownKeys({}); void CODEX_DOTENV_PROJECTION_STATUSES; type Status = CodexDotenvProjectionStatus;',
+  ],
+  [
+    "src/api/reachability.ts",
+    'Object.getOwnPropertyDescriptor({}, "key"); Object.getPrototypeOf({}); Reflect.ownKeys({});',
+  ],
+  [
+    "src/commands/status-output.ts",
+    'import type { DiagnosticRuntime } from "../runtime.js"; import type { HostId } from "../hosts/contracts.js"; type Output = [DiagnosticRuntime, HostId];',
+  ],
+  [
+    "src/commands/status-observation.ts",
+    'import { observeCodexDotenvStatus, type CodexDotenvStatusObservationAdapter } from "../credentials/codex-dotenv-status.js"; void observeCodexDotenvStatus; type Adapter = CodexDotenvStatusObservationAdapter;',
   ],
 ];
 
