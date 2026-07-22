@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { NATIVE_CREDENTIAL_TARGET_IDS } from "../src/adapters/node/native-credential-store.js";
+import { NATIVE_CREDENTIAL_PACKAGE_BY_TARGET } from "../src/adapters/node/native-credential-package.js";
+import { CLI_VERSION } from "../src/version.js";
 import {
   RECOGNIZED_RUNTIME_TARGETS,
   RELEASED_RUNTIME_TARGETS,
@@ -28,6 +30,18 @@ const abiConformance = source(
 const prepareIsolation = source(
   "../native/credential-store/tests/prepare-isolation.mjs",
 );
+const isolatedCargoRunner = source(
+  "../native/credential-store/tests/run-isolated-cargo.mjs",
+);
+const nativePackageAssembler = source(
+  "../native/credential-store/tests/assemble-native-package.mjs",
+);
+const nativeBuildScript = source("../native/credential-store/build.rs");
+const packageMetadata = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as Readonly<{
+  optionalDependencies?: Readonly<Record<string, string>>;
+}>;
 
 function source(relativePath: string): readonly string[] {
   const text = readFileSync(new URL(relativePath, import.meta.url), "utf8");
@@ -360,6 +374,26 @@ describe("native release target drift", () => {
     expect(workflowRows).toHaveLength(5);
     expect(
       exactUnique(
+        Object.keys(NATIVE_CREDENTIAL_PACKAGE_BY_TARGET),
+        "native package targets",
+      ),
+    ).toEqual(releasedTargets);
+    expect(
+      exactUnique(
+        Object.values(NATIVE_CREDENTIAL_PACKAGE_BY_TARGET),
+        "native package names",
+      ),
+    ).toHaveLength(5);
+    expect(packageMetadata.optionalDependencies).toEqual(
+      Object.fromEntries(
+        Object.values(NATIVE_CREDENTIAL_PACKAGE_BY_TARGET).map((name) => [
+          name,
+          CLI_VERSION,
+        ]),
+      ),
+    );
+    expect(
+      exactUnique(
         workflowRows.map(({ target }) => target),
         "native workflow targets",
       ),
@@ -427,10 +461,34 @@ describe("native release target drift", () => {
       "          PLURUM_NATIVE_EXPECTED_TARGET: ${{ matrix.target }}",
     ]);
     expect(
+      uniqueNamedStep(
+        workflowSteps,
+        "Verify the Node 22.12 installed native package",
+      ).lines,
+    ).toEqual([
+      "      - name: Verify the Node 22.12 installed native package",
+      "        run: npm run verify-native-package",
+      "        env:",
+      '          PLURUM_NATIVE_EXPECTED_NODE: "22.12.0"',
+      "          PLURUM_NATIVE_EXPECTED_TARGET: ${{ matrix.target }}",
+    ]);
+    expect(
       uniqueNamedStep(workflowSteps, "Verify the Node 24 ABI").lines,
     ).toEqual([
       "      - name: Verify the Node 24 ABI",
       "        run: node native/credential-store/tests/abi-conformance.mjs",
+      "        env:",
+      '          PLURUM_NATIVE_EXPECTED_NODE: "24.0.0"',
+      "          PLURUM_NATIVE_EXPECTED_TARGET: ${{ matrix.target }}",
+    ]);
+    expect(
+      uniqueNamedStep(
+        workflowSteps,
+        "Verify the Node 24 installed native package",
+      ).lines,
+    ).toEqual([
+      "      - name: Verify the Node 24 installed native package",
+      "        run: npm run verify-native-package",
       "        env:",
       '          PLURUM_NATIVE_EXPECTED_NODE: "24.0.0"',
       "          PLURUM_NATIVE_EXPECTED_TARGET: ${{ matrix.target }}",
@@ -456,6 +514,208 @@ describe("native release target drift", () => {
       "      - name: Verify no native artifact entered the package tree",
       "        run: node native/credential-store/tests/artifact-conformance.mjs",
     ]);
+  });
+
+  it("keeps the CI release build path-remapped before package assembly", () => {
+    expect(
+      uniqueNamedStep(workflowSteps, "Build the native foundation").lines,
+    ).toEqual([
+      "      - name: Build the native foundation",
+      "        run: node native/credential-store/tests/run-isolated-cargo.mjs build",
+    ]);
+
+    const remapFunction = uniqueLine(
+      isolatedCargoRunner,
+      "function encodedReleaseBuildRustFlags(mode, isolationRoot) {",
+    );
+    const buildOnlyGuard = uniqueFollowingLine(
+      isolatedCargoRunner,
+      '  if (mode !== "build") {',
+      remapFunction,
+    );
+    const sourceRemap = uniqueFollowingLine(
+      isolatedCargoRunner,
+      "      ...remapSourceSpellings(sourceWorkspaceRoot).map((source) =>",
+      buildOnlyGuard,
+    );
+    const isolationRemap = uniqueFollowingLine(
+      isolatedCargoRunner,
+      "      ...remapSourceSpellings(isolationRoot).map((source) =>",
+      sourceRemap,
+    );
+    expect(
+      uniqueFollowingLine(
+        isolatedCargoRunner,
+        "    ].sort(compareRemapSources),",
+        isolationRemap,
+      ),
+    ).toBeGreaterThan(isolationRemap);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        "    left.length - right.length || (left < right ? -1 : left > right ? 1 : 0)",
+      ),
+    ).toBe(1);
+    const encodedFlags = uniqueFollowingLine(
+      isolatedCargoRunner,
+      "  return flags.join(encodedRustflagSeparator);",
+      isolationRemap,
+    );
+    const configuredFlags = uniqueFollowingLine(
+      isolatedCargoRunner,
+      "const releaseBuildRustFlags = encodedReleaseBuildRustFlags(mode, isolationRoot);",
+      encodedFlags,
+    );
+    expect(
+      uniqueFollowingLine(
+        isolatedCargoRunner,
+        "    : { CARGO_ENCODED_RUSTFLAGS: releaseBuildRustFlags }),",
+        configuredFlags,
+      ),
+    ).toBeGreaterThan(configuredFlags);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        'const encodedRustflagSeparator = "\\x1f";',
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        "  const namespaced = toNamespacedPath(source);",
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        '    spellings.add(spelling.replaceAll("\\\\", "/"));',
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        "      const driveIndex = drive[0].length - 3;",
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        'const remappedSourceRoot = "/plurum/source";',
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        'const remappedIsolationRoot = "/plurum/native-isolation";',
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        'const sourceWorkspaceRoot = realpathSync(resolve(crateRoot, "../../../.."));',
+      ),
+    ).toBe(1);
+
+    const macosTargetGuard = uniqueLine(
+      nativeBuildScript,
+      '        "aarch64-apple-darwin" | "x86_64-apple-darwin"',
+    );
+    expect(
+      nativeBuildScript.slice(macosTargetGuard - 2, macosTargetGuard + 4),
+    ).toEqual([
+      "    if matches!(",
+      "        rust_target.as_str(),",
+      '        "aarch64-apple-darwin" | "x86_64-apple-darwin"',
+      "    ) {",
+      '        println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/credential-store.node");',
+      "    }",
+    ]);
+    expect(
+      nativeBuildScript.filter((line) =>
+        line.includes("cargo:rustc-cdylib-link-arg="),
+      ),
+    ).toHaveLength(1);
+
+    const artifactRead = uniqueLine(
+      nativePackageAssembler,
+      "  const cargoBytes = readFileSync(cargoBinary);",
+    );
+    expect(
+      exactLineCount(
+        nativePackageAssembler,
+        '    Object.freeze({ label: "source workspace", path: sourceWorkspaceRoot }),',
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        nativePackageAssembler,
+        '    Object.freeze({ label: "native isolation", path: isolationRoot }),',
+      ),
+    ).toBe(1);
+    const artifactScan = uniqueFollowingLine(
+      nativePackageAssembler,
+      "  assertNoSensitiveBuildPaths(cargoBytes, isolation.root);",
+      artifactRead,
+    );
+    const artifactDigest = uniqueFollowingLine(
+      nativePackageAssembler,
+      "  const cargoDigest = sha256(cargoBytes);",
+      artifactScan,
+    );
+    const artifactCopy = uniqueFollowingLine(
+      nativePackageAssembler,
+      "    copyFileSync(cargoBinary, stagedArtifact, fsConstants.COPYFILE_EXCL);",
+      artifactDigest,
+    );
+    expect(artifactRead).toBeLessThan(artifactScan);
+    expect(artifactScan).toBeLessThan(artifactDigest);
+    expect(artifactDigest).toBeLessThan(artifactCopy);
+    expect(
+      exactLineCount(
+        nativePackageAssembler,
+        '      for (const encoding of ["utf8", "utf16le"]) {',
+      ),
+    ).toBe(1);
+    const artifactPathRejection = uniqueLine(
+      nativePackageAssembler,
+      "          artifactBytes.indexOf(needle),",
+    );
+    expect(nativePackageAssembler[artifactPathRejection + 1]).toBe(
+      "          -1,",
+    );
+    expect(
+      exactLineCount(
+        nativePackageAssembler,
+        "  const variants = new Set([path, toNamespacedPath(path)]);",
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        nativePackageAssembler,
+        '    variants.add(variant.replaceAll("\\\\", "/"));',
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        nativePackageAssembler,
+        '    variants.add(variant.replaceAll("/", "\\\\"));',
+      ),
+    ).toBe(1);
+    for (const name of [
+      "HOME",
+      "USERPROFILE",
+      "CARGO_HOME",
+      "RUSTUP_HOME",
+      "GITHUB_WORKSPACE",
+    ]) {
+      expect(exactLineCount(nativePackageAssembler, `  "${name}",`)).toBe(1);
+    }
+    expect(
+      exactLineCount(
+        nativePackageAssembler,
+        "    const canonicalPath = realpathSync(value);",
+      ),
+    ).toBe(1);
   });
 
   it("keeps every recognized native target synchronized across TypeScript, Rust, and ABI tests", () => {

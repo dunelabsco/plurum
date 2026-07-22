@@ -131,6 +131,7 @@ const expectedFiles = [
   "dist/adapters/node/clock.js",
   "dist/adapters/node/credential-environment.js",
   "dist/adapters/node/hash.js",
+  "dist/adapters/node/native-credential-package.js",
   "dist/adapters/node/native-credential-store.js",
   "dist/adapters/node/network.js",
   "dist/adapters/node/platform.js",

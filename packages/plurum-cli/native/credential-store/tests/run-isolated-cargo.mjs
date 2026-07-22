@@ -12,12 +12,97 @@ import {
   isAbsolute,
   join,
   parse,
+  relative,
+  resolve,
+  sep,
+  toNamespacedPath,
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const crateRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const crateRoot = realpathSync(dirname(dirname(fileURLToPath(import.meta.url))));
+const sourceWorkspaceRoot = realpathSync(resolve(crateRoot, "../../../.."));
 const manifestPath = join(crateRoot, "Cargo.toml");
 const isolationMarker = "plurum-native-isolation-v1\n";
+const encodedRustflagSeparator = "\x1f";
+const remappedSourceRoot = "/plurum/source";
+const remappedIsolationRoot = "/plurum/native-isolation";
+
+function isWithin(parent, candidate) {
+  const difference = relative(parent, candidate);
+  return (
+    difference === "" ||
+    (difference !== ".." &&
+      !difference.startsWith(`..${sep}`) &&
+      !isAbsolute(difference))
+  );
+}
+
+assert.equal(
+  isWithin(sourceWorkspaceRoot, crateRoot),
+  true,
+  "native Cargo workspace must stay beneath the canonical source workspace",
+);
+
+function remapSourceSpellings(source) {
+  const namespaced = toNamespacedPath(source);
+  const spellings = new Set([source, namespaced]);
+  for (const spelling of [...spellings]) {
+    spellings.add(spelling.replaceAll("\\", "/"));
+  }
+  for (const spelling of [...spellings]) {
+    const drive = /^(?:\\\\\?\\|\/\/\?\/)?[A-Za-z]:[\\/]/u.exec(spelling);
+    if (drive !== null) {
+      const driveIndex = drive[0].length - 3;
+      const driveLetter = spelling[driveIndex];
+      assert.ok(driveLetter !== undefined);
+      spellings.add(
+        `${spelling.slice(0, driveIndex)}${driveLetter.toLowerCase()}${spelling.slice(driveIndex + 1)}`,
+      );
+      spellings.add(
+        `${spelling.slice(0, driveIndex)}${driveLetter.toUpperCase()}${spelling.slice(driveIndex + 1)}`,
+      );
+    }
+  }
+  return Object.freeze([...spellings]);
+}
+
+function compareRemapSources([left], [right]) {
+  return (
+    left.length - right.length || (left < right ? -1 : left > right ? 1 : 0)
+  );
+}
+
+function encodedReleaseBuildRustFlags(mode, isolationRoot) {
+  if (mode !== "build") {
+    return undefined;
+  }
+  const remaps = Object.freeze(
+    [
+      ...remapSourceSpellings(sourceWorkspaceRoot).map((source) =>
+        Object.freeze([source, remappedSourceRoot]),
+      ),
+      ...remapSourceSpellings(isolationRoot).map((source) =>
+        Object.freeze([source, remappedIsolationRoot]),
+      ),
+    ].sort(compareRemapSources),
+  );
+  assert.equal(new Set(remaps.map(([source]) => source)).size, remaps.length);
+  assert.deepEqual(
+    new Set(remaps.map(([, target]) => target)),
+    new Set([remappedSourceRoot, remappedIsolationRoot]),
+  );
+  const flags = remaps.map(([source, target]) => {
+    assert.equal(isAbsolute(source), true, "remap source must be absolute");
+    assert.equal(
+      /[\r\n\0\x1f]/u.test(source),
+      false,
+      "remap source contains a forbidden delimiter",
+    );
+    assert.match(target, /^\/plurum\/[a-z-]+$/u);
+    return `--remap-path-prefix=${source}=${target}`;
+  });
+  return flags.join(encodedRustflagSeparator);
+}
 
 function requiredEnvironment(name) {
   const value = process.env[name];
@@ -275,6 +360,7 @@ const config = join(isolationRoot, "config");
 const home = join(isolationRoot, "home");
 const temporary = join(isolationRoot, "tmp");
 const platformBuild = platformBuildEnvironment();
+const releaseBuildRustFlags = encodedReleaseBuildRustFlags(mode, isolationRoot);
 const environment = {
   ...platformBuild.environment,
   PATH: [
@@ -302,6 +388,9 @@ const environment = {
   TEMP: temporary,
   TMP: temporary,
   NO_COLOR: "1",
+  ...(releaseBuildRustFlags === undefined
+    ? {}
+    : { CARGO_ENCODED_RUSTFLAGS: releaseBuildRustFlags }),
 };
 if (mode !== "fetch") {
   environment.CARGO_NET_OFFLINE = "true";

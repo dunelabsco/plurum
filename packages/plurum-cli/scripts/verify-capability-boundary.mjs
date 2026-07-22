@@ -7,6 +7,75 @@ import { parseAst } from "rolldown/parseAst";
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const sourceRoot = join(packageRoot, "src");
 
+const nativeCredentialPackagePath =
+  "src/adapters/node/native-credential-package.ts";
+const exactNativeCredentialStoreImports = Object.freeze([
+  "NATIVE_CREDENTIAL_STORE_ABI_VERSION",
+  "NATIVE_CREDENTIAL_STORE_NODE_API_VERSION",
+  "createNativeCredentialStoreProvider",
+  "type:NativeCredentialStoreProvider",
+  "type:NativeCredentialTarget",
+]);
+const exactNativeCredentialStoreLocalImports = Object.freeze([
+  "NATIVE_CREDENTIAL_STORE_ABI_VERSION:NATIVE_CREDENTIAL_STORE_ABI_VERSION",
+  "NATIVE_CREDENTIAL_STORE_NODE_API_VERSION:NATIVE_CREDENTIAL_STORE_NODE_API_VERSION",
+  "createNativeCredentialStoreProvider:createNativeCredentialStoreProvider",
+  "type:NativeCredentialStoreProvider:NativeCredentialStoreProvider",
+  "type:NativeCredentialTarget:NativeCredentialTarget",
+]);
+const exactNativeCredentialPackageExternalImports = new Map([
+  ["node:crypto", ["createHash"]],
+  [
+    "node:fs",
+    [
+      "closeSync",
+      "constants",
+      "fstatSync",
+      "lstatSync",
+      "openSync",
+      "readSync",
+      "readdirSync",
+      "realpathSync",
+    ],
+  ],
+  ["node:module", ["createRequire"]],
+  [
+    "node:path",
+    ["basename", "dirname", "isAbsolute", "join", "relative", "resolve", "sep"],
+  ],
+  ["node:url", ["fileURLToPath"]],
+]);
+const exactNativeCredentialPackageLocalImports = new Map([
+  ["node:crypto", ["createHash:createHash"]],
+  [
+    "node:fs",
+    [
+      "closeSync:closeSync",
+      "constants:fsConstants",
+      "fstatSync:fstatSync",
+      "lstatSync:lstatSync",
+      "openSync:openSync",
+      "readSync:readSync",
+      "readdirSync:readdirSync",
+      "realpathSync:realpathSync",
+    ],
+  ],
+  ["node:module", ["createRequire:createRequire"]],
+  [
+    "node:path",
+    [
+      "basename:basename",
+      "dirname:dirname",
+      "isAbsolute:isAbsolute",
+      "join:join",
+      "relative:relative",
+      "resolve:resolve",
+      "sep:sep",
+    ],
+  ],
+  ["node:url", ["fileURLToPath:fileURLToPath"]],
+]);
+
 const allowedExternalImports = new Map([
   ["src/cli.ts", new Map([["node:util", ["parseArgs"]]])],
   [
@@ -39,6 +108,10 @@ const allowedExternalImports = new Map([
       ["node:path", ["posix", "win32"]],
       ["node:process", ["default:process"]],
     ]),
+  ],
+  [
+    nativeCredentialPackagePath,
+    exactNativeCredentialPackageExternalImports,
   ],
 ]);
 
@@ -86,6 +159,8 @@ const reservedGlobals = new Map([
 ]);
 const unwiredNativeBoundaryStem =
   "src/adapters/node/native-credential-store";
+const verifierOnlyNativePackageStem =
+  "src/adapters/node/native-credential-package";
 const codexCredentialBoundaryStem = "src/credentials/codex-dotenv";
 const exactCodexCredentialBoundaryImports = new Map([
   [
@@ -672,6 +747,31 @@ function isUnwiredNativeBoundaryModule(resolvedModule) {
   );
 }
 
+function isVerifierOnlyNativePackageModule(resolvedModule) {
+  return sourceModuleExtensions.some(
+    (extension) =>
+      resolvedModule === `${verifierOnlyNativePackageStem}${extension}`,
+  );
+}
+
+function isExactNativeCredentialStoreImport(
+  relativePath,
+  resolvedModule,
+  specifier,
+  declaration,
+) {
+  return (
+    relativePath === nativeCredentialPackagePath &&
+    resolvedModule === `${unwiredNativeBoundaryStem}.js` &&
+    specifier === "./native-credential-store.js" &&
+    declaration?.type === "ImportDeclaration" &&
+    JSON.stringify(importBindings(declaration)) ===
+      JSON.stringify([...exactNativeCredentialStoreImports].sort()) &&
+    JSON.stringify(importLocalBindings(declaration)) ===
+      JSON.stringify([...exactNativeCredentialStoreLocalImports].sort())
+  );
+}
+
 function isExactRuntimeObservationReflectApply(
   relativePath,
   member,
@@ -734,6 +834,8 @@ function isAllowedBoundaryReflectReference(
   const allowedMembers =
     relativePath === "src/adapters/node/native-credential-store.ts"
       ? ["apply", "ownKeys"]
+      : relativePath === nativeCredentialPackagePath
+        ? ["ownKeys"]
       : diagnosticReflectionMembers.has(relativePath)
         ? [...diagnosticReflectionMembers.get(relativePath)]
       : [
@@ -855,6 +957,324 @@ function importBindings(node) {
     .sort();
 }
 
+function importLocalBindings(node) {
+  return node.specifiers
+    .map((specifier) => {
+      if (specifier.type === "ImportDefaultSpecifier") {
+        return `default:${specifier.local.name}`;
+      }
+      if (specifier.type === "ImportNamespaceSpecifier") {
+        return `namespace:${specifier.local.name}`;
+      }
+      const imported = specifier.imported.name ?? specifier.imported.value;
+      const typeOnly =
+        node.importKind === "type" || specifier.importKind === "type";
+      return `${typeOnly ? "type:" : ""}${imported}:${specifier.local.name}`;
+    })
+    .sort();
+}
+
+function isImportMetaUrl(node) {
+  return (
+    node?.type === "MemberExpression" &&
+    node.computed === false &&
+    node.optional === false &&
+    node.object.type === "MetaProperty" &&
+    node.object.meta.type === "Identifier" &&
+    node.object.meta.name === "import" &&
+    node.object.property.type === "Identifier" &&
+    node.object.property.name === "meta" &&
+    node.property.type === "Identifier" &&
+    node.property.name === "url"
+  );
+}
+
+function isExactFixedNativeRequireDeclaration(node) {
+  const declarator = node?.declarations?.[0];
+  const call = declarator?.init;
+  return (
+    node?.type === "VariableDeclaration" &&
+    node.kind === "const" &&
+    node.declarations.length === 1 &&
+    declarator.type === "VariableDeclarator" &&
+    declarator.id.type === "Identifier" &&
+    declarator.id.name === "FIXED_NATIVE_REQUIRE" &&
+    call?.type === "CallExpression" &&
+    call.optional === false &&
+    call.callee.type === "Identifier" &&
+    call.callee.name === "createRequire" &&
+    call.arguments.length === 1 &&
+    isImportMetaUrl(call.arguments[0])
+  );
+}
+
+function isExactFixedNativeCacheDeclaration(node) {
+  const declarator = node?.declarations?.[0];
+  const member = declarator?.init;
+  return (
+    node?.type === "VariableDeclaration" &&
+    node.kind === "const" &&
+    node.declarations.length === 1 &&
+    declarator.type === "VariableDeclarator" &&
+    declarator.id.type === "Identifier" &&
+    declarator.id.name === "FIXED_NATIVE_CACHE" &&
+    member?.type === "MemberExpression" &&
+    member.computed === false &&
+    member.optional === false &&
+    member.object.type === "Identifier" &&
+    member.object.name === "FIXED_NATIVE_REQUIRE" &&
+    member.property.type === "Identifier" &&
+    member.property.name === "cache"
+  );
+}
+
+function isExactDefaultNativeLoaderDeclaration(node) {
+  const returned = node?.body?.body?.[0];
+  const call = returned?.argument;
+  return (
+    node?.type === "FunctionDeclaration" &&
+    node.async === false &&
+    node.generator === false &&
+    node.id?.type === "Identifier" &&
+    node.id.name === "defaultLoadAddon" &&
+    node.params.length === 1 &&
+    node.params[0]?.type === "Identifier" &&
+    node.params[0].name === "artifactPath" &&
+    node.body.type === "BlockStatement" &&
+    node.body.body.length === 1 &&
+    returned.type === "ReturnStatement" &&
+    call?.type === "CallExpression" &&
+    call.optional === false &&
+    call.callee.type === "Identifier" &&
+    call.callee.name === "FIXED_NATIVE_REQUIRE" &&
+    call.arguments.length === 1 &&
+    call.arguments[0]?.type === "Identifier" &&
+    call.arguments[0].name === "artifactPath"
+  );
+}
+
+function isExactFixedNativeRequireCall(node, parent, declaration) {
+  return (
+    node.name === "FIXED_NATIVE_REQUIRE" &&
+    parent?.type === "CallExpression" &&
+    parent.callee === node &&
+    parent.optional === false &&
+    parent.arguments.length === 1 &&
+    parent.arguments[0]?.type === "Identifier" &&
+    parent.arguments[0].name === "artifactPath" &&
+    declaration?.body.body[0].argument === parent
+  );
+}
+
+function isExactDefaultNativeLoaderConfigurationReference(
+  node,
+  parent,
+  ancestors,
+) {
+  const object = ancestors.at(-2);
+  const freezeCall = ancestors.at(-3);
+  const returned = ancestors.at(-4);
+  const containingFunction = ancestors.findLast(
+    (ancestor) => ancestor.type === "FunctionDeclaration",
+  );
+  const packageRootProperty = object?.properties?.find(
+    (property) =>
+      property.type === "Property" &&
+      property.computed === false &&
+      property.key.type === "Identifier" &&
+      property.key.name === "packageRoot",
+  );
+  const enforceCacheProperty = object?.properties?.find(
+    (property) =>
+      property.type === "Property" &&
+      property.computed === false &&
+      property.key.type === "Identifier" &&
+      property.key.name === "enforceCommonJsCache",
+  );
+  return (
+    node.name === "defaultLoadAddon" &&
+    parent?.type === "Property" &&
+    parent.computed === false &&
+    parent.kind === "init" &&
+    parent.method === false &&
+    parent.key.type === "Identifier" &&
+    parent.key.name === "loadAddon" &&
+    parent.value === node &&
+    object?.type === "ObjectExpression" &&
+    object.properties.length === 3 &&
+    object.properties[0] === packageRootProperty &&
+    object.properties[1] === parent &&
+    object.properties[2] === enforceCacheProperty &&
+    packageRootProperty?.value.type === "Identifier" &&
+    packageRootProperty.value.name === "DEFAULT_PACKAGE_ROOT" &&
+    enforceCacheProperty?.kind === "init" &&
+    enforceCacheProperty.method === false &&
+    enforceCacheProperty.value.type === "Literal" &&
+    enforceCacheProperty.value.value === true &&
+    freezeCall?.type === "CallExpression" &&
+    freezeCall.optional === false &&
+    freezeCall.arguments.length === 1 &&
+    freezeCall.arguments[0] === object &&
+    freezeCall.callee.type === "MemberExpression" &&
+    freezeCall.callee.computed === false &&
+    freezeCall.callee.optional === false &&
+    freezeCall.callee.object.type === "Identifier" &&
+    freezeCall.callee.object.name === "Object" &&
+    freezeCall.callee.property.type === "Identifier" &&
+    freezeCall.callee.property.name === "freeze" &&
+    returned?.type === "ReturnStatement" &&
+    returned.argument === freezeCall &&
+    containingFunction?.id?.type === "Identifier" &&
+    containingFunction.id.name === "normalizeOptions"
+  );
+}
+
+function containingFunctionName(ancestors) {
+  const declaration = ancestors.findLast(
+    (ancestor) => ancestor.type === "FunctionDeclaration",
+  );
+  return declaration?.id?.type === "Identifier"
+    ? declaration.id.name
+    : undefined;
+}
+
+function isExactObjectDescriptorMember(node) {
+  return (
+    node?.type === "MemberExpression" &&
+    node.computed === false &&
+    node.optional === false &&
+    node.object.type === "Identifier" &&
+    node.object.name === "Object" &&
+    node.property.type === "Identifier" &&
+    node.property.name === "getOwnPropertyDescriptor"
+  );
+}
+
+function isExactNativePackageDescriptorCall(node, parent, ancestors) {
+  if (
+    !isExactObjectDescriptorMember(node) ||
+    parent?.type !== "CallExpression" ||
+    parent.callee !== node ||
+    parent.optional !== false ||
+    parent.arguments.length !== 2
+  ) {
+    return false;
+  }
+  const functionName = containingFunctionName(ancestors);
+  const [value, property] = parent.arguments;
+  const declarator = ancestors.at(-2);
+  if (functionName === "ownDataDescriptor") {
+    return (
+      value?.type === "Identifier" &&
+      value.name === "value" &&
+      property?.type === "Identifier" &&
+      property.name === "property" &&
+      declarator?.type === "VariableDeclarator" &&
+      declarator.id.type === "Identifier" &&
+      declarator.id.name === "descriptor" &&
+      declarator.init === parent
+    );
+  }
+  if (functionName === "rejectPreexistingCacheEntry") {
+    return (
+      value?.type === "Identifier" &&
+      value.name === "FIXED_NATIVE_CACHE" &&
+      property?.type === "Identifier" &&
+      property.name === "artifactPath"
+    );
+  }
+  if (functionName === "verifiedCacheEntry") {
+    return (
+      value?.type === "Identifier" &&
+      value.name === "entry" &&
+      property?.type === "Literal" &&
+      property.value === "path" &&
+      declarator?.type === "VariableDeclarator" &&
+      declarator.id.type === "Identifier" &&
+      declarator.id.name === "modulePath" &&
+      declarator.init === parent
+    );
+  }
+  return false;
+}
+
+function isExactVerifiedArtifactPath(node) {
+  return (
+    node?.type === "MemberExpression" &&
+    node.computed === false &&
+    node.optional === false &&
+    node.property.type === "Identifier" &&
+    node.property.name === "path" &&
+    node.object.type === "MemberExpression" &&
+    node.object.computed === false &&
+    node.object.optional === false &&
+    node.object.object.type === "Identifier" &&
+    node.object.object.name === "verified" &&
+    node.object.property.type === "Identifier" &&
+    node.object.property.name === "artifact"
+  );
+}
+
+function isExactFixedNativeCacheReference(
+  node,
+  parent,
+  ancestors,
+  declaration,
+) {
+  if (declaration === undefined || node.name !== "FIXED_NATIVE_CACHE") {
+    return false;
+  }
+  if (parent?.type === "TSTypeQuery") {
+    return true;
+  }
+  const functionName = containingFunctionName(ancestors);
+  if (
+    parent?.type === "CallExpression" &&
+    parent.arguments.length === 2 &&
+    parent.arguments[0] === node &&
+    parent.arguments[1]?.type === "Identifier" &&
+    parent.arguments[1].name === "artifactPath"
+  ) {
+    const directDescriptor =
+      functionName === "rejectPreexistingCacheEntry" &&
+      isExactObjectDescriptorMember(parent.callee);
+    const reviewedHelper =
+      functionName === "verifiedCacheEntry" &&
+      parent.callee.type === "Identifier" &&
+      parent.callee.name === "ownDataDescriptor";
+    return parent.optional === false && (directDescriptor || reviewedHelper);
+  }
+  if (
+    functionName === "loadTrustedNativePackage" &&
+    parent?.type === "BinaryExpression" &&
+    parent.operator === "!==" &&
+    parent.right === node &&
+    parent.left.type === "MemberExpression" &&
+    parent.left.computed === false &&
+    parent.left.optional === false &&
+    parent.left.object.type === "Identifier" &&
+    parent.left.object.name === "record" &&
+    parent.left.property.type === "Identifier" &&
+    parent.left.property.name === "cache"
+  ) {
+    return true;
+  }
+  const object = ancestors.at(-2);
+  return (
+    functionName === "loadDefaultNativePackage" &&
+    parent?.type === "Property" &&
+    parent.computed === false &&
+    parent.kind === "init" &&
+    parent.method === false &&
+    parent.key.type === "Identifier" &&
+    parent.key.name === "cache" &&
+    parent.value === node &&
+    object?.type === "ObjectExpression" &&
+    object.properties.length === 5 &&
+    object.properties[2] === parent
+  );
+}
+
 function isTypeOnlyImport(node) {
   return (
     node.importKind === "type" ||
@@ -940,6 +1360,46 @@ function scanText(relativePath, text) {
       },
     ];
   }
+
+  const exactNativeCreateRequireImports = program.body.filter(
+    (node) =>
+      node.type === "ImportDeclaration" &&
+      node.source.value === "node:module" &&
+      JSON.stringify(importBindings(node)) ===
+        JSON.stringify(["createRequire"]) &&
+      JSON.stringify(importLocalBindings(node)) ===
+        JSON.stringify(["createRequire:createRequire"]),
+  );
+  const exactFixedNativeRequireDeclarations = program.body.filter((node) =>
+    isExactFixedNativeRequireDeclaration(node),
+  );
+  const exactFixedNativeCacheDeclarations = program.body.filter((node) =>
+    isExactFixedNativeCacheDeclaration(node),
+  );
+  const exactDefaultNativeLoaderDeclarations = program.body.filter((node) =>
+    isExactDefaultNativeLoaderDeclaration(node),
+  );
+  const fixedNativeRequireDeclaration =
+    relativePath === nativeCredentialPackagePath &&
+    exactNativeCreateRequireImports.length === 1 &&
+    exactFixedNativeRequireDeclarations.length === 1
+      ? exactFixedNativeRequireDeclarations[0]
+      : undefined;
+  const fixedNativeRequireIndex = program.body.indexOf(
+    fixedNativeRequireDeclaration,
+  );
+  const fixedNativeCacheDeclaration =
+    fixedNativeRequireDeclaration !== undefined &&
+    exactFixedNativeCacheDeclarations.length === 1 &&
+    program.body[fixedNativeRequireIndex + 1] ===
+      exactFixedNativeCacheDeclarations[0]
+      ? exactFixedNativeCacheDeclarations[0]
+      : undefined;
+  const defaultNativeLoaderDeclaration =
+    fixedNativeCacheDeclaration !== undefined &&
+    exactDefaultNativeLoaderDeclarations.length === 1
+      ? exactDefaultNativeLoaderDeclarations[0]
+      : undefined;
 
   const lineStarts = [0];
   for (let index = 0; index < text.length; index += 1) {
@@ -1252,6 +1712,22 @@ function scanText(relativePath, text) {
           "external modules require an exact file and binding allowlist",
         );
       }
+      const exactLocalBindings =
+        relativePath === nativeCredentialPackagePath
+          ? exactNativeCredentialPackageLocalImports.get(specifier)
+          : undefined;
+      if (
+        exactLocalBindings !== undefined &&
+        (importNode?.type !== "ImportDeclaration" ||
+          JSON.stringify(importLocalBindings(importNode)) !==
+            JSON.stringify([...exactLocalBindings].sort()))
+      ) {
+        report(
+          node,
+          "external-module",
+          "the native credential package bridge requires exact reviewed local bindings",
+        );
+      }
     }
 
     validateDiagnosticReadOnlyImport(node, resolvedModule, importNode);
@@ -1273,12 +1749,29 @@ function scanText(relativePath, text) {
 
     if (
       resolvedModule !== undefined &&
-      isUnwiredNativeBoundaryModule(resolvedModule)
+      isUnwiredNativeBoundaryModule(resolvedModule) &&
+      !isExactNativeCredentialStoreImport(
+        relativePath,
+        resolvedModule,
+        specifier,
+        importNode,
+      )
     ) {
       report(
         node,
         "native-credential-wiring",
-        "the native credential boundary must remain unwired until native platform suites pass",
+        "only the exact reviewed native package bridge may import the native credential boundary",
+      );
+    }
+
+    if (
+      resolvedModule !== undefined &&
+      isVerifierOnlyNativePackageModule(resolvedModule)
+    ) {
+      report(
+        node,
+        "native-credential-wiring",
+        "the native package bridge is verifier-only and must remain unreachable from production composition",
       );
     }
 
@@ -1522,6 +2015,26 @@ function scanText(relativePath, text) {
         );
       }
       if (
+        relativePath === nativeCredentialPackagePath &&
+        objectName === "configuration" &&
+        propertyName === "loadAddon" &&
+        !(
+          node.computed === false &&
+          node.optional === false &&
+          parent?.type === "CallExpression" &&
+          parent.callee === node &&
+          parent.optional === false &&
+          parent.arguments.length === 1 &&
+          isExactVerifiedArtifactPath(parent.arguments[0])
+        )
+      ) {
+        report(
+          node,
+          "native-package-loader",
+          "the configured native loader may only receive the verified artifact path directly",
+        );
+      }
+      if (
         objectName === "Object" &&
         [
           "getPrototypeOf",
@@ -1530,7 +2043,10 @@ function scanText(relativePath, text) {
           "setPrototypeOf",
         ].includes(propertyName) &&
         !(
-          (([
+          (relativePath === nativeCredentialPackagePath &&
+            propertyName === "getOwnPropertyDescriptor" &&
+            isExactNativePackageDescriptorCall(node, parent, ancestors)) ||
+          ((([
               "src/adapters/node/native-credential-store.ts",
               "src/commands/setup-approval.ts",
               "src/commands/setup-credential-plan.ts",
@@ -1565,7 +2081,7 @@ function scanText(relativePath, text) {
           node.optional === false &&
           parent?.type === "CallExpression" &&
           parent.callee === node &&
-          parent.optional === false
+          parent.optional === false)
         )
       ) {
         report(
@@ -1584,12 +2100,15 @@ function scanText(relativePath, text) {
       if (
         ([
             "src/adapters/node/native-credential-store.ts",
+            nativeCredentialPackagePath,
             "src/data/uint8-array.ts",
           ].includes(relativePath) ||
           diagnosticReflectionMembers.has(relativePath)) &&
         objectName === "Reflect" &&
         (relativePath === "src/adapters/node/native-credential-store.ts"
           ? ["apply", "ownKeys"]
+          : relativePath === nativeCredentialPackagePath
+            ? ["ownKeys"]
           : diagnosticReflectionMembers.has(relativePath)
             ? [...diagnosticReflectionMembers.get(relativePath)]
           : ["apply"]
@@ -1647,6 +2166,64 @@ function scanText(relativePath, text) {
           "setup-authorization-boundary",
           "authorization capabilities may only be invoked directly in their reviewed boundary",
         );
+      } else if (
+        relativePath === nativeCredentialPackagePath &&
+        node.name === "FIXED_NATIVE_REQUIRE"
+      ) {
+        const exactCacheCapture =
+          fixedNativeCacheDeclaration !== undefined &&
+          parent === fixedNativeCacheDeclaration.declarations[0].init &&
+          parent.object === node;
+        if (
+          fixedNativeRequireDeclaration === undefined ||
+          (!exactCacheCapture &&
+            !isExactFixedNativeRequireCall(
+              node,
+              parent,
+              defaultNativeLoaderDeclaration,
+            ))
+        ) {
+          report(
+            node,
+            "native-package-loader",
+            "the fixed native loader may only load the reviewed verified artifact path directly",
+          );
+        }
+      } else if (
+        relativePath === nativeCredentialPackagePath &&
+        node.name === "FIXED_NATIVE_CACHE"
+      ) {
+        if (
+          !isExactFixedNativeCacheReference(
+            node,
+            parent,
+            ancestors,
+            fixedNativeCacheDeclaration,
+          )
+        ) {
+          report(
+            node,
+            "native-package-cache",
+            "the captured native module cache may only enter exact reviewed cache checks and trusted state",
+          );
+        }
+      } else if (
+        relativePath === nativeCredentialPackagePath &&
+        node.name === "defaultLoadAddon"
+      ) {
+        if (
+          !isExactDefaultNativeLoaderConfigurationReference(
+            node,
+            parent,
+            ancestors,
+          )
+        ) {
+          report(
+            node,
+            "native-package-loader",
+            "the default native loader may only enter the reviewed verified-artifact configuration",
+          );
+        }
       } else if (node.name === "process") {
         const member =
           parent?.type === "MemberExpression" &&
@@ -1710,10 +2287,16 @@ function scanText(relativePath, text) {
           key,
           ancestors,
         );
+        const allowedNativeCreateRequire =
+          node.name === "createRequire" &&
+          fixedNativeRequireDeclaration !== undefined &&
+          parent === fixedNativeRequireDeclaration.declarations[0].init &&
+          parent.callee === node;
         if (
           rule !== undefined &&
           !allowedBoundaryReflect &&
-          !allowedNetworkFetch
+          !allowedNetworkFetch &&
+          !allowedNativeCreateRequire
         ) {
           report(
             node,
@@ -1797,6 +2380,9 @@ function scanText(relativePath, text) {
   return findings;
 }
 
+const exactNativeCacheFixturePrelude =
+  'import { createRequire } from "node:module"; const FIXED_NATIVE_REQUIRE = createRequire(import.meta.url); const FIXED_NATIVE_CACHE = FIXED_NATIVE_REQUIRE.cache;';
+
 const negativeFixtures = [
   ["src/example.ts", 'import { readFile } from "node:fs/promises";', "external-module"],
   ["src/example.ts", 'import fs from "fs";', "external-module"],
@@ -1860,7 +2446,112 @@ const negativeFixtures = [
     "commonjs-require",
   ],
   [
+    nativeCredentialPackagePath,
+    "const FIXED_NATIVE_REQUIRE = createRequire(import.meta.url); declare const artifactPath: string; FIXED_NATIVE_REQUIRE(artifactPath);",
+    "commonjs-require",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'import { createRequire as makeRequire } from "node:module"; const FIXED_NATIVE_REQUIRE = makeRequire(import.meta.url); declare const artifactPath: string; FIXED_NATIVE_REQUIRE(artifactPath);',
+    "external-module",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'import * as fs from "node:fs"; void fs;',
+    "external-module",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'import { createRequire } from "node:module"; const FIXED_NATIVE_REQUIRE = createRequire(import.meta.url); declare const packageName: string; FIXED_NATIVE_REQUIRE(packageName);',
+    "native-package-loader",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'import { createRequire } from "node:module"; const FIXED_NATIVE_REQUIRE = createRequire(import.meta.url); FIXED_NATIVE_REQUIRE("@dunelabs/plurum-native-darwin-arm64");',
+    "native-package-loader",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'import { createRequire } from "node:module"; const FIXED_NATIVE_REQUIRE = createRequire(import.meta.url); const escaped = FIXED_NATIVE_REQUIRE; void escaped;',
+    "native-package-loader",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'import { createRequire } from "node:module"; const FIXED_NATIVE_REQUIRE = createRequire(import.meta.url); const FIXED_NATIVE_CACHE = FIXED_NATIVE_REQUIRE["cache"];',
+    "native-package-loader",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'import { createRequire } from "node:module"; const FIXED_NATIVE_REQUIRE = createRequire(import.meta.url); const OTHER_CACHE = FIXED_NATIVE_REQUIRE.cache; void OTHER_CACHE;',
+    "native-package-loader",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'import { createRequire } from "node:module"; const FIXED_NATIVE_REQUIRE = createRequire(import.meta.url); void 0; const FIXED_NATIVE_CACHE = FIXED_NATIVE_REQUIRE.cache;',
+    "native-package-loader",
+  ],
+  [
+    nativeCredentialPackagePath,
+    `${exactNativeCacheFixturePrelude} declare const artifactPath: string; FIXED_NATIVE_CACHE[artifactPath] = {};`,
+    "native-package-cache",
+  ],
+  [
+    nativeCredentialPackagePath,
+    `${exactNativeCacheFixturePrelude} declare const artifactPath: string; delete FIXED_NATIVE_CACHE[artifactPath];`,
+    "native-package-cache",
+  ],
+  [
+    nativeCredentialPackagePath,
+    `${exactNativeCacheFixturePrelude} declare const artifactPath: string; void FIXED_NATIVE_CACHE[artifactPath];`,
+    "native-package-cache",
+  ],
+  [
+    nativeCredentialPackagePath,
+    `${exactNativeCacheFixturePrelude} const escaped = FIXED_NATIVE_CACHE; void escaped;`,
+    "native-package-cache",
+  ],
+  [
+    nativeCredentialPackagePath,
+    `${exactNativeCacheFixturePrelude} function rejectPreexistingCacheEntry(packageName: string): void { Object.getOwnPropertyDescriptor(FIXED_NATIVE_CACHE, packageName); }`,
+    "native-package-cache",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'function rejectPreexistingCacheEntry(artifactPath: string): void { Object.getOwnPropertyDescriptor({}, artifactPath); }',
+    "dynamic-code",
+  ],
+  [
+    nativeCredentialPackagePath,
+    "const descriptor = Object.getOwnPropertyDescriptor; void descriptor;",
+    "dynamic-code",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'import { createRequire } from "node:module"; const FIXED_NATIVE_REQUIRE = createRequire(import.meta.url); function defaultLoadAddon(artifactPath: string): unknown { return FIXED_NATIVE_REQUIRE(artifactPath); } function normalizeOptions(): unknown { return Object.freeze({ packageRoot: DEFAULT_PACKAGE_ROOT, loadAddon: defaultLoadAddon }); } declare const packageName: string; defaultLoadAddon(packageName);',
+    "native-package-loader",
+  ],
+  [
+    nativeCredentialPackagePath,
+    `${exactNativeCacheFixturePrelude} function defaultLoadAddon(artifactPath: string): unknown { return FIXED_NATIVE_REQUIRE(artifactPath); } function normalizeOptions(): unknown { return Object.freeze({ packageRoot: DEFAULT_PACKAGE_ROOT, loadAddon: defaultLoadAddon, enforceCommonJsCache: false }); }`,
+    "native-package-loader",
+  ],
+  [
+    nativeCredentialPackagePath,
+    "declare const configuration: { loadAddon(path: string): unknown }; declare const packageName: string; configuration.loadAddon(packageName);",
+    "native-package-loader",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'require("@dunelabs/plurum-native-darwin-arm64");',
+    "commonjs-require",
+  ],
+  [
     "src/example.ts",
+    'process.dlopen({}, "./credential-store.node");',
+    "process-global",
+  ],
+  [
+    nativeCredentialPackagePath,
     'process.dlopen({}, "./credential-store.node");',
     "process-global",
   ],
@@ -1871,6 +2562,11 @@ const negativeFixtures = [
   ],
   [
     "src/adapters/node/example.ts",
+    'import "./credential-store.node";',
+    "native-binary-import",
+  ],
+  [
+    nativeCredentialPackagePath,
     'import "./credential-store.node";',
     "native-binary-import",
   ],
@@ -1922,6 +2618,71 @@ const negativeFixtures = [
   [
     "src/adapters/node/production.ts",
     'export * from "./native-credential-store.mjs";',
+    "native-credential-wiring",
+  ],
+  [
+    "src/adapters/node/process-runtime.ts",
+    'import "./native-credential-store.js";',
+    "native-credential-wiring",
+  ],
+  [
+    "src/index.ts",
+    'import "./adapters/node/native-credential-store.js";',
+    "native-credential-wiring",
+  ],
+  [
+    "src/commands/setup.ts",
+    'import "../adapters/node/native-credential-store.js";',
+    "native-credential-wiring",
+  ],
+  [
+    "src/adapters/node/example.ts",
+    'import "./native-credential-store.js";',
+    "native-credential-wiring",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'import * as store from "./native-credential-store.js"; void store;',
+    "native-credential-wiring",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'import { createNativeCredentialStoreProvider } from "./native-credential-store.js"; void createNativeCredentialStoreProvider;',
+    "native-credential-wiring",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'import { NATIVE_CREDENTIAL_STORE_ABI_VERSION, NATIVE_CREDENTIAL_STORE_NODE_API_VERSION, createNativeCredentialStoreProvider as createProvider, type NativeCredentialStoreProvider, type NativeCredentialTarget } from "./native-credential-store.js"; void createProvider;',
+    "native-credential-wiring",
+  ],
+  [
+    "src/adapters/node/production.ts",
+    'import "./native-credential-package.js";',
+    "native-credential-wiring",
+  ],
+  [
+    "src/adapters/node/process-runtime.ts",
+    'import "./native-credential-package.js";',
+    "native-credential-wiring",
+  ],
+  [
+    "src/index.ts",
+    'import "./adapters/node/native-credential-package.js";',
+    "native-credential-wiring",
+  ],
+  [
+    "src/commands/setup.ts",
+    'import "../adapters/node/native-credential-package.js";',
+    "native-credential-wiring",
+  ],
+  [
+    "src/adapters/node/example.ts",
+    'import "./native-credential-package.js";',
+    "native-credential-wiring",
+  ],
+  [
+    "src/adapters/node/example.ts",
+    'export * from "./native-credential-package.js";',
     "native-credential-wiring",
   ],
   [
@@ -2309,6 +3070,16 @@ const negativeFixtures = [
   [
     "src/adapters/node/native-credential-store.ts",
     "const apply = Reflect.apply; apply(() => 1, undefined, []);",
+    "dynamic-code",
+  ],
+  [
+    nativeCredentialPackagePath,
+    'Reflect["ownKeys"]({});',
+    "dynamic-code",
+  ],
+  [
+    nativeCredentialPackagePath,
+    "const ownKeys = Reflect.ownKeys; ownKeys({});",
     "dynamic-code",
   ],
   [
@@ -2833,6 +3604,10 @@ const positiveFixtures = [
     "src/adapters/node/platform.ts",
     'import { posix, win32 } from "node:path"; posix.join("/a", "b"); win32.join("C:\\\\a", "b");',
   ],
+  [
+    nativeCredentialPackagePath,
+    'import { createHash } from "node:crypto"; import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from "node:fs"; import { createRequire } from "node:module"; import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"; import { fileURLToPath } from "node:url"; import { NATIVE_CREDENTIAL_STORE_ABI_VERSION, NATIVE_CREDENTIAL_STORE_NODE_API_VERSION, createNativeCredentialStoreProvider, type NativeCredentialStoreProvider, type NativeCredentialTarget } from "./native-credential-store.js"; const FIXED_NATIVE_REQUIRE = createRequire(import.meta.url); const FIXED_NATIVE_CACHE = FIXED_NATIVE_REQUIRE.cache; function defaultLoadAddon(artifactPath: string): unknown { return FIXED_NATIVE_REQUIRE(artifactPath); } function normalizeOptions(): unknown { return Object.freeze({ packageRoot: DEFAULT_PACKAGE_ROOT, loadAddon: defaultLoadAddon, enforceCommonJsCache: true }); } void createHash; void closeSync; void fsConstants; void fstatSync; void lstatSync; void openSync; void readSync; void readdirSync; void realpathSync; void basename; void dirname; void isAbsolute; void join; void relative; void resolve; void sep; void fileURLToPath; void NATIVE_CREDENTIAL_STORE_ABI_VERSION; void NATIVE_CREDENTIAL_STORE_NODE_API_VERSION; void createNativeCredentialStoreProvider; void normalizeOptions; type Provider = NativeCredentialStoreProvider; type Target = NativeCredentialTarget;',
+  ],
   ["src/adapters/node/clock.ts", "Date.now();"],
   [
     "src/commands/setup-confirmation.ts",
@@ -2861,6 +3636,10 @@ const positiveFixtures = [
   ],
   [
     "src/adapters/node/native-credential-store.ts",
+    "Reflect.ownKeys(Object.freeze({}));",
+  ],
+  [
+    nativeCredentialPackagePath,
     "Reflect.ownKeys(Object.freeze({}));",
   ],
   [

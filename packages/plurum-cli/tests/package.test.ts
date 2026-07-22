@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { CLI_VERSION } from "../src/version.js";
+import { NATIVE_CREDENTIAL_PACKAGE_BY_TARGET } from "../src/adapters/node/native-credential-package.js";
 import {
   SUPPORTED_NODE_RUNTIME_RANGES,
 } from "../src/system/runtime-support.js";
@@ -45,7 +46,14 @@ describe("package safety invariants", () => {
   it("ships only the runtime build and required package documents", () => {
     expect(packageJson.files).toEqual(["dist", "LICENSE", "README.md"]);
     expect(packageJson.dependencies).toBeUndefined();
-    expect(packageJson.optionalDependencies).toBeUndefined();
+    expect(packageJson.optionalDependencies).toEqual(
+      Object.fromEntries(
+        Object.values(NATIVE_CREDENTIAL_PACKAGE_BY_TARGET).map((name) => [
+          name,
+          CLI_VERSION,
+        ]),
+      ),
+    );
     expect(packageJson.bundleDependencies).toBeUndefined();
     expect(packageJson.bundledDependencies).toBeUndefined();
     expect(packageJson.peerDependencies).toBeUndefined();
@@ -60,6 +68,8 @@ describe("package safety invariants", () => {
       pretest: "npm run build",
       test: "vitest run",
       "verify-package": "node scripts/verify-package.mjs",
+      "verify-native-package":
+        "node native/credential-store/tests/verify-packaged-native.mjs",
       check:
         "npm run verify-capabilities && npm run typecheck && npm test && npm run verify-package",
       prepack: "npm run check",

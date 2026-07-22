@@ -21,6 +21,7 @@
     "pretest": "npm run build",
     "test": "vitest run",
     "verify-package": "node scripts/verify-package.mjs",
+    "verify-native-package": "node native/credential-store/tests/verify-packaged-native.mjs",
     "check": "npm run verify-capabilities && npm run typecheck && npm test && npm run verify-package",
     "prepack": "npm run check"
   },
@@ -46,6 +47,13 @@
   ],
   "author": "Dune Labs",
   "license": "Apache-2.0",
+  "optionalDependencies": {
+    "@dunelabs/plurum-native-darwin-arm64": "0.0.0-development",
+    "@dunelabs/plurum-native-darwin-x64": "0.0.0-development",
+    "@dunelabs/plurum-native-linux-arm64-gnu": "0.0.0-development",
+    "@dunelabs/plurum-native-linux-x64-gnu": "0.0.0-development",
+    "@dunelabs/plurum-native-win32-x64-msvc": "0.0.0-development"
+  },
   "devDependencies": {
     "@types/node": "^22.20.1",
     "rolldown": "^1.1.5",

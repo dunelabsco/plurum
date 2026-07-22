@@ -201,12 +201,22 @@ jobs:
         env:
           PLURUM_NATIVE_EXPECTED_NODE: "22.12.0"
           PLURUM_NATIVE_EXPECTED_TARGET: ${{ matrix.target }}
+      - name: Verify the Node 22.12 installed native package
+        run: npm run verify-native-package
+        env:
+          PLURUM_NATIVE_EXPECTED_NODE: "22.12.0"
+          PLURUM_NATIVE_EXPECTED_TARGET: ${{ matrix.target }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24.0.0"
           architecture: ${{ matrix.architecture }}
       - name: Verify the Node 24 ABI
         run: node native/credential-store/tests/abi-conformance.mjs
+        env:
+          PLURUM_NATIVE_EXPECTED_NODE: "24.0.0"
+          PLURUM_NATIVE_EXPECTED_TARGET: ${{ matrix.target }}
+      - name: Verify the Node 24 installed native package
+        run: npm run verify-native-package
         env:
           PLURUM_NATIVE_EXPECTED_NODE: "24.0.0"
           PLURUM_NATIVE_EXPECTED_TARGET: ${{ matrix.target }}
