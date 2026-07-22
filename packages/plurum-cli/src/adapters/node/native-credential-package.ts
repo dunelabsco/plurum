@@ -210,8 +210,15 @@ function bigintIdentity(
     readonly ctimeNs: bigint;
   },
 ): FileIdentity {
+  /*
+   * Node 22.12's Windows path stat exposes the full volume serial while its
+   * descriptor stat exposes the low 32 bits. Newer libuv normalizes both to
+   * that portable value, so do the same before comparing one file identity.
+   */
+  const device =
+    sep === "\\" ? BigInt.asUintN(32, metadata.dev) : metadata.dev;
   return Object.freeze({
-    device: metadata.dev,
+    device,
     object: metadata.ino,
     owner: metadata.uid,
     mode: metadata.mode,
