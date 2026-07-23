@@ -1336,7 +1336,7 @@ fn list_dotenv_candidates(home: &CodexHome) -> Result<Vec<ValidatedUuidV4>, Posi
     if home.attest()? != before {
         return Err(PosixStoreError::Lost);
     }
-    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    candidates.sort_by_key(|candidate| candidate.0);
     Ok(candidates)
 }
 

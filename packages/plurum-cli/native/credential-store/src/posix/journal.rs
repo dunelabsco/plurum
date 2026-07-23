@@ -593,7 +593,7 @@ fn list_journal_candidates(
         }
     }
     directory.core.require_secure_locked(&state)?;
-    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    candidates.sort_by_key(|candidate| candidate.0);
     candidates.dedup();
     Ok(candidates)
 }

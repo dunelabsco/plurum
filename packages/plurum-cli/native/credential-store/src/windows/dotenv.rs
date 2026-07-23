@@ -105,6 +105,9 @@ pub(crate) enum CodexDotenvSynchronizeDisposition {
     Unchanged,
 }
 
+// Keep the shared platform interface value-shaped; its opaque state is moved
+// directly into the bridge registry and must match the POSIX implementation.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum CodexDotenvSynchronizeResult {
     Completed {
         disposition: CodexDotenvSynchronizeDisposition,
@@ -336,7 +339,7 @@ fn excluded_is_stable(excluded: &BoundDirectoryChain) -> Result<bool, WindowsSto
 }
 
 fn chain_contains_identity(chain: &[ObjectIdentity], identity: ObjectIdentity) -> bool {
-    chain.iter().any(|candidate| *candidate == identity)
+    chain.contains(&identity)
 }
 
 fn outside_excluded_project(
@@ -571,28 +574,38 @@ fn missing_dotenv_binding(home_binding: [u8; 32], namespace_change: [u64; 2]) ->
     result
 }
 
+#[derive(Clone, Copy)]
+struct CodexHomeStateFields {
+    kind: CodexHomeKind,
+    binding: [u8; 32],
+    namespace_change: [u64; 2],
+}
+
+#[derive(Clone, Copy)]
+struct CodexDotenvStateFields {
+    kind: CodexDotenvKind,
+    identity: Option<ObjectIdentity>,
+    binding: [u8; 32],
+}
+
 fn state_for(
     process: ProcessIdentity,
     codex_home: NormalizedAbsolutePath,
     excluded: &BoundDirectoryChain,
-    home_kind: CodexHomeKind,
-    home_binding: [u8; 32],
-    namespace_change: [u64; 2],
-    dotenv_kind: CodexDotenvKind,
-    dotenv_identity: Option<ObjectIdentity>,
-    dotenv_binding: [u8; 32],
+    home: CodexHomeStateFields,
+    dotenv: CodexDotenvStateFields,
 ) -> CodexDotenvState {
     CodexDotenvState {
         process,
         codex_home,
         excluded_project: excluded.path.clone(),
         excluded_chain: excluded.identities.clone(),
-        home_kind,
-        home_binding,
-        namespace_change,
-        dotenv_kind,
-        dotenv_identity,
-        dotenv_binding,
+        home_kind: home.kind,
+        home_binding: home.binding,
+        namespace_change: home.namespace_change,
+        dotenv_kind: dotenv.kind,
+        dotenv_identity: dotenv.identity,
+        dotenv_binding: dotenv.binding,
     }
 }
 
@@ -608,12 +621,16 @@ fn unsafe_observation(
             process,
             codex_home,
             excluded,
-            CodexHomeKind::Present,
-            binding,
-            [0; 2],
-            CodexDotenvKind::Unsafe,
-            None,
-            binding,
+            CodexHomeStateFields {
+                kind: CodexHomeKind::Present,
+                binding,
+                namespace_change: [0; 2],
+            },
+            CodexDotenvStateFields {
+                kind: CodexDotenvKind::Unsafe,
+                identity: None,
+                binding,
+            },
         ),
     }
 }
@@ -657,17 +674,14 @@ fn observe_internal(
     let home_chain = match codex_home.open_complete() {
         Ok(chain) => chain,
         Err(WindowsStoreError::Missing) => {
-            let target_missing = match open_object_nofollow(&codex_home.path) {
+            let target_missing = matches!(
+                open_object_nofollow(&codex_home.path),
                 Err(error)
                     if matches!(
                         error.raw_os_error(),
                         Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
-                    ) =>
-                {
-                    true
-                }
-                _ => false,
-            };
+                    )
+            );
             if !target_missing {
                 return Ok(unsafe_observation(process, codex_home, &excluded, 3));
             }
@@ -678,12 +692,16 @@ fn observe_internal(
                     process,
                     codex_home,
                     &excluded,
-                    CodexHomeKind::Missing,
-                    binding,
-                    [parent_facts.created, parent_facts.modified],
-                    CodexDotenvKind::Missing,
-                    None,
-                    binding,
+                    CodexHomeStateFields {
+                        kind: CodexHomeKind::Missing,
+                        binding,
+                        namespace_change: [parent_facts.created, parent_facts.modified],
+                    },
+                    CodexDotenvStateFields {
+                        kind: CodexDotenvKind::Missing,
+                        identity: None,
+                        binding,
+                    },
                 ),
             });
         }
@@ -728,12 +746,16 @@ fn observe_internal(
                     process,
                     codex_home,
                     &excluded,
-                    CodexHomeKind::Present,
-                    home.binding,
-                    namespace_change,
-                    CodexDotenvKind::Missing,
-                    None,
-                    missing_dotenv_binding(home.binding, namespace_change),
+                    CodexHomeStateFields {
+                        kind: CodexHomeKind::Present,
+                        binding: home.binding,
+                        namespace_change,
+                    },
+                    CodexDotenvStateFields {
+                        kind: CodexDotenvKind::Missing,
+                        identity: None,
+                        binding: missing_dotenv_binding(home.binding, namespace_change),
+                    },
                 ),
             });
         }
@@ -750,16 +772,20 @@ fn observe_internal(
         process,
         codex_home,
         &excluded,
-        CodexHomeKind::Present,
-        home.binding,
-        home.namespace_change,
-        if bytes.is_some() {
-            CodexDotenvKind::Present
-        } else {
-            CodexDotenvKind::Oversized
+        CodexHomeStateFields {
+            kind: CodexHomeKind::Present,
+            binding: home.binding,
+            namespace_change: home.namespace_change,
         },
-        Some(file.facts.identity),
-        file.binding,
+        CodexDotenvStateFields {
+            kind: if bytes.is_some() {
+                CodexDotenvKind::Present
+            } else {
+                CodexDotenvKind::Oversized
+            },
+            identity: Some(file.facts.identity),
+            binding: file.binding,
+        },
     );
     drop(file);
     match bytes {
@@ -2100,14 +2126,10 @@ pub(crate) fn synchronize_codex_dotenv(
             Ok(candidate) => candidate,
             Err(error) => {
                 if created_home {
-                    if let Err(cleanup) = remove_created_home(home) {
-                        return Err(cleanup);
-                    }
-                    if let Err(cleanup) = lease.release(None) {
-                        return Err(cleanup);
-                    }
-                } else if let Err(cleanup) = lease.release(Some(&home)) {
-                    return Err(cleanup);
+                    remove_created_home(home)?;
+                    lease.release(None)?;
+                } else {
+                    lease.release(Some(&home))?;
                 }
                 return Err(error);
             }
@@ -2273,10 +2295,10 @@ mod tests {
     #[test]
     fn lock_record_layout_keeps_roles_disjoint() {
         assert_eq!(DOTENV_LOCK_HEADER_START, 1);
-        assert!(DOTENV_LOCK_HEADER_END <= DOTENV_LOCK_PATH_START);
+        const { assert!(DOTENV_LOCK_HEADER_END <= DOTENV_LOCK_PATH_START) };
         assert_eq!(DOTENV_LOCK_PATH_END, DOTENV_LOCK_HOME_INTENT_OFFSET);
-        assert!(DOTENV_LOCK_HOME_INTENT_OFFSET < DOTENV_LOCK_NONCE_START);
-        assert!(DOTENV_LOCK_NONCE_END <= DOTENV_LOCK_HOME_IDENTITY_START);
+        const { assert!(DOTENV_LOCK_HOME_INTENT_OFFSET < DOTENV_LOCK_NONCE_START) };
+        const { assert!(DOTENV_LOCK_NONCE_END <= DOTENV_LOCK_HOME_IDENTITY_START) };
         assert_eq!(
             DOTENV_LOCK_HOME_IDENTITY_END,
             DOTENV_LOCK_HOME_CHECKSUM_START

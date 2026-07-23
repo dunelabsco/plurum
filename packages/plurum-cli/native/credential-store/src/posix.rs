@@ -2440,7 +2440,7 @@ mod tests {
             // Cleanup must never cross a mount boundary. Unlike the production
             // compatibility opener, this test authority deliberately refuses
             // kernels that cannot provide openat2's NO_XDEV guarantee.
-            return rustix_fs::openat2(
+            rustix_fs::openat2(
                 directory,
                 name,
                 flags,
@@ -2449,7 +2449,7 @@ mod tests {
                     | ResolveFlags::NO_MAGICLINKS
                     | ResolveFlags::NO_SYMLINKS
                     | ResolveFlags::NO_XDEV,
-            );
+            )
         }
         #[cfg(target_os = "macos")]
         {
