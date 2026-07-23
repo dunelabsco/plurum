@@ -18,15 +18,17 @@ use crate::posix as platform;
 use crate::windows as platform;
 
 use platform::{
-    acquire_observed_setup_lease, acquire_setup_lease, observe_missing_private_directory,
-    open_private_directory, read_allowlisted_legacy_credential, BoundedRead, CanonicalEntryRole,
-    ConditionalMutationResult, CredentialFileAttestation, CredentialReadOpenResult,
-    DirectoryAttestation, DirectoryDisposition, ExclusiveCreateResult, ExpectedEntrySnapshot,
-    LeaseRenewal, LegacyCredentialReadResult, ManagedEntry, ManagedEntryObservation,
-    MissingDirectoryBinding, MissingEntrySnapshot, ObjectIdentity, ObservedDirectoryExpectation,
-    ObservedSetupLeaseAcquireResult, PresentEntrySnapshot, PriorLease, PrivateDirectoryOpenResult,
-    PrivateManagedEntryObservation, SetupLeaseAcquireResult, TemporaryEntry, TemporaryEntryRole,
-    MAX_ATTESTED_BYTES,
+    acquire_observed_setup_lease, acquire_reconciliation_journal_lease, acquire_setup_lease,
+    observe_missing_private_directory, open_private_directory, read_allowlisted_legacy_credential,
+    BoundedRead, CanonicalEntryRole, ConditionalMutationResult, CredentialFileAttestation,
+    CredentialReadOpenResult, DirectoryAttestation, DirectoryDisposition, ExclusiveCreateResult,
+    ExpectedEntrySnapshot, JournalObservation, JournalRemoveResult, JournalReplaceResult,
+    JournalRevision, LeaseRenewal, LegacyCredentialReadResult, ManagedEntry,
+    ManagedEntryObservation, MissingDirectoryBinding, MissingEntrySnapshot, ObjectIdentity,
+    ObservedDirectoryExpectation, ObservedSetupLeaseAcquireResult, PresentEntrySnapshot,
+    PriorLease, PrivateDirectoryOpenResult, PrivateManagedEntryObservation,
+    ReconciliationJournalLeaseAcquireResult, SetupLeaseAcquireResult, TemporaryEntry,
+    TemporaryEntryRole, MAX_ATTESTED_BYTES,
 };
 
 type SharedHandle<T> = Arc<Mutex<Option<T>>>;
@@ -52,6 +54,10 @@ type PlatformSetupLease = platform::PosixSetupLease;
 #[cfg(target_os = "windows")]
 type PlatformSetupLease = platform::WindowsSetupLease;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+type PlatformReconciliationJournalLease = platform::PosixReconciliationJournalLease;
+#[cfg(target_os = "windows")]
+type PlatformReconciliationJournalLease = platform::WindowsReconciliationJournalLease;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 type PlatformStoreError = platform::PosixStoreError;
 #[cfg(target_os = "windows")]
 type PlatformStoreError = platform::WindowsStoreError;
@@ -71,6 +77,11 @@ struct LegacyPaths {
 #[derive(Debug)]
 struct AdapterAuthority {
     legacy_paths: LegacyPaths,
+    state_directory: String,
+}
+
+struct JournalRevisionToken {
+    value: Mutex<Option<JournalRevision>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -232,21 +243,54 @@ fn expect_true(object: &Object<'_>, name: &str) -> Result<()> {
     }
 }
 
-fn parse_legacy_paths(configuration: &Object<'_>) -> Result<LegacyPaths> {
-    exact_keys(configuration, &["legacyPaths"])?;
+fn parse_authority(configuration: &Object<'_>) -> Result<AdapterAuthority> {
+    exact_keys(configuration, &["legacyPaths", "stateDirectory"])?;
     let paths = property::<Object<'_>>(configuration, "legacyPaths")?;
     exact_keys(&paths, &["hermes", "openclaw", "removedCli"])?;
     let hermes = property::<String>(&paths, "hermes")?;
     let openclaw = property::<String>(&paths, "openclaw")?;
     let removed_cli = property::<String>(&paths, "removedCli")?;
-    if hermes.is_empty() || openclaw.is_empty() || removed_cli.is_empty() {
+    let state_directory = property::<String>(configuration, "stateDirectory")?;
+    if hermes.is_empty()
+        || openclaw.is_empty()
+        || removed_cli.is_empty()
+        || state_directory.is_empty()
+        || hermes.len() > 32_768
+        || openclaw.len() > 32_768
+        || removed_cli.len() > 32_768
+        || state_directory.len() > 32_768
+        || hermes.contains('\0')
+        || openclaw.contains('\0')
+        || removed_cli.contains('\0')
+        || state_directory.contains('\0')
+    {
         return Err(invalid_request());
     }
-    Ok(LegacyPaths {
-        hermes,
-        openclaw,
-        removed_cli,
+    Ok(AdapterAuthority {
+        legacy_paths: LegacyPaths {
+            hermes,
+            openclaw,
+            removed_cli,
+        },
+        state_directory,
     })
+}
+
+fn take_journal_revision_property(object: &Object<'_>, name: &str) -> Result<JournalRevision> {
+    let external = property::<&External<Arc<JournalRevisionToken>>>(object, name)?;
+    external
+        .as_ref()
+        .value
+        .lock()
+        .map_err(|_| bridge_error())?
+        .take()
+        .ok_or_else(invalid_request)
+}
+
+fn journal_revision_external(value: JournalRevision) -> External<Arc<JournalRevisionToken>> {
+    External::new(Arc::new(JournalRevisionToken {
+        value: Mutex::new(Some(value)),
+    }))
 }
 
 fn take_evidence_property(object: &Object<'_>, name: &str) -> Result<WholePassEvidence> {
@@ -1452,6 +1496,240 @@ fn make_setup_lease(env: &Env, handle: PlatformSetupLease) -> Result<BridgeObjec
     finish_object(&result)
 }
 
+const MAX_RECONCILIATION_JOURNAL_BYTES: usize = 65_536;
+
+struct PendingJournalBytes(Option<Vec<u8>>);
+
+impl PendingJournalBytes {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self(Some(bytes))
+    }
+
+    fn take(&mut self) -> Result<Vec<u8>> {
+        self.0.take().ok_or_else(bridge_error)
+    }
+}
+
+impl Drop for PendingJournalBytes {
+    fn drop(&mut self) {
+        if let Some(bytes) = self.0.as_mut() {
+            zeroize_bytes(bytes.as_mut_slice());
+        }
+    }
+}
+
+fn make_reconciliation_journal_lease(
+    env: &Env,
+    handle: PlatformReconciliationJournalLease,
+) -> Result<BridgeObject> {
+    let shared = Arc::new(Mutex::new(Some(handle)));
+    let mut result = Object::new(env).map_err(|_| bridge_error())?;
+
+    let renew_handle = Arc::clone(&shared);
+    let renew = env
+        .create_function_from_closure::<(), _, _>("renew", move |context| {
+            exact_argument_count(&context, 0)?;
+            let status = with_handle(&renew_handle, |handle| Ok(handle.renew()))?;
+            let mut value = Object::new(context.env).map_err(|_| bridge_error())?;
+            value
+                .set_named_property(
+                    "status",
+                    match status {
+                        LeaseRenewal::Held => "held",
+                        LeaseRenewal::Lost => "lost",
+                    },
+                )
+                .map_err(|_| bridge_error())?;
+            finish_object(&value)
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("renew", renew)
+        .map_err(|_| bridge_error())?;
+
+    let observe_handle = Arc::clone(&shared);
+    let observe = env
+        .create_function_from_closure::<(), GuardedObjectRef, _>("observe", move |context| {
+            exact_argument_count(&context, 0)?;
+            let observation = with_handle(&observe_handle, |handle| handle.observe())?;
+            match observation {
+                JournalObservation::Missing { revision } => {
+                    let mut value = Object::new(context.env).map_err(|_| bridge_error())?;
+                    value
+                        .set_named_property("status", "missing")
+                        .map_err(|_| bridge_error())?;
+                    value
+                        .set_named_property("revision", journal_revision_external(revision))
+                        .map_err(|_| bridge_error())?;
+                    Ok(GuardedObjectRef::plain(finish_object(&value)?))
+                }
+                JournalObservation::Present { revision, bytes } => {
+                    let mut pending = PendingJournalBytes::new(bytes);
+                    let mut value = Object::new(context.env).map_err(|_| bridge_error())?;
+                    value
+                        .set_named_property("status", "present")
+                        .map_err(|_| bridge_error())?;
+                    value
+                        .set_named_property("revision", journal_revision_external(revision))
+                        .map_err(|_| bridge_error())?;
+                    let read =
+                        create_guarded_bounded_read_result(context.env, pending.take()?, true)
+                            .map_err(|_| bridge_error())?;
+                    let continuation = read.secret_continuation().ok_or_else(bridge_error)?;
+                    value
+                        .set_named_property("read", read)
+                        .map_err(|_| bridge_error())?;
+                    Ok(continuation.protect(finish_object(&value)?))
+                }
+            }
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("observe", observe)
+        .map_err(|_| bridge_error())?;
+
+    let replace_handle = Arc::clone(&shared);
+    let replace = env
+        .create_function_from_closure::<(), _, _>("replace", move |context| {
+            exact_argument_count(&context, 1)?;
+            let options = argument::<Object<'_>>(&context, 0)?;
+            exact_keys(&options, &["bytes", "expected"])?;
+            let expected = take_journal_revision_property(&options, "expected")?;
+            let bytes = property::<Uint8Array>(&options, "bytes")?;
+            if bytes.is_empty() || bytes.len() > MAX_RECONCILIATION_JOURNAL_BYTES {
+                return Err(invalid_request());
+            }
+            let replaced = with_handle(&replace_handle, |handle| {
+                handle.replace(&expected, bytes.as_ref())
+            })?;
+            let mut value = Object::new(context.env).map_err(|_| bridge_error())?;
+            match replaced {
+                JournalReplaceResult::Conflict => {
+                    value
+                        .set_named_property("status", "conflict")
+                        .map_err(|_| bridge_error())?;
+                }
+                JournalReplaceResult::Replaced { revision } => {
+                    value
+                        .set_named_property("status", "replaced")
+                        .map_err(|_| bridge_error())?;
+                    value
+                        .set_named_property("revision", journal_revision_external(revision))
+                        .map_err(|_| bridge_error())?;
+                }
+            }
+            finish_object(&value)
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("replace", replace)
+        .map_err(|_| bridge_error())?;
+
+    let remove_handle = Arc::clone(&shared);
+    let remove = env
+        .create_function_from_closure::<(), _, _>("remove", move |context| {
+            exact_argument_count(&context, 1)?;
+            let options = argument::<Object<'_>>(&context, 0)?;
+            exact_keys(&options, &["expected"])?;
+            let expected = take_journal_revision_property(&options, "expected")?;
+            let removed = with_handle(&remove_handle, |handle| handle.remove(&expected))?;
+            let mut value = Object::new(context.env).map_err(|_| bridge_error())?;
+            value
+                .set_named_property(
+                    "status",
+                    match removed {
+                        JournalRemoveResult::Removed => "removed",
+                        JournalRemoveResult::Conflict => "conflict",
+                    },
+                )
+                .map_err(|_| bridge_error())?;
+            finish_object(&value)
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("remove", remove)
+        .map_err(|_| bridge_error())?;
+
+    let release_handle = Arc::clone(&shared);
+    let release = env
+        .create_function_from_closure::<(), (), _>("release", move |context| {
+            exact_argument_count(&context, 0)?;
+            let mut handle = take_handle(&release_handle)?;
+            native_result(handle.release())
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("release", release)
+        .map_err(|_| bridge_error())?;
+
+    let abandon_handle = Arc::clone(&shared);
+    let abandon = env
+        .create_function_from_closure::<(), (), _>("abandon", move |context| {
+            exact_argument_count(&context, 0)?;
+            let mut handle = take_handle(&abandon_handle)?;
+            native_result(handle.abandon())
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("abandon", abandon)
+        .map_err(|_| bridge_error())?;
+
+    finish_object(&result)
+}
+
+fn make_journal_adapter(env: &Env, authority: Arc<AdapterAuthority>) -> Result<BridgeObject> {
+    let mut result = Object::new(env).map_err(|_| bridge_error())?;
+    let acquire = env
+        .create_function_from_closure::<(), _, _>("acquire", move |context| {
+            exact_argument_count(&context, 1)?;
+            let options = argument::<Object<'_>>(&context, 0)?;
+            exact_keys(&options, &["nonce"])?;
+            let nonce = property::<String>(&options, "nonce")?;
+            let acquired = match acquire_reconciliation_journal_lease(
+                Path::new(&authority.state_directory),
+                &nonce,
+            ) {
+                Ok(value) => value,
+                Err(PlatformStoreError::InvalidInput) => return Err(invalid_request()),
+                Err(_) => return Err(bridge_error()),
+            };
+            let mut value = Object::new(context.env).map_err(|_| bridge_error())?;
+            match acquired {
+                ReconciliationJournalLeaseAcquireResult::Busy => {
+                    value
+                        .set_named_property("status", "busy")
+                        .map_err(|_| bridge_error())?;
+                }
+                ReconciliationJournalLeaseAcquireResult::Acquired { prior, lease } => {
+                    value
+                        .set_named_property("status", "acquired")
+                        .map_err(|_| bridge_error())?;
+                    value
+                        .set_named_property(
+                            "priorLease",
+                            match prior {
+                                PriorLease::Absent => "absent",
+                                PriorLease::ProvenAbandoned => "proven-abandoned",
+                            },
+                        )
+                        .map_err(|_| bridge_error())?;
+                    value
+                        .set_named_property(
+                            "lease",
+                            make_reconciliation_journal_lease(context.env, lease)?,
+                        )
+                        .map_err(|_| bridge_error())?;
+                }
+            }
+            finish_object(&value)
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("acquire", acquire)
+        .map_err(|_| bridge_error())?;
+    finish_object(&result)
+}
+
 fn make_read_adapter(env: &Env) -> Result<BridgeObject> {
     let mut result = Object::new(env).map_err(|_| bridge_error())?;
     let open = env
@@ -1785,10 +2063,14 @@ fn make_mutation_adapter(env: &Env, authority: Arc<AdapterAuthority>) -> Result<
 }
 
 pub(crate) fn create_adapters(env: &Env, configuration: &Object<'_>) -> Result<BridgeObject> {
-    let authority = Arc::new(AdapterAuthority {
-        legacy_paths: parse_legacy_paths(configuration)?,
-    });
+    let authority = Arc::new(parse_authority(configuration)?);
     let mut result = Object::new(env).map_err(|_| bridge_error())?;
+    result
+        .set_named_property(
+            "journal",
+            make_journal_adapter(env, Arc::clone(&authority))?,
+        )
+        .map_err(|_| bridge_error())?;
     result
         .set_named_property("legacy", make_legacy_adapter(env, Arc::clone(&authority))?)
         .map_err(|_| bridge_error())?;

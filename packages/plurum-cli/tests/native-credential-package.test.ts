@@ -47,6 +47,7 @@ const NATIVE_CONFIGURATION = Object.freeze({
     openclaw: "/isolated/home/.openclaw/plurum.json",
     removedCli: "/isolated/home/.plurum/config.json",
   }),
+  stateDirectory: "/isolated/home/.config/plurum",
 }) satisfies NativeCredentialStoreConfiguration;
 
 interface TemporaryRoot {
@@ -244,6 +245,11 @@ function createNativeModule(
   target: NativeCredentialTarget = TARGET,
   overrides: Readonly<Record<string, unknown>> = {},
 ): Record<string, unknown> {
+  const journal = Object.freeze({
+    acquire() {
+      return { status: "busy" as const };
+    },
+  });
   const legacy = Object.freeze({
     read() {
       return { status: "missing" as const };
@@ -277,7 +283,7 @@ function createNativeModule(
     packageVersion: CLI_VERSION,
     target,
     createAdapters() {
-      return { legacy, mutation, observation, read };
+      return { journal, legacy, mutation, observation, read };
     },
     ...overrides,
   };

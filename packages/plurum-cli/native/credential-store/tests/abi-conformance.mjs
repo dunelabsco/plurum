@@ -1332,7 +1332,7 @@ async function runChild() {
     ]);
 
   assert.equal(addon.magic, "plurum-native-credential-store");
-  assert.equal(addon.abiVersion, 2);
+  assert.equal(addon.abiVersion, 3);
   assert.equal(addon.nodeApiVersion, 8);
   assert.equal(addon.packageVersion, CLI_VERSION);
   assert.equal(addon.target, expectedTarget);
@@ -1343,17 +1343,20 @@ async function runChild() {
       openclaw: join(runRoot, "legacy-openclaw", "plurum.json"),
       removedCli: join(runRoot, "legacy-removed", "config.json"),
     }),
+    stateDirectory: join(runRoot, "credential-store"),
   });
   const rawAdapters = Reflect.apply(addon.createAdapters, addon, [
     nativeConfiguration,
   ]);
   assert.ok(rawAdapters !== null && typeof rawAdapters === "object");
   assert.deepEqual(Object.keys(rawAdapters).sort(), [
+    "journal",
     "legacy",
     "mutation",
     "observation",
     "read",
   ]);
+  assert.deepEqual(Object.keys(rawAdapters.journal), ["acquire"]);
   assert.deepEqual(Object.keys(rawAdapters.legacy), ["read"]);
   assert.deepEqual(Object.keys(rawAdapters.read), ["openPrivateDirectory"]);
   assert.deepEqual(Object.keys(rawAdapters.observation), [
@@ -1497,6 +1500,7 @@ async function runChild() {
     assert.fail("native credential adapters must be available");
   }
   assert.equal(Object.isFrozen(first), true);
+  assert.equal(Object.isFrozen(first.journal), true);
   assert.equal(Object.isFrozen(first.legacy), true);
   assert.equal(Object.isFrozen(first.read), true);
   assert.equal(Object.isFrozen(first.observation), true);
@@ -1732,6 +1736,155 @@ async function runChild() {
   assert.equal(freshAcquire.directory, "existing");
   await freshAcquire.lease.release();
 
+  const nestedCredentialLease = await first.mutation.acquireSetupLease(
+    credentialDirectory,
+    Object.freeze({
+      createDirectory: true,
+      noFollow: true,
+      nonce: randomUUID(),
+    }),
+  );
+  assert.equal(nestedCredentialLease.status, "acquired");
+  if (nestedCredentialLease.status !== "acquired") {
+    assert.fail("credential lease must be acquired for nested journal proof");
+  }
+
+  const rawJournalAcquired = rawAdapters.journal.acquire(
+    Object.freeze({ nonce: randomUUID() }),
+  );
+  assert.equal(rawJournalAcquired.status, "acquired");
+  assert.equal(rawJournalAcquired.priorLease, "absent");
+  assert.deepEqual(Object.keys(rawJournalAcquired.lease).sort(), [
+    "abandon",
+    "observe",
+    "release",
+    "remove",
+    "renew",
+    "replace",
+  ]);
+  const rawJournalMissing = rawJournalAcquired.lease.observe();
+  assert.equal(rawJournalMissing.status, "missing");
+  assert.deepEqual(Reflect.ownKeys(rawJournalMissing.revision), []);
+  const journalBytes = new TextEncoder().encode(
+    '{"kind":"host-reconciliation","stage":"apply"}\n',
+  );
+  const expectedJournalBytes = journalBytes.slice();
+  const rawJournalReplaced = rawJournalAcquired.lease.replace(
+    Object.freeze({
+      bytes: journalBytes,
+      expected: rawJournalMissing.revision,
+    }),
+  );
+  assert.equal(rawJournalReplaced.status, "replaced");
+  assert.deepEqual(Reflect.ownKeys(rawJournalReplaced.revision), []);
+  journalBytes.fill(0);
+  assert.throws(
+    () =>
+      rawJournalAcquired.lease.replace(
+        Object.freeze({
+          bytes: expectedJournalBytes,
+          expected: rawJournalMissing.revision,
+        }),
+      ),
+    /invalid/iu,
+    "raw journal revisions must be one-shot",
+  );
+  const rawJournalPresent = rawJournalAcquired.lease.observe();
+  assert.equal(rawJournalPresent.status, "present");
+  assert.deepEqual(Object.keys(rawJournalPresent).sort(), [
+    "read",
+    "revision",
+    "status",
+  ]);
+  assert.equal(rawJournalPresent.read.endOfFile, true);
+  assert.deepEqual(
+    Uint8Array.from(rawJournalPresent.read.bytes),
+    expectedJournalBytes,
+  );
+  rawJournalPresent.read.bytes.fill(0);
+  assert.deepEqual(
+    rawAdapters.journal.acquire(Object.freeze({ nonce: randomUUID() })),
+    { status: "busy" },
+  );
+  rawJournalAcquired.lease.release();
+  await nestedCredentialLease.lease.release();
+
+  const publicJournalFirst = await first.journal.acquire(
+    Object.freeze({ nonce: randomUUID() }),
+  );
+  assert.equal(publicJournalFirst.status, "acquired");
+  if (publicJournalFirst.status !== "acquired") {
+    assert.fail("public journal lease must be acquired");
+  }
+  const firstPublicObservation = await publicJournalFirst.lease.observe();
+  assert.equal(firstPublicObservation.status, "present");
+  if (firstPublicObservation.status !== "present") {
+    assert.fail("public journal must observe the raw write");
+  }
+  assert.deepEqual(firstPublicObservation.bytes, expectedJournalBytes);
+  assert.deepEqual(Reflect.ownKeys(firstPublicObservation.revision), []);
+  await publicJournalFirst.lease.release();
+
+  const publicJournalSecond = await first.journal.acquire(
+    Object.freeze({ nonce: randomUUID() }),
+  );
+  assert.equal(publicJournalSecond.status, "acquired");
+  if (publicJournalSecond.status !== "acquired") {
+    assert.fail("second public journal lease must be acquired");
+  }
+  await assert.rejects(
+    () =>
+      publicJournalSecond.lease.remove(
+        Object.freeze({ expected: firstPublicObservation.revision }),
+      ),
+    /invalid/iu,
+    "journal revisions must remain bound to one lease",
+  );
+  const secondPublicObservation = await publicJournalSecond.lease.observe();
+  assert.equal(secondPublicObservation.status, "present");
+  if (secondPublicObservation.status !== "present") {
+    assert.fail("second public journal observation must be present");
+  }
+  const replacementJournalBytes = new TextEncoder().encode(
+    '{"kind":"host-reconciliation","stage":"verify"}\n',
+  );
+  const publicJournalReplaced = await publicJournalSecond.lease.replace(
+    Object.freeze({
+      bytes: replacementJournalBytes,
+      expected: secondPublicObservation.revision,
+    }),
+  );
+  assert.equal(publicJournalReplaced.status, "replaced");
+  replacementJournalBytes.fill(0);
+  if (publicJournalReplaced.status !== "replaced") {
+    assert.fail("public journal replacement must succeed");
+  }
+  assert.deepEqual(
+    await publicJournalSecond.lease.remove(
+      Object.freeze({ expected: publicJournalReplaced.revision }),
+    ),
+    { status: "removed" },
+  );
+  await publicJournalSecond.lease.release();
+
+  const rawAbandonedJournal = rawAdapters.journal.acquire(
+    Object.freeze({ nonce: randomUUID() }),
+  );
+  assert.equal(rawAbandonedJournal.status, "acquired");
+  rawAbandonedJournal.lease.abandon();
+
+  const recoveredJournal = await first.journal.acquire(
+    Object.freeze({ nonce: randomUUID() }),
+  );
+  assert.equal(recoveredJournal.status, "acquired");
+  assert.equal(recoveredJournal.priorLease, "proven-abandoned");
+  if (recoveredJournal.status !== "acquired") {
+    assert.fail("abandoned journal lease must be recoverable");
+  }
+  assert.equal((await recoveredJournal.lease.observe()).status, "missing");
+  await recoveredJournal.lease.release();
+  expectedJournalBytes.fill(0);
+
   const incompleteRawObservation =
     rawAdapters.observation.openPrivateDirectory(
       credentialDirectory,
@@ -1848,6 +2001,7 @@ async function runChild() {
       createAdapters(configuration) {
         assert.deepEqual(configuration, nativeConfiguration);
         return Object.freeze({
+          journal: rawAdapters.journal,
           legacy: capturingLegacyAdapter,
           mutation: rawAdapters.mutation,
           observation: rawAdapters.observation,
@@ -1926,6 +2080,7 @@ async function runChild() {
   assert.equal(loaded.credential.agent_name, changedCredential.agent_name);
   assert.deepEqual(readdirSync(credentialDirectory).sort(), [
     "credentials.json",
+    "host-reconciliation.lock",
     "setup.lock",
   ]);
 }

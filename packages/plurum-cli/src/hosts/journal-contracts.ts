@@ -151,7 +151,12 @@ export type ReconciliationJournalLeaseRenewResult =
 /*
  * This capability has no path-string methods. The adapter owns the protected
  * user-scoped location, user-only access checks, no-follow/reparse defenses,
- * durable atomic replacement, and immediate compare-and-swap revalidation.
+ * durable atomic replacement, and immediate compare-and-swap revalidation. As
+ * with credential mutation, the held lease serializes cooperating Plurum
+ * writers. General filesystems do not expose portable compare-inode-and-rename
+ * or compare-inode-and-unlink operations; arbitrary hostile mutation by a
+ * process already running as the same trusted OS user is outside this
+ * boundary.
  */
 export interface ReconciliationJournalLease {
   renew(): Promise<ReconciliationJournalLeaseRenewResult>;

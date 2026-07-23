@@ -13,9 +13,15 @@ use sha2::{Digest, Sha256};
 
 use plurum_native_secret_memory::zeroize_bytes;
 
+mod journal;
 mod mutation;
 mod platform;
 
+pub(crate) use journal::{
+    acquire_reconciliation_journal_lease, JournalObservation, JournalRemoveResult,
+    JournalReplaceResult, JournalRevision, PosixReconciliationJournalLease,
+    ReconciliationJournalLeaseAcquireResult,
+};
 pub(crate) use mutation::{
     CanonicalEntryRole, ConditionalMutationResult, ExclusiveCreateResult, ExpectedEntrySnapshot,
     ManagedEntry, ManagedEntryObservation, MissingEntrySnapshot, PosixExclusiveWriteHandle,
@@ -29,6 +35,7 @@ const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 const PERMISSION_AND_SPECIAL_BITS: u32 = 0o7777;
 pub(crate) const MAX_ATTESTED_BYTES: usize = 40_961;
+const MAX_SECURE_FILE_BYTES: usize = 65_537;
 
 const LOCK_RECORD_LENGTH: usize = 64;
 const LOCK_STATE_UNINITIALIZED: u8 = 0;
@@ -961,7 +968,11 @@ impl PosixCredentialReadHandle {
             .map(|(security, _)| security)
     }
 
-    pub(crate) fn attest(&self) -> Result<CredentialFileAttestation, PosixStoreError> {
+    fn attest_with_limit(
+        &self,
+        max_bytes: usize,
+        revision_domain: &[u8],
+    ) -> Result<CredentialFileAttestation, PosixStoreError> {
         let directory_state = lock_unpoisoned(&self.directory.state)?;
         let slot = lock_unpoisoned(&self.slot)?;
         let file = slot.as_ref().ok_or(PosixStoreError::Closed)?;
@@ -970,7 +981,7 @@ impl PosixCredentialReadHandle {
             return Err(PosixStoreError::Unsafe);
         }
         let expected_size = usize::try_from(before.size).map_err(|_| PosixStoreError::Limit)?;
-        if expected_size > MAX_ATTESTED_BYTES {
+        if expected_size > max_bytes {
             return Err(PosixStoreError::Limit);
         }
         let mut bytes = read_exact_at(file, expected_size)?;
@@ -980,7 +991,7 @@ impl PosixCredentialReadHandle {
             return Err(PosixStoreError::Lost);
         }
         let revision = digest_metadata(
-            b"plurum-posix-credential-revision-v1\0",
+            revision_domain,
             after,
             after_security.canonical_current,
             after_security.private_access,
@@ -994,8 +1005,23 @@ impl PosixCredentialReadHandle {
         })
     }
 
-    pub(crate) fn read_bounded(&self, max_bytes: usize) -> Result<BoundedRead, PosixStoreError> {
-        if max_bytes > MAX_ATTESTED_BYTES {
+    pub(crate) fn attest(&self) -> Result<CredentialFileAttestation, PosixStoreError> {
+        self.attest_with_limit(MAX_ATTESTED_BYTES, b"plurum-posix-credential-revision-v1\0")
+    }
+
+    fn attest_reconciliation_journal(&self) -> Result<CredentialFileAttestation, PosixStoreError> {
+        self.attest_with_limit(
+            MAX_SECURE_FILE_BYTES,
+            b"plurum-posix-host-reconciliation-revision-v1\0",
+        )
+    }
+
+    fn read_bounded_with_limit(
+        &self,
+        max_bytes: usize,
+        ceiling: usize,
+    ) -> Result<BoundedRead, PosixStoreError> {
+        if max_bytes > ceiling {
             return Err(PosixStoreError::Limit);
         }
         let directory_state = lock_unpoisoned(&self.directory.state)?;
@@ -1021,6 +1047,17 @@ impl PosixCredentialReadHandle {
             end_of_file: u64::try_from(bytes.len()).ok() == Some(after.size),
             bytes,
         })
+    }
+
+    pub(crate) fn read_bounded(&self, max_bytes: usize) -> Result<BoundedRead, PosixStoreError> {
+        self.read_bounded_with_limit(max_bytes, MAX_ATTESTED_BYTES)
+    }
+
+    fn read_reconciliation_journal_bounded(
+        &self,
+        max_bytes: usize,
+    ) -> Result<BoundedRead, PosixStoreError> {
+        self.read_bounded_with_limit(max_bytes, MAX_SECURE_FILE_BYTES)
     }
 
     pub(crate) fn close(&mut self) {

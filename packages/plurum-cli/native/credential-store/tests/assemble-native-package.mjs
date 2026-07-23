@@ -593,7 +593,7 @@ function targetPackageManifest(
     plurumNative: Object.freeze({
       schemaVersion: 1,
       magic: NATIVE_PACKAGE_MAGIC,
-      abiVersion: 2,
+      abiVersion: 3,
       nodeApiVersion: 8,
       target,
       byteLength: artifactBytes,

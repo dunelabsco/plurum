@@ -14,8 +14,14 @@ use plurum_windows_syscall::{
 };
 use sha2::{Digest, Sha256};
 
+mod journal;
 mod mutation;
 
+pub(crate) use journal::{
+    acquire_reconciliation_journal_lease, JournalObservation, JournalRemoveResult,
+    JournalReplaceResult, JournalRevision, ReconciliationJournalLeaseAcquireResult,
+    WindowsReconciliationJournalLease,
+};
 pub(crate) use mutation::{
     CanonicalEntryRole, ConditionalMutationResult, ExclusiveCreateResult, ExpectedEntrySnapshot,
     ManagedEntry, ManagedEntryObservation, MissingEntrySnapshot, PresentEntrySnapshot,

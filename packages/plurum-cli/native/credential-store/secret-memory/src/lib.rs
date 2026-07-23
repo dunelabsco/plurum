@@ -173,6 +173,13 @@ struct AttachedSecret {
 }
 
 impl AttachedSecret {
+    fn fork(&self) -> Self {
+        Self {
+            backing: Rc::clone(&self.backing),
+            armed: true,
+        }
+    }
+
     fn disarm(mut self) {
         self.armed = false;
     }
@@ -423,6 +430,15 @@ pub struct GuardedObjectRef {
     ops: &'static dyn NapiOps,
 }
 
+/// Keeps an external byte allocation armed while its guarded child object is
+/// embedded into a larger callback result. The continuation must protect the
+/// final outer reference or be dropped, which wipes the allocation
+/// synchronously.
+pub struct GuardedSecretContinuation {
+    secret: AttachedSecret,
+    ops: &'static dyn NapiOps,
+}
+
 impl GuardedObjectRef {
     /// Wraps a normal non-secret result so every branch of one callback can
     /// return the same type.
@@ -432,6 +448,33 @@ impl GuardedObjectRef {
             secret: None,
             ops: &PRODUCTION_OPS,
         }
+    }
+
+    /// Forks the current failure guard without copying the byte allocation.
+    /// The returned continuation remains armed even after this child object is
+    /// successfully marshalled into JavaScript.
+    pub fn secret_continuation(&self) -> Option<GuardedSecretContinuation> {
+        self.secret
+            .as_ref()
+            .map(|secret| GuardedSecretContinuation {
+                secret: secret.fork(),
+                ops: self.ops,
+            })
+    }
+}
+
+impl GuardedSecretContinuation {
+    fn protect_reference(self, reference: GuardedReference) -> GuardedObjectRef {
+        GuardedObjectRef {
+            reference,
+            secret: Some(self.secret),
+            ops: self.ops,
+        }
+    }
+
+    /// Transfers this guard to the final outer callback result.
+    pub fn protect(self, object: ObjectRef<false>) -> GuardedObjectRef {
+        self.protect_reference(GuardedReference::Plain(object))
     }
 }
 
@@ -987,6 +1030,107 @@ mod tests {
             assert_wiped(&probe);
             ops.finalize_if_registered_or_ambiguous();
         }
+    }
+
+    #[test]
+    fn bounded_read_continuation_guards_outer_construction_after_child_marshalling() {
+        let ops = leaked_fake(Boundary::None);
+        let probe = Arc::new(WipeProbe::new());
+        let pending = PendingSecret::with_probe(b"nested-secret".to_vec(), Arc::clone(&probe));
+        let guarded = create_guarded_bounded_read_result_with(FAKE_ENV, pending, true, ops)
+            .expect("bounded child construction");
+        let continuation = guarded
+            .secret_continuation()
+            .expect("bounded child must expose one continuation");
+
+        // SAFETY: FAKE_ENV owns the fake reference and every scripted child
+        // marshalling operation succeeds.
+        assert_eq!(
+            unsafe { GuardedObjectRef::to_napi_value(FAKE_ENV, guarded) }
+                .expect("bounded child marshalling"),
+            FAKE_OBJECT
+        );
+        assert_eq!(
+            probe.calls.load(Ordering::SeqCst),
+            0,
+            "the successful child conversion must not disarm its outer guard"
+        );
+
+        // This models any failure while defining the outer property or
+        // creating the outer reference.
+        drop(continuation);
+        assert_wiped(&probe);
+        ops.finalize_if_registered_or_ambiguous();
+    }
+
+    #[test]
+    fn bounded_read_continuation_guards_final_outer_marshalling() {
+        for boundary in [Boundary::GetReferenceValue, Boundary::DeleteReference] {
+            let ops = leaked_fake(boundary);
+            let probe = Arc::new(WipeProbe::new());
+            let backing = Rc::new(SecretBacking::with_probe(
+                b"outer-secret".to_vec(),
+                Arc::clone(&probe),
+            ));
+            let continuation = GuardedSecretContinuation {
+                secret: AttachedSecret {
+                    backing,
+                    armed: true,
+                },
+                ops,
+            };
+            let guarded = continuation.protect_reference(GuardedReference::Secret {
+                env: FAKE_ENV,
+                reference: FAKE_REFERENCE,
+            });
+
+            // SAFETY: the fake owns the scripted reference and intentionally
+            // fails at the selected final marshalling boundary.
+            assert!(
+                unsafe { GuardedObjectRef::to_napi_value(FAKE_ENV, guarded) }.is_err(),
+                "{boundary:?} must fail closed"
+            );
+            assert_wiped(&probe);
+        }
+    }
+
+    #[test]
+    fn bounded_read_continuation_disarms_only_after_outer_success() {
+        let ops = leaked_fake(Boundary::None);
+        let probe = Arc::new(WipeProbe::new());
+        let secret = b"nested-success".to_vec();
+        let pending = PendingSecret::with_probe(secret.clone(), Arc::clone(&probe));
+        let guarded = create_guarded_bounded_read_result_with(FAKE_ENV, pending, true, ops)
+            .expect("bounded child construction");
+        let continuation = guarded
+            .secret_continuation()
+            .expect("bounded child must expose one continuation");
+
+        // SAFETY: the fake owns the scripted child reference and every
+        // operation succeeds.
+        unsafe { GuardedObjectRef::to_napi_value(FAKE_ENV, guarded) }
+            .expect("bounded child marshalling");
+        let outer = continuation.protect_reference(GuardedReference::Secret {
+            env: FAKE_ENV,
+            reference: FAKE_REFERENCE,
+        });
+        // SAFETY: the fake owns the scripted outer reference and every
+        // operation succeeds.
+        unsafe { GuardedObjectRef::to_napi_value(FAKE_ENV, outer) }.expect("outer marshalling");
+        assert_eq!(
+            probe.calls.load(Ordering::SeqCst),
+            0,
+            "successful outer marshalling must leave JavaScript's copy intact"
+        );
+
+        let (data, length) = ops.exposed_bytes();
+        assert_eq!(length, secret.len());
+        // SAFETY: the fake still retains the registered external allocation.
+        let exposed = unsafe { std::slice::from_raw_parts_mut(data, length) };
+        assert_eq!(exposed, secret);
+        exposed.fill(0);
+        ops.finalize_if_registered_or_ambiguous();
+        assert_wiped(&probe);
     }
 
     #[test]

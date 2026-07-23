@@ -46,11 +46,17 @@ import type {
   LegacyCredentialReadAdapter,
   LegacyCredentialSource,
 } from "../../credentials/legacy-reader-contracts.js";
+import type {
+  ReconciliationJournalLease,
+  ReconciliationJournalLeaseNonce,
+  ReconciliationJournalRevisionSnapshot,
+  ReconciliationJournalStoreAdapter,
+} from "../../hosts/journal-contracts.js";
 import { CLI_VERSION } from "../../version.js";
 
 export const NATIVE_CREDENTIAL_STORE_MAGIC =
   "plurum-native-credential-store" as const;
-export const NATIVE_CREDENTIAL_STORE_ABI_VERSION = 2 as const;
+export const NATIVE_CREDENTIAL_STORE_ABI_VERSION = 3 as const;
 export const NATIVE_CREDENTIAL_STORE_NODE_API_VERSION = 8 as const;
 
 export const NATIVE_CREDENTIAL_TARGET_IDS = Object.freeze([
@@ -85,11 +91,13 @@ export interface NativeCredentialLegacyPathAllowlist {
 
 export interface NativeCredentialStoreConfiguration {
   readonly legacyPaths: NativeCredentialLegacyPathAllowlist;
+  readonly stateDirectory: string;
 }
 
 export type NativeCredentialStoreLoadResult =
   | Readonly<{
       status: "available";
+      journal: ReconciliationJournalStoreAdapter;
       legacy: LegacyCredentialReadAdapter;
       read: CredentialStoreReadAdapter;
       observation: CredentialStoreObservationAdapter;
@@ -117,6 +125,7 @@ const MODULE_KEYS = Object.freeze([
   "target",
 ] as const);
 const ADAPTER_PAIR_KEYS = Object.freeze([
+  "journal",
   "legacy",
   "mutation",
   "observation",
@@ -127,7 +136,10 @@ const LEGACY_PATH_ALLOWLIST_KEYS = Object.freeze([
   "openclaw",
   "removedCli",
 ] as const);
-const PROVIDER_CONFIGURATION_KEYS = Object.freeze(["legacyPaths"] as const);
+const PROVIDER_CONFIGURATION_KEYS = Object.freeze([
+  "legacyPaths",
+  "stateDirectory",
+] as const);
 const READ_OPTIONS_KEYS = Object.freeze(["noFollow"] as const);
 const LEGACY_READ_OPTIONS_KEYS = Object.freeze([
   "maxBytes",
@@ -148,6 +160,7 @@ const OBSERVATION_ENTRY_OPTIONS_KEYS = Object.freeze([
   "noFollow",
 ] as const);
 const LEGACY_ADAPTER_KEYS = Object.freeze(["read"] as const);
+const JOURNAL_ADAPTER_KEYS = Object.freeze(["acquire"] as const);
 const READ_ADAPTER_KEYS = Object.freeze(["openPrivateDirectory"] as const);
 const OBSERVATION_ADAPTER_KEYS = Object.freeze([
   "openPrivateDirectory",
@@ -191,6 +204,20 @@ const LEASE_KEYS = Object.freeze([
   "renew",
   "syncDirectory",
 ] as const);
+const JOURNAL_LEASE_KEYS = Object.freeze([
+  "abandon",
+  "observe",
+  "release",
+  "remove",
+  "renew",
+  "replace",
+] as const);
+const JOURNAL_ACQUIRE_OPTIONS_KEYS = Object.freeze(["nonce"] as const);
+const JOURNAL_REPLACE_OPTIONS_KEYS = Object.freeze([
+  "bytes",
+  "expected",
+] as const);
+const JOURNAL_REMOVE_OPTIONS_KEYS = Object.freeze(["expected"] as const);
 const DIRECTORY_ATTESTATION_KEYS = Object.freeze([
   "access",
   "binding",
@@ -229,6 +256,7 @@ const MAX_NATIVE_WRITE_BYTES = 40_960;
 const MAX_NATIVE_TEMPORARY_ENTRIES = 1_024;
 const MAX_LEGACY_READ_BYTES = 16_384;
 const MAX_LEGACY_PATH_CHARACTERS = 32_768;
+const MAX_RECONCILIATION_JOURNAL_BYTES = 65_536;
 const RECOGNIZED_TARGETS = new Set<string>(NATIVE_CREDENTIAL_TARGET_IDS);
 const UNAVAILABLE = Object.freeze({
   status: "unavailable" as const,
@@ -272,10 +300,12 @@ interface NativeCredentialModuleSnapshot {
 }
 
 interface NativeCredentialAdapterPairSnapshot {
+  readonly journalReceiver: UnknownRecord;
   readonly legacyReceiver: UnknownRecord;
   readonly readReceiver: UnknownRecord;
   readonly observationReceiver: UnknownRecord;
   readonly mutationReceiver: UnknownRecord;
+  readonly acquireJournalLease: RawFunction;
   readonly readLegacy: RawFunction;
   readonly openReadPrivateDirectory: RawFunction;
   readonly openObservationPrivateDirectory: RawFunction;
@@ -312,6 +342,17 @@ interface ObservationDirectoryMembraneState {
 interface RawSnapshot {
   readonly kind: "missing" | "present";
   readonly value: object;
+}
+
+interface JournalLeaseMembraneState {
+  active: boolean;
+  lost: boolean;
+  readonly revisions: WeakMap<object, object>;
+  readonly seenRawRevisions: WeakSet<object>;
+}
+
+interface JournalMembrane {
+  readonly seenRawRevisions: WeakSet<object>;
 }
 
 interface InvalidatableHandle {
@@ -400,6 +441,15 @@ function copyLegacyPath(value: unknown): string | undefined {
     : undefined;
 }
 
+function copyStateDirectory(value: unknown): string | undefined {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_LEGACY_PATH_CHARACTERS &&
+    !OPAQUE_CONTROL.test(value)
+    ? value
+    : undefined;
+}
+
 function normalizeLegacyPathAllowlist(
   value: unknown,
 ): Readonly<NativeCredentialLegacyPathAllowlist> | undefined {
@@ -443,9 +493,12 @@ function normalizeProviderConfiguration(
     const legacyPaths = normalizeLegacyPathAllowlist(
       captureRawField(value, "legacyPaths"),
     );
-    return legacyPaths === undefined
+    const stateDirectory = copyStateDirectory(
+      captureRawField(value, "stateDirectory"),
+    );
+    return legacyPaths === undefined || stateDirectory === undefined
       ? undefined
-      : FREEZE({ legacyPaths });
+      : FREEZE({ legacyPaths, stateDirectory });
   } catch {
     return undefined;
   }
@@ -534,6 +587,25 @@ function parseObservedMutationRequest(
     : undefined;
 }
 
+function parseJournalAcquireRequest(
+  options: unknown,
+): ReconciliationJournalLeaseNonce | undefined {
+  try {
+    if (
+      !isRecord(options) ||
+      !hasExactOwnKeys(options, JOURNAL_ACQUIRE_OPTIONS_KEYS)
+    ) {
+      return undefined;
+    }
+    const nonce = captureRawField(options, "nonce");
+    return typeof nonce === "string" && LOWERCASE_UUID_V4.test(nonce)
+      ? (nonce as ReconciliationJournalLeaseNonce)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function parseAdapterPair(
   value: unknown,
 ): NativeCredentialAdapterPairSnapshot | undefined {
@@ -541,11 +613,14 @@ function parseAdapterPair(
     return undefined;
   }
 
+  const journalReceiver = captureRawField(value, "journal");
   const legacyReceiver = captureRawField(value, "legacy");
   const mutationReceiver = captureRawField(value, "mutation");
   const observationReceiver = captureRawField(value, "observation");
   const readReceiver = captureRawField(value, "read");
   if (
+    !isRecord(journalReceiver) ||
+    !hasExactOwnKeys(journalReceiver, JOURNAL_ADAPTER_KEYS) ||
     !isRecord(legacyReceiver) ||
     !hasExactOwnKeys(legacyReceiver, LEGACY_ADAPTER_KEYS) ||
     !isRecord(readReceiver) ||
@@ -557,6 +632,7 @@ function parseAdapterPair(
   ) {
     return undefined;
   }
+  const acquireJournalLease = captureRawField(journalReceiver, "acquire");
   const readLegacy = captureRawField(legacyReceiver, "read");
   const openReadPrivateDirectory = captureRawField(
     readReceiver,
@@ -575,6 +651,7 @@ function parseAdapterPair(
     "acquireObservedSetupLease",
   );
   if (
+    typeof acquireJournalLease !== "function" ||
     typeof readLegacy !== "function" ||
     typeof openReadPrivateDirectory !== "function" ||
     typeof openObservationPrivateDirectory !== "function" ||
@@ -585,10 +662,12 @@ function parseAdapterPair(
   }
 
   return Object.freeze({
+    journalReceiver,
     legacyReceiver,
     readReceiver,
     observationReceiver,
     mutationReceiver,
+    acquireJournalLease: acquireJournalLease as RawFunction,
     readLegacy: readLegacy as RawFunction,
     openReadPrivateDirectory: openReadPrivateDirectory as RawFunction,
     openObservationPrivateDirectory:
@@ -2126,6 +2205,384 @@ function normalizeObservedAcquireResult(
   }
 }
 
+function mintJournalRevision(
+  value: unknown,
+  state: JournalLeaseMembraneState,
+): ReconciliationJournalRevisionSnapshot {
+  try {
+    ensureActive(state.active && !state.lost);
+    suppressUnexpectedPromiseRejection(value);
+    if (
+      !isRecord(value) ||
+      !hasExactOwnKeys(value, []) ||
+      isThenable(value) ||
+      state.seenRawRevisions.has(value)
+    ) {
+      return nativeOperationFailed();
+    }
+    state.seenRawRevisions.add(value);
+    const revision = FREEZE({});
+    state.revisions.set(revision, value);
+    return revision as ReconciliationJournalRevisionSnapshot;
+  } catch {
+    return nativeOperationFailed();
+  }
+}
+
+function claimJournalRevision(
+  value: unknown,
+  state: JournalLeaseMembraneState,
+): object {
+  try {
+    ensureActive(state.active && !state.lost);
+    if (value === null || typeof value !== "object") {
+      return invalidAdapterRequest();
+    }
+    const revision = state.revisions.get(value);
+    state.revisions.delete(value);
+    if (revision === undefined) {
+      return invalidAdapterRequest();
+    }
+    return revision;
+  } catch {
+    return invalidAdapterRequest();
+  }
+}
+
+function prepareJournalReplaceRequest(
+  options: unknown,
+  state: JournalLeaseMembraneState,
+):
+  | Readonly<{
+      expected: object;
+      bytes: Uint8Array;
+    }>
+  | undefined {
+  let copiedBytes: Uint8Array | undefined;
+  try {
+    if (
+      !isRecord(options) ||
+      !hasExactOwnKeys(options, JOURNAL_REPLACE_OPTIONS_KEYS)
+    ) {
+      return undefined;
+    }
+    const expected = claimJournalRevision(
+      captureRawField(options, "expected"),
+      state,
+    );
+    copiedBytes = copyBaseBytes(
+      captureRawField(options, "bytes"),
+      MAX_RECONCILIATION_JOURNAL_BYTES,
+      false,
+    );
+    if (copiedBytes === undefined) {
+      return undefined;
+    }
+    const result = { bytes: copiedBytes, expected };
+    copiedBytes = undefined;
+    return result;
+  } catch {
+    return undefined;
+  } finally {
+    if (copiedBytes !== undefined) {
+      wipeBytes(copiedBytes);
+    }
+  }
+}
+
+function prepareJournalRemoveRequest(
+  options: unknown,
+  state: JournalLeaseMembraneState,
+): Readonly<{ expected: object }> | undefined {
+  try {
+    if (
+      !isRecord(options) ||
+      !hasExactOwnKeys(options, JOURNAL_REMOVE_OPTIONS_KEYS)
+    ) {
+      return undefined;
+    }
+    return {
+      expected: claimJournalRevision(
+        captureRawField(options, "expected"),
+        state,
+      ),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeJournalRead(value: unknown): Uint8Array {
+  let rawBytes: unknown;
+  let copiedBytes: Uint8Array | undefined;
+  try {
+    if (
+      isRecord(value) &&
+      Reflect.apply(HAS_OWN, value, ["bytes"])
+    ) {
+      rawBytes = captureRawField(value, "bytes");
+    }
+    if (
+      !isRecord(value) ||
+      !hasExactOwnKeys(value, ["bytes", "endOfFile"]) ||
+      captureRawField(value, "endOfFile") !== true
+    ) {
+      return nativeOperationFailed();
+    }
+    copiedBytes = copyBaseBytes(
+      rawBytes,
+      MAX_RECONCILIATION_JOURNAL_BYTES,
+      false,
+    );
+    if (copiedBytes === undefined) {
+      return nativeOperationFailed();
+    }
+    const result = copiedBytes;
+    copiedBytes = undefined;
+    return result;
+  } catch {
+    return nativeOperationFailed();
+  } finally {
+    if (copiedBytes !== undefined) {
+      wipeBytes(copiedBytes);
+    }
+    try {
+      wipeBytes(rawBytes as Uint8Array);
+    } catch {
+      // The public error remains static even for hostile typed-array objects.
+    }
+  }
+}
+
+function normalizeJournalObservation(
+  value: unknown,
+  state: JournalLeaseMembraneState,
+) {
+  let publicBytes: Uint8Array | undefined;
+  try {
+    if (!isRecord(value)) {
+      return nativeOperationFailed();
+    }
+    const status = captureRawField(value, "status");
+    if (
+      status === "missing" &&
+      hasExactOwnKeys(value, ["revision", "status"])
+    ) {
+      return FREEZE({
+        status: "missing" as const,
+        revision: mintJournalRevision(
+          captureRawField(value, "revision"),
+          state,
+        ),
+      });
+    }
+    if (
+      status !== "present" ||
+      !hasExactOwnKeys(value, ["read", "revision", "status"])
+    ) {
+      return nativeOperationFailed();
+    }
+    publicBytes = normalizeJournalRead(captureRawField(value, "read"));
+    const result = FREEZE({
+      status: "present" as const,
+      revision: mintJournalRevision(
+        captureRawField(value, "revision"),
+        state,
+      ),
+      bytes: publicBytes,
+    });
+    publicBytes = undefined;
+    return result;
+  } catch {
+    return nativeOperationFailed();
+  } finally {
+    if (publicBytes !== undefined) {
+      wipeBytes(publicBytes);
+    }
+  }
+}
+
+function normalizeJournalReplaceResult(
+  value: unknown,
+  state: JournalLeaseMembraneState,
+) {
+  try {
+    if (!isRecord(value)) {
+      return nativeOperationFailed();
+    }
+    const status = captureRawField(value, "status");
+    if (
+      status === "conflict" &&
+      hasExactOwnKeys(value, ["status"])
+    ) {
+      return FREEZE({ status: "conflict" as const });
+    }
+    if (
+      status !== "replaced" ||
+      !hasExactOwnKeys(value, ["revision", "status"])
+    ) {
+      return nativeOperationFailed();
+    }
+    return FREEZE({
+      status: "replaced" as const,
+      revision: mintJournalRevision(
+        captureRawField(value, "revision"),
+        state,
+      ),
+    });
+  } catch {
+    return nativeOperationFailed();
+  }
+}
+
+function normalizeJournalRemoveResult(value: unknown) {
+  try {
+    if (!isRecord(value) || !hasExactOwnKeys(value, ["status"])) {
+      return nativeOperationFailed();
+    }
+    const status = captureRawField(value, "status");
+    if (status !== "removed" && status !== "conflict") {
+      return nativeOperationFailed();
+    }
+    return FREEZE({ status });
+  } catch {
+    return nativeOperationFailed();
+  }
+}
+
+function wrapJournalLease(
+  value: unknown,
+  membrane: JournalMembrane,
+): ReconciliationJournalLease {
+  const raw = captureRawHandle(value, JOURNAL_LEASE_KEYS);
+  const state: JournalLeaseMembraneState = {
+    active: true,
+    lost: false,
+    revisions: new WeakMap<object, object>(),
+    seenRawRevisions: membrane.seenRawRevisions,
+  };
+
+  return FREEZE<ReconciliationJournalLease>({
+    async renew() {
+      ensureActive(state.active && !state.lost);
+      const result = callRaw(rawMethod(raw, "renew"), raw.receiver, []);
+      try {
+        if (!isRecord(result) || !hasExactOwnKeys(result, ["status"])) {
+          return nativeOperationFailed();
+        }
+        const status = captureRawField(result, "status");
+        if (status !== "held" && status !== "lost") {
+          return nativeOperationFailed();
+        }
+        if (status === "lost") {
+          state.lost = true;
+        }
+        return FREEZE({ status });
+      } catch {
+        return nativeOperationFailed();
+      }
+    },
+    async observe() {
+      ensureActive(state.active && !state.lost);
+      const result = normalizeJournalObservation(
+        callRaw(rawMethod(raw, "observe"), raw.receiver, []),
+        state,
+      );
+      ensureActive(state.active && !state.lost);
+      return result;
+    },
+    async replace(options) {
+      ensureActive(state.active && !state.lost);
+      const request = prepareJournalReplaceRequest(options, state);
+      if (request === undefined) {
+        return invalidAdapterRequest();
+      }
+      try {
+        const result = normalizeJournalReplaceResult(
+          callRaw(rawMethod(raw, "replace"), raw.receiver, [
+            FREEZE({
+              bytes: request.bytes,
+              expected: request.expected,
+            }),
+          ]),
+          state,
+        );
+        ensureActive(state.active && !state.lost);
+        return result;
+      } finally {
+        wipeBytes(request.bytes);
+      }
+    },
+    async remove(options) {
+      ensureActive(state.active && !state.lost);
+      const request = prepareJournalRemoveRequest(options, state);
+      if (request === undefined) {
+        return invalidAdapterRequest();
+      }
+      const result = normalizeJournalRemoveResult(
+        callRaw(rawMethod(raw, "remove"), raw.receiver, [
+          FREEZE({ expected: request.expected }),
+        ]),
+      );
+      ensureActive(state.active && !state.lost);
+      return result;
+    },
+    async release() {
+      ensureActive(state.active && !state.lost);
+      state.active = false;
+      callRawVoid(rawMethod(raw, "release"), raw.receiver);
+    },
+    async abandon() {
+      ensureActive(state.active && state.lost);
+      state.active = false;
+      callRawVoid(rawMethod(raw, "abandon"), raw.receiver);
+    },
+  });
+}
+
+function normalizeJournalAcquireResult(
+  value: unknown,
+  membrane: JournalMembrane,
+) {
+  let possibleLease: unknown;
+  try {
+    if (!isRecord(value)) {
+      return nativeOperationFailed();
+    }
+    const status = captureRawField(value, "status");
+    if (
+      status === "acquired" &&
+      Reflect.apply(HAS_OWN, value, ["lease"])
+    ) {
+      possibleLease = captureRawField(value, "lease");
+    }
+    if (
+      status === "busy" &&
+      hasExactOwnKeys(value, ["status"])
+    ) {
+      return FREEZE({ status: "busy" as const });
+    }
+    if (
+      status !== "acquired" ||
+      !hasExactOwnKeys(value, ["lease", "priorLease", "status"])
+    ) {
+      return nativeOperationFailed();
+    }
+    const priorLease = captureRawField(value, "priorLease");
+    if (priorLease !== "absent" && priorLease !== "proven-abandoned") {
+      return nativeOperationFailed();
+    }
+    return FREEZE({
+      status: "acquired" as const,
+      priorLease,
+      lease: wrapJournalLease(possibleLease, membrane),
+    });
+  } catch {
+    bestEffortRawTerminal(possibleLease, "abandon");
+    return nativeOperationFailed();
+  }
+}
+
 function wrapAdapterPair(
   pair: NativeCredentialAdapterPairSnapshot,
   configuration: Readonly<NativeCredentialStoreConfiguration>,
@@ -2134,6 +2591,23 @@ function wrapAdapterPair(
     publicToRaw: new WeakMap<object, object>(),
     seenRaw: new WeakSet<object>(),
   };
+  const journalMembrane: JournalMembrane = {
+    seenRawRevisions: new WeakSet<object>(),
+  };
+  const journal = FREEZE<ReconciliationJournalStoreAdapter>({
+    async acquire(options) {
+      const nonce = parseJournalAcquireRequest(options);
+      if (nonce === undefined) {
+        return invalidAdapterRequest();
+      }
+      return normalizeJournalAcquireResult(
+        callRaw(pair.acquireJournalLease, pair.journalReceiver, [
+          FREEZE({ nonce }),
+        ]),
+        journalMembrane,
+      );
+    },
+  });
   const legacy = FREEZE<LegacyCredentialReadAdapter>({
     async read(source, path, options) {
       let valid = false;
@@ -2267,6 +2741,7 @@ function wrapAdapterPair(
 
   return FREEZE({
     status: "available" as const,
+    journal,
     legacy,
     read,
     observation,

@@ -19,6 +19,10 @@ import type {
   CredentialStoreObservationDirectoryHandle,
 } from "../src/credentials/store-observation-contracts.js";
 import type { CredentialStoreWholePassEvidence } from "../src/credentials/store-contracts.js";
+import type {
+  ReconciliationJournalLeaseNonce,
+  ReconciliationJournalRevisionSnapshot,
+} from "../src/hosts/journal-contracts.js";
 
 const TARGET = "darwin-arm64" satisfies NativeCredentialTarget;
 const SECRET_SENTINEL = "plrm_live_NATIVE_PROVIDER_SECRET_SENTINEL";
@@ -27,7 +31,23 @@ const LEGACY_PATHS = Object.freeze({
   openclaw: "/isolated/openclaw/config.json",
   removedCli: "/isolated/plurum/legacy.json",
 });
-const CONFIGURATION = Object.freeze({ legacyPaths: LEGACY_PATHS });
+const STATE_DIRECTORY = "/isolated/plurum";
+const CONFIGURATION = Object.freeze({
+  legacyPaths: LEGACY_PATHS,
+  stateDirectory: STATE_DIRECTORY,
+});
+const JOURNAL_NONCE =
+  "018f5d10-ee3a-476f-9bfb-c1e93dd50074" as ReconciliationJournalLeaseNonce;
+const SECOND_JOURNAL_NONCE =
+  "128f5d10-ee3a-476f-9bfb-c1e93dd50075" as ReconciliationJournalLeaseNonce;
+
+function defaultRawJournalAdapter(): Record<string, unknown> {
+  return {
+    acquire() {
+      return { status: "busy" as const };
+    },
+  };
+}
 
 function defaultRawLegacyAdapter(): Record<string, unknown> {
   return {
@@ -52,6 +72,7 @@ function completeRawAdapterPair(
   read: Record<string, unknown>,
   mutation: Record<string, unknown>,
   options: Readonly<{
+    journal?: Record<string, unknown>;
     legacy?: Record<string, unknown>;
     observation?: Record<string, unknown>;
   }> = Object.freeze({}),
@@ -67,10 +88,33 @@ function completeRawAdapterPair(
     });
   }
   return {
+    journal: options.journal ?? defaultRawJournalAdapter(),
     legacy: options.legacy ?? defaultRawLegacyAdapter(),
     mutation,
     observation: options.observation ?? defaultRawObservationAdapter(),
     read,
+  };
+}
+
+function rawJournalLease(
+  overrides: Readonly<Record<string, unknown>> = Object.freeze({}),
+): Record<string, unknown> {
+  return {
+    abandon() {},
+    observe() {
+      return { status: "missing" as const, revision: Object.freeze({}) };
+    },
+    release() {},
+    remove() {
+      return { status: "conflict" as const };
+    },
+    renew() {
+      return { status: "held" as const };
+    },
+    replace() {
+      return { status: "conflict" as const };
+    },
+    ...overrides,
   };
 }
 
@@ -189,6 +233,42 @@ function loadAvailable(moduleValue: unknown) {
   return loaded;
 }
 
+function loadAvailableWithJournal(
+  journal: Record<string, unknown>,
+): ReturnType<typeof loadAvailable> {
+  return loadAvailable(
+    createNativeModule({
+      createAdapters() {
+        return completeRawAdapterPair(
+          {
+            openPrivateDirectory() {
+              return { status: "missing" as const };
+            },
+          },
+          {
+            acquireSetupLease() {
+              return { status: "busy" as const };
+            },
+          },
+          { journal },
+        );
+      },
+    }),
+  );
+}
+
+async function acquireJournalLease(
+  loaded: ReturnType<typeof loadAvailable>,
+  nonce = JOURNAL_NONCE,
+) {
+  const acquired = await loaded.journal.acquire({ nonce });
+  expect(acquired.status).toBe("acquired");
+  if (acquired.status !== "acquired") {
+    throw new Error("raw journal fixture unexpectedly busy");
+  }
+  return acquired.lease;
+}
+
 describe("native credential store provider", () => {
   it("defines the deliberately narrow reserved target identifiers", () => {
     expect(NATIVE_CREDENTIAL_TARGET_IDS).toEqual([
@@ -271,8 +351,20 @@ describe("native credential store provider", () => {
     expect(selectedResolver).toBe(replacementResolver);
   });
 
-  it("wraps and freezes only the four high-level credential adapters", async () => {
+  it("wraps and freezes only the five high-level credential adapters", async () => {
     const calls: string[] = [];
+    let rawJournal: Record<string, unknown>;
+    rawJournal = {
+      acquire(
+        this: unknown,
+        options: { readonly nonce: ReconciliationJournalLeaseNonce },
+      ) {
+        expect(this).toBe(rawJournal);
+        calls.push(`journal:${options.nonce}`);
+        expect(Object.isFrozen(options)).toBe(true);
+        return { status: "busy" as const };
+      },
+    };
     let rawRead: Record<string, unknown>;
     rawRead = {
       openPrivateDirectory(
@@ -312,7 +404,9 @@ describe("native credential store provider", () => {
       resolverReturning(
         createNativeModule({
           createAdapters() {
-            return completeRawAdapterPair(rawRead, rawMutation);
+            return completeRawAdapterPair(rawRead, rawMutation, {
+              journal: rawJournal,
+            });
           },
         }),
       ),
@@ -326,17 +420,20 @@ describe("native credential store provider", () => {
     }
 
     expect(Object.isFrozen(loaded)).toBe(true);
+    expect(Object.isFrozen(loaded.journal)).toBe(true);
     expect(Object.isFrozen(loaded.legacy)).toBe(true);
     expect(Object.isFrozen(loaded.read)).toBe(true);
     expect(Object.isFrozen(loaded.observation)).toBe(true);
     expect(Object.isFrozen(loaded.mutation)).toBe(true);
     expect(Object.keys(loaded).sort()).toEqual([
+      "journal",
       "legacy",
       "mutation",
       "observation",
       "read",
       "status",
     ]);
+    expect(Object.keys(loaded.journal)).toEqual(["acquire"]);
     expect(Object.keys(loaded.legacy)).toEqual(["read"]);
     expect(Object.keys(loaded.read)).toEqual(["openPrivateDirectory"]);
     expect(Object.keys(loaded.observation)).toEqual(["openPrivateDirectory"]);
@@ -345,6 +442,12 @@ describe("native credential store provider", () => {
       "acquireObservedSetupLease",
     ]);
 
+    await expect(
+      loaded.journal.acquire({
+        nonce:
+          "018f5d10-ee3a-476f-9bfb-c1e93dd50074" as ReconciliationJournalLeaseNonce,
+      }),
+    ).resolves.toEqual({ status: "busy" });
     await expect(
       loaded.read.openPrivateDirectory("/isolated/plurum", {
         noFollow: true,
@@ -359,6 +462,7 @@ describe("native credential store provider", () => {
       }),
     ).resolves.toEqual({ status: "busy" });
     expect(calls).toEqual([
+      "journal:018f5d10-ee3a-476f-9bfb-c1e93dd50074",
       "read:/isolated/plurum:true",
       "mutation:/isolated/plurum:true:true:018f5d10-ee3a-476f-9bfb-c1e93dd50074",
     ]);
@@ -366,6 +470,7 @@ describe("native credential store provider", () => {
 
   it("snapshots and deep-freezes the exact legacy allowlist for the raw factory", () => {
     let configurationReads = 0;
+    let stateDirectoryReads = 0;
     let hermesReads = 0;
     let receivedConfiguration: unknown;
     const legacyPaths = Object.defineProperties(
@@ -390,19 +495,33 @@ describe("native credential store provider", () => {
         },
       },
     );
-    const configuration = Object.defineProperty({}, "legacyPaths", {
-      enumerable: true,
-      get() {
-        configurationReads += 1;
-        return configurationReads === 1
-          ? legacyPaths
-          : Object.freeze({
-              hermes: SECRET_SENTINEL,
-              openclaw: SECRET_SENTINEL,
-              removedCli: SECRET_SENTINEL,
-            });
+    const configuration = Object.defineProperties(
+      {},
+      {
+        legacyPaths: {
+          enumerable: true,
+          get() {
+            configurationReads += 1;
+            return configurationReads === 1
+              ? legacyPaths
+              : Object.freeze({
+                  hermes: SECRET_SENTINEL,
+                  openclaw: SECRET_SENTINEL,
+                  removedCli: SECRET_SENTINEL,
+                });
+          },
+        },
+        stateDirectory: {
+          enumerable: true,
+          get() {
+            stateDirectoryReads += 1;
+            return stateDirectoryReads === 1
+              ? STATE_DIRECTORY
+              : SECRET_SENTINEL;
+          },
+        },
       },
-    }) as typeof CONFIGURATION;
+    ) as typeof CONFIGURATION;
     const module = createNativeModule({
       createAdapters(rawConfiguration: unknown) {
         receivedConfiguration = rawConfiguration;
@@ -427,6 +546,7 @@ describe("native credential store provider", () => {
     );
 
     expect(configurationReads).toBe(1);
+    expect(stateDirectoryReads).toBe(1);
     expect(hermesReads).toBe(1);
     expect(provider.load().status).toBe("available");
     expect(receivedConfiguration).toEqual(CONFIGURATION);
@@ -444,13 +564,21 @@ describe("native credential store provider", () => {
       "openclaw",
       "removedCli",
     ]);
+    expect(
+      (
+        receivedConfiguration as {
+          readonly stateDirectory: unknown;
+        }
+      ).stateDirectory,
+    ).toBe(STATE_DIRECTORY);
   });
 
-  it("fails closed on non-exact legacy configuration before resolving native code", () => {
+  it("fails closed on non-exact native configuration before resolving native code", () => {
     const invalidConfigurations: unknown[] = [
       Object.freeze({}),
       Object.freeze({
         legacyPaths: LEGACY_PATHS,
+        stateDirectory: STATE_DIRECTORY,
         unexpected: SECRET_SENTINEL,
       }),
       Object.freeze({
@@ -458,18 +586,38 @@ describe("native credential store provider", () => {
           hermes: LEGACY_PATHS.hermes,
           openclaw: LEGACY_PATHS.openclaw,
         }),
+        stateDirectory: STATE_DIRECTORY,
       }),
       Object.freeze({
         legacyPaths: Object.freeze({
           ...LEGACY_PATHS,
           hermes: "",
         }),
+        stateDirectory: STATE_DIRECTORY,
       }),
       Object.freeze({
         legacyPaths: Object.freeze({
           ...LEGACY_PATHS,
           openclaw: `${LEGACY_PATHS.openclaw}\0${SECRET_SENTINEL}`,
         }),
+        stateDirectory: STATE_DIRECTORY,
+      }),
+      Object.freeze({ legacyPaths: LEGACY_PATHS }),
+      Object.freeze({
+        legacyPaths: LEGACY_PATHS,
+        stateDirectory: "",
+      }),
+      Object.freeze({
+        legacyPaths: LEGACY_PATHS,
+        stateDirectory: `${STATE_DIRECTORY}\0${SECRET_SENTINEL}`,
+      }),
+      Object.freeze({
+        legacyPaths: LEGACY_PATHS,
+        stateDirectory: `${STATE_DIRECTORY}\n${SECRET_SENTINEL}`,
+      }),
+      Object.freeze({
+        legacyPaths: LEGACY_PATHS,
+        stateDirectory: "x".repeat(32_769),
       }),
     ];
 
@@ -491,6 +639,600 @@ describe("native credential store provider", () => {
       expect(provider.load()).toBe(provider.load());
       expect(resolveCalls).toBe(0);
     }
+  });
+
+  it("validates exact journal acquisition and abandons malformed acquired handles", async () => {
+    let acquireCalls = 0;
+    let delegatedOptions: unknown;
+    let malformedAbandonCalls = 0;
+    const malformedLease = {
+      abandon() {
+        malformedAbandonCalls += 1;
+      },
+    };
+    let rawJournal: Record<string, unknown>;
+    rawJournal = {
+      acquire(this: unknown, options: unknown) {
+        expect(this).toBe(rawJournal);
+        acquireCalls += 1;
+        delegatedOptions = options;
+        if (acquireCalls === 1) {
+          return { status: "busy" as const };
+        }
+        if (acquireCalls === 2) {
+          return {
+            status: "acquired" as const,
+            priorLease: "proven-abandoned" as const,
+            lease: rawJournalLease(),
+          };
+        }
+        return {
+          status: "acquired" as const,
+          priorLease: "absent" as const,
+          lease: malformedLease,
+        };
+      },
+    };
+    const loaded = loadAvailableWithJournal(rawJournal);
+
+    await expect(
+      loaded.journal.acquire({
+        nonce: "NOT-A-LOWERCASE-UUID-V4" as ReconciliationJournalLeaseNonce,
+      }),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+    await expect(
+      loaded.journal.acquire(
+        Object.freeze({
+          nonce: JOURNAL_NONCE,
+          unexpected: SECRET_SENTINEL,
+        }) as unknown as Parameters<typeof loaded.journal.acquire>[0],
+      ),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+    expect(acquireCalls).toBe(0);
+
+    await expect(
+      loaded.journal.acquire({ nonce: JOURNAL_NONCE }),
+    ).resolves.toEqual({ status: "busy" });
+    expect(Object.isFrozen(delegatedOptions)).toBe(true);
+    expect(delegatedOptions).toEqual({ nonce: JOURNAL_NONCE });
+
+    const acquired = await loaded.journal.acquire({
+      nonce: SECOND_JOURNAL_NONCE,
+    });
+    expect(acquired.status).toBe("acquired");
+    if (acquired.status !== "acquired") {
+      throw new Error("raw journal fixture unexpectedly busy");
+    }
+    expect(acquired.priorLease).toBe("proven-abandoned");
+    expect(Object.isFrozen(acquired)).toBe(true);
+    expect(Object.isFrozen(acquired.lease)).toBe(true);
+    expect(Object.keys(acquired.lease).sort()).toEqual([
+      "abandon",
+      "observe",
+      "release",
+      "remove",
+      "renew",
+      "replace",
+    ]);
+    expect("path" in acquired.lease).toBe(false);
+    await acquired.lease.release();
+
+    await expect(
+      loaded.journal.acquire({ nonce: JOURNAL_NONCE }),
+    ).rejects.toThrow("The native credential operation failed.");
+    expect(malformedAbandonCalls).toBe(1);
+  });
+
+  it("binds property-free journal revisions to one lease and burns them before mutation", async () => {
+    const rawMissingRevision = Object.freeze({});
+    const rawReplacedRevision = Object.freeze({});
+    const rawPresentRevision = Object.freeze({});
+    const rawBacking = new Uint8Array([91, 11, 22, 33, 92]);
+    const rawView = rawBacking.subarray(1, 4);
+    const callerBytes = new Uint8Array([44, 55, 66]);
+    let observeCalls = 0;
+    let replaceCalls = 0;
+    let removeCalls = 0;
+    let releaseCalls = 0;
+    let journalAcquireCalls = 0;
+    let delegatedReplace: Record<string, unknown> | undefined;
+    let delegatedRemove: Record<string, unknown> | undefined;
+    const rawLease = rawJournalLease({
+      observe() {
+        observeCalls += 1;
+        return observeCalls === 1
+          ? {
+              status: "missing" as const,
+              revision: rawMissingRevision,
+            }
+          : {
+              status: "present" as const,
+              revision: rawPresentRevision,
+              read: {
+                bytes: rawView,
+                endOfFile: true,
+              },
+            };
+      },
+      replace(options: Record<string, unknown>) {
+        replaceCalls += 1;
+        delegatedReplace = options;
+        return {
+          status: "replaced" as const,
+          revision: rawReplacedRevision,
+        };
+      },
+      remove(options: Record<string, unknown>) {
+        removeCalls += 1;
+        delegatedRemove = options;
+        return { status: "removed" as const };
+      },
+      release() {
+        releaseCalls += 1;
+      },
+    });
+    const loaded = loadAvailableWithJournal({
+      acquire() {
+        journalAcquireCalls += 1;
+        return {
+          status: "acquired" as const,
+          priorLease: "absent" as const,
+          lease:
+            journalAcquireCalls === 1
+              ? rawLease
+              : rawJournalLease(),
+        };
+      },
+    });
+    const lease = await acquireJournalLease(loaded);
+
+    const missing = await lease.observe();
+    expect(missing.status).toBe("missing");
+    if (missing.status !== "missing") {
+      throw new Error("raw journal fixture unexpectedly present");
+    }
+    expect(Object.isFrozen(missing)).toBe(true);
+    expect(Object.isFrozen(missing.revision)).toBe(true);
+    expect(Object.keys(missing.revision)).toEqual([]);
+    expect(missing.revision).not.toBe(rawMissingRevision);
+
+    const replacedPromise = lease.replace({
+      expected: missing.revision,
+      bytes: callerBytes,
+    });
+    expect([...callerBytes]).toEqual([44, 55, 66]);
+    expect(delegatedReplace).toBeDefined();
+    expect(Object.isFrozen(delegatedReplace)).toBe(true);
+    expect(delegatedReplace?.expected).toBe(rawMissingRevision);
+    expect(delegatedReplace?.bytes).not.toBe(callerBytes);
+    expect([...(delegatedReplace?.bytes as Uint8Array)]).toEqual([0, 0, 0]);
+    const replaced = await replacedPromise;
+    expect(replaced.status).toBe("replaced");
+    if (replaced.status !== "replaced") {
+      throw new Error("raw journal fixture unexpectedly conflicted");
+    }
+    expect(Object.isFrozen(replaced.revision)).toBe(true);
+    expect(Object.keys(replaced.revision)).toEqual([]);
+    expect(replaced.revision).not.toBe(rawReplacedRevision);
+
+    await expect(
+      lease.replace({
+        expected: missing.revision,
+        bytes: callerBytes,
+      }),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+    expect(replaceCalls).toBe(1);
+
+    const present = await lease.observe();
+    expect(present.status).toBe("present");
+    if (present.status !== "present") {
+      throw new Error("raw journal fixture unexpectedly missing");
+    }
+    expect([...present.bytes]).toEqual([11, 22, 33]);
+    expect(present.bytes).not.toBe(rawView);
+    expect(present.bytes.buffer).not.toBe(rawBacking.buffer);
+    expect([...rawBacking]).toEqual([91, 0, 0, 0, 92]);
+    expect(Object.isFrozen(present.revision)).toBe(true);
+    expect(Object.keys(present.revision)).toEqual([]);
+
+    await expect(
+      lease.remove({
+        expected: Object.freeze(
+          {},
+        ) as ReconciliationJournalRevisionSnapshot,
+      }),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+    const sameProviderOtherLease = await acquireJournalLease(
+      loaded,
+      SECOND_JOURNAL_NONCE,
+    );
+    await expect(
+      sameProviderOtherLease.remove({ expected: present.revision }),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+
+    const other = loadAvailableWithJournal({
+      acquire() {
+        return {
+          status: "acquired" as const,
+          priorLease: "absent" as const,
+          lease: rawJournalLease(),
+        };
+      },
+    });
+    const otherLease = await acquireJournalLease(other);
+    await expect(
+      otherLease.remove({ expected: present.revision }),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+
+    await expect(
+      lease.remove({ expected: present.revision }),
+    ).resolves.toEqual({ status: "removed" });
+    expect(removeCalls).toBe(1);
+    expect(Object.isFrozen(delegatedRemove)).toBe(true);
+    expect(delegatedRemove?.expected).toBe(rawPresentRevision);
+    await expect(
+      lease.remove({ expected: present.revision }),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+    expect(removeCalls).toBe(1);
+
+    await sameProviderOtherLease.release();
+    await otherLease.release();
+    await lease.release();
+    expect(releaseCalls).toBe(1);
+  });
+
+  it("enforces exact journal byte limits, full reads, and non-shared backing", async () => {
+    const maximumRaw = new Uint8Array(65_536);
+    maximumRaw.fill(7);
+    const maximumLease = await acquireJournalLease(
+      loadAvailableWithJournal({
+        acquire() {
+          return {
+            status: "acquired" as const,
+            priorLease: "absent" as const,
+            lease: rawJournalLease({
+              observe() {
+                return {
+                  status: "present" as const,
+                  revision: Object.freeze({}),
+                  read: {
+                    bytes: maximumRaw,
+                    endOfFile: true,
+                  },
+                };
+              },
+            }),
+          };
+        },
+      }),
+    );
+    const maximum = await maximumLease.observe();
+    expect(maximum.status).toBe("present");
+    if (maximum.status !== "present") {
+      throw new Error("maximum journal fixture unexpectedly missing");
+    }
+    expect(maximum.bytes).toHaveLength(65_536);
+    expect(maximum.bytes[0]).toBe(7);
+    expect(maximumRaw.every((byte) => byte === 0)).toBe(true);
+    await maximumLease.release();
+
+    const oversizedRaw = new Uint8Array(65_537);
+    const incompleteRaw = new Uint8Array([1, 2, 3]);
+    const invalidReads: Array<Readonly<{
+      read: unknown;
+      bytes?: Uint8Array;
+    }>> = [
+      {
+        read: {
+          bytes: new Uint8Array(),
+          endOfFile: true,
+        },
+      },
+      {
+        bytes: oversizedRaw,
+        read: {
+          bytes: oversizedRaw,
+          endOfFile: true,
+        },
+      },
+      {
+        bytes: incompleteRaw,
+        read: {
+          bytes: incompleteRaw,
+          endOfFile: false,
+        },
+      },
+    ];
+    if (typeof SharedArrayBuffer !== "undefined") {
+      invalidReads.push({
+        read: {
+          bytes: new Uint8Array(new SharedArrayBuffer(3)),
+          endOfFile: true,
+        },
+      });
+    }
+
+    for (const fixture of invalidReads) {
+      const lease = await acquireJournalLease(
+        loadAvailableWithJournal({
+          acquire() {
+            return {
+              status: "acquired" as const,
+              priorLease: "absent" as const,
+              lease: rawJournalLease({
+                observe() {
+                  return {
+                    status: "present" as const,
+                    revision: Object.freeze({}),
+                    read: fixture.read,
+                  };
+                },
+              }),
+            };
+          },
+        }),
+      );
+      await expect(lease.observe()).rejects.toThrow(
+        "The native credential operation failed.",
+      );
+      if (fixture.bytes !== undefined) {
+        expect(fixture.bytes.every((byte) => byte === 0)).toBe(true);
+      }
+      await lease.release();
+    }
+  });
+
+  it("burns journal revisions on invalid write bytes and never delegates them", async () => {
+    const invalidBytes: Uint8Array[] = [
+      new Uint8Array(),
+      new Uint8Array(65_537),
+    ];
+    if (typeof SharedArrayBuffer !== "undefined") {
+      invalidBytes.push(new Uint8Array(new SharedArrayBuffer(3)));
+    }
+
+    for (const bytes of invalidBytes) {
+      let replaceCalls = 0;
+      const lease = await acquireJournalLease(
+        loadAvailableWithJournal({
+          acquire() {
+            return {
+              status: "acquired" as const,
+              priorLease: "absent" as const,
+              lease: rawJournalLease({
+                observe() {
+                  return {
+                    status: "missing" as const,
+                    revision: Object.freeze({}),
+                  };
+                },
+                replace() {
+                  replaceCalls += 1;
+                  return { status: "conflict" as const };
+                },
+              }),
+            };
+          },
+        }),
+      );
+      const observed = await lease.observe();
+      if (observed.status !== "missing") {
+        throw new Error("invalid-write journal fixture unexpectedly present");
+      }
+      await expect(
+        lease.replace({ expected: observed.revision, bytes }),
+      ).rejects.toThrow("The native credential adapter request is invalid.");
+      await expect(
+        lease.replace({
+          expected: observed.revision,
+          bytes: new Uint8Array([1]),
+        }),
+      ).rejects.toThrow("The native credential adapter request is invalid.");
+      expect(replaceCalls).toBe(0);
+      await lease.release();
+    }
+  });
+
+  it("makes journal terminal handling exact after release and proven loss", async () => {
+    let acquireCalls = 0;
+    let releaseCalls = 0;
+    let abandonCalls = 0;
+    const loaded = loadAvailableWithJournal({
+      acquire() {
+        acquireCalls += 1;
+        return {
+          status: "acquired" as const,
+          priorLease: "absent" as const,
+          lease:
+            acquireCalls === 1
+              ? rawJournalLease({
+                  release() {
+                    releaseCalls += 1;
+                  },
+                })
+              : rawJournalLease({
+                  renew() {
+                    return { status: "lost" as const };
+                  },
+                  abandon() {
+                    abandonCalls += 1;
+                  },
+                }),
+        };
+      },
+    });
+
+    const released = await acquireJournalLease(loaded);
+    await expect(released.abandon()).rejects.toThrow(
+      "The native credential operation failed.",
+    );
+    await released.release();
+    expect(releaseCalls).toBe(1);
+    await expect(released.observe()).rejects.toThrow(
+      "The native credential operation failed.",
+    );
+    await expect(released.release()).rejects.toThrow(
+      "The native credential operation failed.",
+    );
+    expect(releaseCalls).toBe(1);
+
+    const lost = await acquireJournalLease(loaded, SECOND_JOURNAL_NONCE);
+    await expect(lost.renew()).resolves.toEqual({ status: "lost" });
+    await expect(lost.observe()).rejects.toThrow(
+      "The native credential operation failed.",
+    );
+    await expect(lost.release()).rejects.toThrow(
+      "The native credential operation failed.",
+    );
+    await lost.abandon();
+    expect(abandonCalls).toBe(1);
+    await expect(lost.abandon()).rejects.toThrow(
+      "The native credential operation failed.",
+    );
+    expect(abandonCalls).toBe(1);
+  });
+
+  it("rejects malformed raw journal schemas without reflecting native data", async () => {
+    const malformedAcquireResults: unknown[] = [
+      { status: "busy", unexpected: SECRET_SENTINEL },
+      { status: "unknown" },
+      {
+        status: "acquired",
+        priorLease: "expired",
+        lease: rawJournalLease(),
+      },
+    ];
+    for (const result of malformedAcquireResults) {
+      const loaded = loadAvailableWithJournal({
+        acquire() {
+          return result;
+        },
+      });
+      await expect(
+        loaded.journal.acquire({ nonce: JOURNAL_NONCE }),
+      ).rejects.toThrow("The native credential operation failed.");
+    }
+
+    const rawBytes = new Uint8Array([1, 2, 3]);
+    const malformedMethods: ReadonlyArray<
+      Readonly<{
+        operation: "observe" | "renew";
+        result: unknown;
+      }>
+    > = [
+      {
+        operation: "observe",
+        result: {
+          status: "present",
+          revision: Object.freeze({}),
+          bytes: rawBytes,
+        },
+      },
+      {
+        operation: "observe",
+        result: {
+          status: "missing",
+          revision: Object.freeze({}),
+          unexpected: SECRET_SENTINEL,
+        },
+      },
+      {
+        operation: "renew",
+        result: { status: "held", unexpected: SECRET_SENTINEL },
+      },
+    ];
+    for (const fixture of malformedMethods) {
+      const lease = await acquireJournalLease(
+        loadAvailableWithJournal({
+          acquire() {
+            return {
+              status: "acquired" as const,
+              priorLease: "absent" as const,
+              lease: rawJournalLease({
+                [fixture.operation]() {
+                  return fixture.result;
+                },
+              }),
+            };
+          },
+        }),
+      );
+      const operation =
+        fixture.operation === "observe"
+          ? lease.observe()
+          : lease.renew();
+      await expect(operation).rejects.toThrow(
+        "The native credential operation failed.",
+      );
+      await lease.release();
+    }
+
+    const malformedReplaceLease = await acquireJournalLease(
+      loadAvailableWithJournal({
+        acquire() {
+          return {
+            status: "acquired" as const,
+            priorLease: "absent" as const,
+            lease: rawJournalLease({
+              replace() {
+                return {
+                  status: "replaced",
+                  revision: Object.freeze({}),
+                  unexpected: SECRET_SENTINEL,
+                };
+              },
+            }),
+          };
+        },
+      }),
+    );
+    const missing = await malformedReplaceLease.observe();
+    if (missing.status !== "missing") {
+      throw new Error("malformed replace fixture unexpectedly present");
+    }
+    await expect(
+      malformedReplaceLease.replace({
+        expected: missing.revision,
+        bytes: new Uint8Array([1]),
+      }),
+    ).rejects.toThrow("The native credential operation failed.");
+    await expect(
+      malformedReplaceLease.replace({
+        expected: missing.revision,
+        bytes: new Uint8Array([1]),
+      }),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+    await malformedReplaceLease.release();
+
+    const malformedRemoveLease = await acquireJournalLease(
+      loadAvailableWithJournal({
+        acquire() {
+          return {
+            status: "acquired" as const,
+            priorLease: "absent" as const,
+            lease: rawJournalLease({
+              remove() {
+                return {
+                  status: "removed",
+                  unexpected: SECRET_SENTINEL,
+                };
+              },
+            }),
+          };
+        },
+      }),
+    );
+    const removable = await malformedRemoveLease.observe();
+    if (removable.status !== "missing") {
+      throw new Error("malformed remove fixture unexpectedly present");
+    }
+    await expect(
+      malformedRemoveLease.remove({
+        expected: removable
+          .revision as ReconciliationJournalRevisionSnapshot,
+      }),
+    ).rejects.toThrow("The native credential operation failed.");
+    await malformedRemoveLease.release();
   });
 
   it("allowlists exact legacy reads and copies then wipes native buffers", async () => {
@@ -2446,6 +3188,7 @@ describe("native credential store provider", () => {
     };
     const pair = Object.defineProperties(
       {
+        journal: defaultRawJournalAdapter(),
         legacy: defaultRawLegacyAdapter(),
         mutation,
         observation: defaultRawObservationAdapter(),
