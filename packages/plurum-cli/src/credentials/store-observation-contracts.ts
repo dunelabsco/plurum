@@ -27,11 +27,12 @@ declare const credentialStoreObservationEvidenceBrand: unique symbol;
  * factory/adapter authority and must revalidate the native state before use.
  */
 /*
- * The directory handle is read-only. Its revision must change whenever any
- * fact used by this observation can change: directory identity/binding or
- * security, either canonical entry, or the recognized managed-temporary name
- * set. All entry operations are relative, no-follow operations under this
- * already-open directory authority.
+ * The directory handle is read-only. Its attestation binds the directory
+ * identity, path binding, and security; it is not a digest of child content.
+ * Per-entry attestations plus finishObservation's final native snapshot bind
+ * both canonical entries and the recognized managed-temporary set. All entry
+ * operations are relative, no-follow operations under this already-open
+ * directory authority.
  */
 export interface CredentialStoreObservationDirectoryHandle {
   attest(): Promise<PrivateDirectoryAttestation>;

@@ -11,13 +11,16 @@ use rustix::io::Errno;
 use rustix::process;
 use sha2::{Digest, Sha256};
 
+use plurum_native_secret_memory::zeroize_bytes;
+
 mod mutation;
 mod platform;
 
 pub(crate) use mutation::{
     CanonicalEntryRole, ConditionalMutationResult, ExclusiveCreateResult, ExpectedEntrySnapshot,
     ManagedEntry, ManagedEntryObservation, MissingEntrySnapshot, PosixExclusiveWriteHandle,
-    PosixLeaseReadHandle, PresentEntrySnapshot, TemporaryEntry, TemporaryEntryRole,
+    PosixLeaseReadHandle, PresentEntrySnapshot, PrivateManagedEntryObservation, TemporaryEntry,
+    TemporaryEntryRole,
 };
 
 const CREDENTIAL_ENTRY: &str = "credentials.json";
@@ -114,6 +117,12 @@ impl MetadataFacts {
             && self.owned_by(uid)
             && self.links == 1
             && self.mode & PERMISSION_AND_SPECIAL_BITS == PRIVATE_FILE_MODE
+    }
+
+    fn exact_private_directory(self, uid: u32) -> bool {
+        self.kind == ObjectKind::Directory
+            && self.owned_by(uid)
+            && self.mode & PERMISSION_AND_SPECIAL_BITS == PRIVATE_DIRECTORY_MODE
     }
 }
 
@@ -559,6 +568,55 @@ pub(crate) struct EnsuredPrivateDirectory {
     pub(crate) directory: PosixPrivateDirectory,
 }
 
+pub(crate) struct MissingDirectoryBinding {
+    process: ProcessIdentity,
+    path: NormalizedAbsolutePath,
+    parent: File,
+    parent_facts: MetadataFacts,
+}
+
+fn entry_is_missing_at(directory: &File, name: &OsStr) -> Result<bool, PosixStoreError> {
+    match rustix_fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(error) if error == Errno::NOENT => Ok(true),
+        Ok(_) => Ok(false),
+        Err(_) => Err(PosixStoreError::Io),
+    }
+}
+
+pub(crate) fn observe_missing_private_directory(
+    path: &Path,
+) -> Result<Option<MissingDirectoryBinding>, PosixStoreError> {
+    let process = ProcessIdentity::capture()?;
+    let path = NormalizedAbsolutePath::parse(path)?;
+    let parent = path.open_parent()?;
+    let before = metadata(&parent)?;
+    if before.kind != ObjectKind::Directory {
+        return Err(PosixStoreError::Unsafe);
+    }
+    if !entry_is_missing_at(&parent, path.final_name())? {
+        return Ok(None);
+    }
+
+    let reopened = path.open_parent()?;
+    let retained_after = metadata(&parent)?;
+    let reopened_facts = metadata(&reopened)?;
+    process.verify()?;
+    if retained_after != before
+        || reopened_facts != before
+        || !entry_is_missing_at(&parent, path.final_name())?
+        || !entry_is_missing_at(&reopened, path.final_name())?
+    {
+        return Err(PosixStoreError::Lost);
+    }
+
+    Ok(Some(MissingDirectoryBinding {
+        process,
+        path,
+        parent,
+        parent_facts: before,
+    }))
+}
+
 pub(crate) fn open_private_directory(
     path: &Path,
 ) -> Result<PrivateDirectoryOpenResult, PosixStoreError> {
@@ -655,6 +713,155 @@ pub(crate) fn ensure_private_directory(
         disposition,
         directory,
     })
+}
+
+fn missing_directory_binding_is_current(
+    binding: &MissingDirectoryBinding,
+    path: &NormalizedAbsolutePath,
+) -> Result<bool, PosixStoreError> {
+    if binding.path != *path || ProcessIdentity::capture()? != binding.process {
+        return Ok(false);
+    }
+    let retained = metadata(&binding.parent)?;
+    if retained != binding.parent_facts
+        || !entry_is_missing_at(&binding.parent, binding.path.final_name())?
+    {
+        return Ok(false);
+    }
+    let reopened = match binding.path.open_parent() {
+        Ok(parent) => parent,
+        Err(PosixStoreError::Missing | PosixStoreError::Unsafe | PosixStoreError::Lost) => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    let reopened_facts = metadata(&reopened)?;
+    binding.process.verify()?;
+    Ok(reopened_facts == binding.parent_facts
+        && entry_is_missing_at(&reopened, binding.path.final_name())?
+        && metadata(&binding.parent)? == binding.parent_facts)
+}
+
+fn directory_is_empty(directory: &File) -> Result<bool, PosixStoreError> {
+    let mut stream = rustix_fs::Dir::read_from(directory).map_err(|_| PosixStoreError::Io)?;
+    while let Some(entry) = stream.read() {
+        let entry = entry.map_err(|_| PosixStoreError::Io)?;
+        let name = entry.file_name().to_bytes();
+        if name != b"." && name != b".." {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn cleanup_exact_created_directory(
+    directory: &mut PosixPrivateDirectory,
+) -> Result<(), PosixStoreError> {
+    let state = lock_unpoisoned(&directory.core.state)?;
+    directory.core.process.verify()?;
+    let parent = state.parent.as_ref().ok_or(PosixStoreError::Closed)?;
+    let opened = state.directory.as_ref().ok_or(PosixStoreError::Closed)?;
+    let retained = metadata(opened)?;
+    if retained.kind != ObjectKind::Directory
+        || !retained.owned_by(directory.core.process.uid)
+        || !directory_is_empty(opened)?
+    {
+        return Err(PosixStoreError::Lost);
+    }
+
+    match secure_openat(
+        parent,
+        directory.core.path.final_name(),
+        directory_open_flags(),
+        Mode::empty(),
+    ) {
+        Ok(current) => {
+            if metadata(&File::from(current))?.identity != retained.identity {
+                return Err(PosixStoreError::Lost);
+            }
+        }
+        Err(error) if error == Errno::NOENT && retained.links == 0 => {
+            platform::sync_directory(parent)?;
+            drop(state);
+            directory.close();
+            return Ok(());
+        }
+        Err(_) => return Err(PosixStoreError::Lost),
+    }
+
+    rustix_fs::unlinkat(parent, directory.core.path.final_name(), AtFlags::REMOVEDIR)
+        .map_err(|_| PosixStoreError::Lost)?;
+    if !entry_is_missing_at(parent, directory.core.path.final_name())? {
+        return Err(PosixStoreError::Lost);
+    }
+    platform::sync_directory(parent)?;
+    drop(state);
+    directory.close();
+    Ok(())
+}
+
+enum BoundDirectoryCreateResult {
+    PreconditionFailed,
+    Created(PosixPrivateDirectory),
+}
+
+fn create_bound_private_directory(
+    path: &NormalizedAbsolutePath,
+    binding: &MissingDirectoryBinding,
+) -> Result<BoundDirectoryCreateResult, PosixStoreError> {
+    if !missing_directory_binding_is_current(binding, path)? {
+        return Ok(BoundDirectoryCreateResult::PreconditionFailed);
+    }
+    let parent = binding
+        .parent
+        .try_clone()
+        .map_err(|_| PosixStoreError::Io)?;
+    match rustix_fs::mkdirat(
+        &binding.parent,
+        binding.path.final_name(),
+        private_directory_mode(),
+    ) {
+        Ok(()) => {}
+        Err(error) if error == Errno::EXIST => {
+            return Ok(BoundDirectoryCreateResult::PreconditionFailed);
+        }
+        Err(_) => return Err(PosixStoreError::Io),
+    }
+
+    let opened = secure_openat(
+        &binding.parent,
+        binding.path.final_name(),
+        directory_open_flags(),
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|_| PosixStoreError::Lost)?;
+    let mut directory = PosixPrivateDirectory {
+        core: Arc::new(DirectoryCore {
+            process: binding.process,
+            path: binding.path.clone(),
+            state: Mutex::new(DirectoryState {
+                parent: Some(parent),
+                directory: Some(opened),
+                children: Vec::new(),
+            }),
+        }),
+    };
+    let initialize = (|| {
+        let state = lock_unpoisoned(&directory.core.state)?;
+        let opened = state.directory.as_ref().ok_or(PosixStoreError::Closed)?;
+        rustix_fs::fchmod(opened, private_directory_mode()).map_err(|_| PosixStoreError::Io)?;
+        platform::initialize_created_access(opened)?;
+        let parent = state.parent.as_ref().ok_or(PosixStoreError::Closed)?;
+        platform::sync_directory(parent)?;
+        directory.core.require_secure_locked(&state)?;
+        Ok(())
+    })();
+    if let Err(error) = initialize {
+        cleanup_exact_created_directory(&mut directory)?;
+        return Err(error);
+    }
+    Ok(BoundDirectoryCreateResult::Created(directory))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -769,7 +976,7 @@ impl PosixCredentialReadHandle {
         let mut bytes = read_exact_at(file, expected_size)?;
         let (after_security, after) = self.security_locked(&directory_state, file)?;
         if before != after || before_security != after_security {
-            bytes.fill(0);
+            zeroize_bytes(bytes.as_mut_slice());
             return Err(PosixStoreError::Lost);
         }
         let revision = digest_metadata(
@@ -780,7 +987,7 @@ impl PosixCredentialReadHandle {
             Some(after_security.parent_identity),
             &bytes,
         );
-        bytes.fill(0);
+        zeroize_bytes(bytes.as_mut_slice());
         Ok(CredentialFileAttestation {
             security: after_security,
             revision,
@@ -802,12 +1009,12 @@ impl PosixCredentialReadHandle {
         let (after_security, after) = match self.security_locked(&directory_state, file) {
             Ok(value) => value,
             Err(error) => {
-                bytes.fill(0);
+                zeroize_bytes(bytes.as_mut_slice());
                 return Err(error);
             }
         };
         if before != after || before_security != after_security {
-            bytes.fill(0);
+            zeroize_bytes(bytes.as_mut_slice());
             return Err(PosixStoreError::Lost);
         }
         Ok(BoundedRead {
@@ -838,14 +1045,14 @@ fn read_up_to_at(file: &File, max_bytes: usize) -> Result<Vec<u8>, PosixStoreErr
         let position = match u64::try_from(offset) {
             Ok(position) => position,
             Err(_) => {
-                bytes.fill(0);
+                zeroize_bytes(bytes.as_mut_slice());
                 return Err(PosixStoreError::Limit);
             }
         };
         let read = match file.read_at(&mut bytes[offset..], position) {
             Ok(read) => read,
             Err(_) => {
-                bytes.fill(0);
+                zeroize_bytes(bytes.as_mut_slice());
                 return Err(PosixStoreError::Io);
             }
         };
@@ -863,9 +1070,280 @@ fn read_exact_at(file: &File, expected: usize) -> Result<Vec<u8>, PosixStoreErro
     if bytes.len() == expected {
         Ok(bytes)
     } else {
-        bytes.fill(0);
+        zeroize_bytes(bytes.as_mut_slice());
         Err(PosixStoreError::Lost)
     }
+}
+
+pub(crate) enum LegacyCredentialReadResult {
+    Missing,
+    Unsafe,
+    Loaded(Vec<u8>),
+    Oversized,
+    Malformed,
+}
+
+struct LegacyDirectoryNode {
+    file: File,
+    facts: MetadataFacts,
+}
+
+struct LegacyParentChain {
+    nodes: Vec<LegacyDirectoryNode>,
+}
+
+impl LegacyParentChain {
+    fn parent(&self) -> &File {
+        &self
+            .nodes
+            .last()
+            .expect("legacy parent chains always retain the filesystem root")
+            .file
+    }
+}
+
+fn legacy_directory_is_safe(
+    facts: MetadataFacts,
+    process: ProcessIdentity,
+    direct_parent: bool,
+) -> bool {
+    facts.kind == ObjectKind::Directory
+        && facts.mode & 0o022 == 0
+        && if direct_parent {
+            facts.uid == process.uid
+        } else {
+            facts.uid == 0 || facts.uid == process.uid
+        }
+}
+
+fn same_legacy_directory_binding(current: MetadataFacts, observed: MetadataFacts) -> bool {
+    current.identity == observed.identity
+        && current.kind == observed.kind
+        && current.mode == observed.mode
+        && current.uid == observed.uid
+        && current.gid == observed.gid
+}
+
+fn open_legacy_parent_chain(
+    path: &NormalizedAbsolutePath,
+    process: ProcessIdentity,
+) -> Result<LegacyParentChain, PosixStoreError> {
+    let root = rustix_fs::open(Path::new("/"), directory_open_flags(), Mode::empty())
+        .map(File::from)
+        .map_err(|_| PosixStoreError::Io)?;
+    let root_facts = metadata(&root)?;
+    if !legacy_directory_is_safe(root_facts, process, path.components.len() == 1)
+        || !platform::access_is_private(&root)?
+    {
+        return Err(PosixStoreError::Unsafe);
+    }
+    let mut nodes = vec![LegacyDirectoryNode {
+        file: root,
+        facts: root_facts,
+    }];
+
+    let parent_components = &path.components[..path.components.len() - 1];
+    for (index, component) in parent_components.iter().enumerate() {
+        let current = &nodes
+            .last()
+            .expect("legacy parent traversal always retains a current directory")
+            .file;
+        let next = secure_openat(
+            current,
+            component.as_os_str(),
+            directory_open_flags(),
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(classify_path_open_error)?;
+        let facts = metadata(&next)?;
+        let direct_parent = index + 1 == parent_components.len();
+        if !legacy_directory_is_safe(facts, process, direct_parent)
+            || !platform::access_is_private(&next)?
+        {
+            return Err(PosixStoreError::Unsafe);
+        }
+        nodes.push(LegacyDirectoryNode { file: next, facts });
+    }
+    process.verify()?;
+    Ok(LegacyParentChain { nodes })
+}
+
+fn legacy_parent_chain_is_current(
+    chain: &LegacyParentChain,
+    path: &NormalizedAbsolutePath,
+    process: ProcessIdentity,
+) -> Result<bool, PosixStoreError> {
+    if chain.nodes.len() != path.components.len() {
+        return Ok(false);
+    }
+    for (index, node) in chain.nodes.iter().enumerate() {
+        let retained = metadata(&node.file)?;
+        let direct_parent = index + 1 == chain.nodes.len();
+        if !same_legacy_directory_binding(retained, node.facts)
+            || !legacy_directory_is_safe(retained, process, direct_parent)
+            || !platform::access_is_private(&node.file)?
+        {
+            return Ok(false);
+        }
+    }
+    let reopened = match open_legacy_parent_chain(path, process) {
+        Ok(reopened) => reopened,
+        Err(PosixStoreError::Missing | PosixStoreError::Unsafe | PosixStoreError::Lost) => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    process.verify()?;
+    Ok(reopened
+        .nodes
+        .iter()
+        .zip(&chain.nodes)
+        .all(|(current, retained)| same_legacy_directory_binding(current.facts, retained.facts)))
+}
+
+fn legacy_file_is_safe(
+    facts: MetadataFacts,
+    process: ProcessIdentity,
+    file: &File,
+) -> Result<bool, PosixStoreError> {
+    Ok(facts.exact_private_file(process.uid) && platform::access_is_private(file)?)
+}
+
+fn classify_legacy_initial_error(
+    error: PosixStoreError,
+) -> Result<LegacyCredentialReadResult, PosixStoreError> {
+    match error {
+        PosixStoreError::Missing => Ok(LegacyCredentialReadResult::Missing),
+        PosixStoreError::Unsafe | PosixStoreError::Lost => Ok(LegacyCredentialReadResult::Unsafe),
+        other => Err(other),
+    }
+}
+
+fn read_allowlisted_legacy_credential_with_hook<F>(
+    path: &Path,
+    expected_leaf: &OsStr,
+    max_bytes: usize,
+    before_read: F,
+) -> Result<LegacyCredentialReadResult, PosixStoreError>
+where
+    F: FnOnce(),
+{
+    if !is_single_entry_name(expected_leaf) {
+        return Err(PosixStoreError::InvalidInput);
+    }
+    let read_limit = max_bytes.checked_add(1).ok_or(PosixStoreError::Limit)?;
+    if read_limit > MAX_ATTESTED_BYTES {
+        return Err(PosixStoreError::Limit);
+    }
+    let process = ProcessIdentity::capture()?;
+    let path = NormalizedAbsolutePath::parse(path)?;
+    if path.final_name() != expected_leaf {
+        return Err(PosixStoreError::InvalidInput);
+    }
+    let chain = match open_legacy_parent_chain(&path, process) {
+        Ok(chain) => chain,
+        Err(error) => return classify_legacy_initial_error(error),
+    };
+    if !legacy_parent_chain_is_current(&chain, &path, process)? {
+        return Ok(LegacyCredentialReadResult::Unsafe);
+    }
+
+    let file = match secure_openat(
+        chain.parent(),
+        expected_leaf,
+        read_open_flags(),
+        Mode::empty(),
+    ) {
+        Ok(file) => File::from(file),
+        Err(error) if error == Errno::NOENT => return Ok(LegacyCredentialReadResult::Missing),
+        Err(error) if error == Errno::LOOP || error == Errno::NOTDIR => {
+            return Ok(LegacyCredentialReadResult::Unsafe);
+        }
+        Err(_) => return Err(PosixStoreError::Io),
+    };
+    let before = metadata(&file)?;
+    if !legacy_file_is_safe(before, process, &file)? {
+        return Ok(LegacyCredentialReadResult::Unsafe);
+    }
+    let rebound = match secure_openat(
+        chain.parent(),
+        expected_leaf,
+        read_open_flags(),
+        Mode::empty(),
+    ) {
+        Ok(file) => File::from(file),
+        Err(error) if error == Errno::NOENT => {
+            return Ok(LegacyCredentialReadResult::Unsafe);
+        }
+        Err(_) => return Ok(LegacyCredentialReadResult::Unsafe),
+    };
+    let rebound_facts = metadata(&rebound)?;
+    if rebound_facts != before || !legacy_file_is_safe(rebound_facts, process, &rebound)? {
+        return Ok(LegacyCredentialReadResult::Unsafe);
+    }
+
+    before_read();
+    let mut bytes = read_up_to_at(&file, read_limit)?;
+    let after = match metadata(&file) {
+        Ok(after) => after,
+        Err(error) => {
+            zeroize_bytes(bytes.as_mut_slice());
+            return Err(error);
+        }
+    };
+    let path_is_current = (|| {
+        if before != after
+            || !legacy_file_is_safe(after, process, &file)?
+            || !legacy_parent_chain_is_current(&chain, &path, process)?
+        {
+            return Ok(false);
+        }
+        let current = match secure_openat(
+            chain.parent(),
+            expected_leaf,
+            read_open_flags(),
+            Mode::empty(),
+        ) {
+            Ok(file) => File::from(file),
+            Err(_) => return Ok(false),
+        };
+        let current_facts = metadata(&current)?;
+        Ok(current_facts == after && legacy_file_is_safe(current_facts, process, &current)?)
+    })();
+    match path_is_current {
+        Ok(true) => {}
+        Ok(false) => {
+            zeroize_bytes(bytes.as_mut_slice());
+            return Ok(LegacyCredentialReadResult::Unsafe);
+        }
+        Err(error) => {
+            zeroize_bytes(bytes.as_mut_slice());
+            return Err(error);
+        }
+    }
+    process.verify().map_err(|error| {
+        zeroize_bytes(bytes.as_mut_slice());
+        error
+    })?;
+
+    let end_of_file = u64::try_from(bytes.len()).ok() == Some(after.size);
+    if bytes.len() > max_bytes || !end_of_file {
+        zeroize_bytes(bytes.as_mut_slice());
+        return Ok(LegacyCredentialReadResult::Oversized);
+    }
+    if bytes.is_empty() {
+        return Ok(LegacyCredentialReadResult::Malformed);
+    }
+    Ok(LegacyCredentialReadResult::Loaded(bytes))
+}
+
+pub(crate) fn read_allowlisted_legacy_credential(
+    path: &Path,
+    expected_leaf: &OsStr,
+    max_bytes: usize,
+) -> Result<LegacyCredentialReadResult, PosixStoreError> {
+    read_allowlisted_legacy_credential_with_hook(path, expected_leaf, max_bytes, || {})
 }
 
 fn write_all_at(file: &File, bytes: &[u8], start: u64) -> Result<(), PosixStoreError> {
@@ -899,6 +1377,21 @@ pub(crate) enum LeaseRenewal {
 
 pub(crate) enum SetupLeaseAcquireResult {
     Busy,
+    Acquired {
+        prior: PriorLease,
+        directory: DirectoryDisposition,
+        lease: PosixSetupLease,
+    },
+}
+
+pub(crate) enum ObservedDirectoryExpectation<'a> {
+    Missing(&'a MissingDirectoryBinding),
+    Present,
+}
+
+pub(crate) enum ObservedSetupLeaseAcquireResult {
+    Busy,
+    PreconditionFailed,
     Acquired {
         prior: PriorLease,
         directory: DirectoryDisposition,
@@ -1055,9 +1548,64 @@ fn exact_setup_lock(
     }
 }
 
+fn cleanup_exact_created_setup_lock(
+    directory: &PosixPrivateDirectory,
+    file: &File,
+    expected_identity: ObjectIdentity,
+) -> Result<(), PosixStoreError> {
+    let state = lock_unpoisoned(&directory.core.state)?;
+    directory.core.process.verify()?;
+    let directory_file = state.directory.as_ref().ok_or(PosixStoreError::Closed)?;
+    let directory_facts = metadata(directory_file)?;
+    if !directory_facts.exact_private_directory(directory.core.process.uid)
+        || !platform::access_is_private(directory_file)?
+    {
+        return Err(PosixStoreError::Lost);
+    }
+    let retained = metadata(file)?;
+    if retained.identity != expected_identity
+        || retained.kind != ObjectKind::RegularFile
+        || !retained.owned_by(directory.core.process.uid)
+        || retained.links > 1
+    {
+        return Err(PosixStoreError::Lost);
+    }
+
+    match secure_openat(
+        directory_file,
+        OsStr::new(SETUP_LOCK_ENTRY),
+        lock_open_flags(),
+        Mode::empty(),
+    ) {
+        Ok(current) => {
+            if metadata(&File::from(current))?.identity != expected_identity {
+                return Err(PosixStoreError::Lost);
+            }
+        }
+        Err(error) if error == Errno::NOENT && retained.links == 0 => {
+            platform::sync_directory(directory_file)?;
+            return Ok(());
+        }
+        Err(_) => return Err(PosixStoreError::Lost),
+    }
+
+    rustix_fs::unlinkat(
+        directory_file,
+        OsStr::new(SETUP_LOCK_ENTRY),
+        AtFlags::empty(),
+    )
+    .map_err(|_| PosixStoreError::Lost)?;
+    if !entry_is_missing_at(directory_file, OsStr::new(SETUP_LOCK_ENTRY))?
+        || metadata(file)?.links != 0
+    {
+        return Err(PosixStoreError::Lost);
+    }
+    platform::sync_directory(directory_file)
+}
+
 fn open_or_create_setup_lock(
     directory: &PosixPrivateDirectory,
-) -> Result<(File, bool), PosixStoreError> {
+) -> Result<(File, Option<ObjectIdentity>), PosixStoreError> {
     let state = lock_unpoisoned(&directory.core.state)?;
     directory.core.require_secure_locked(&state)?;
     let directory_file = state.directory.as_ref().ok_or(PosixStoreError::Closed)?;
@@ -1097,16 +1645,39 @@ fn open_or_create_setup_lock(
         }
         Err(_) => return Err(PosixStoreError::Unsafe),
     };
-    if created {
-        rustix_fs::fchmod(&file, private_file_mode()).map_err(|_| PosixStoreError::Io)?;
-        platform::initialize_created_access(&file)?;
-    }
     drop(state);
+    let created_identity = if created {
+        let identity = metadata(&file)?.identity;
+        let initialize = (|| {
+            rustix_fs::fchmod(&file, private_file_mode()).map_err(|_| PosixStoreError::Io)?;
+            platform::initialize_created_access(&file)?;
+            Ok(())
+        })();
+        if let Err(error) = initialize {
+            cleanup_exact_created_setup_lock(directory, &file, identity)?;
+            return Err(error);
+        }
+        Some(identity)
+    } else {
+        None
+    };
 
-    if !exact_setup_lock(directory, &file)? {
-        return Err(PosixStoreError::Unsafe);
-    }
-    Ok((file, created))
+    match exact_setup_lock(directory, &file) {
+        Ok(true) => {}
+        Ok(false) => {
+            if let Some(identity) = created_identity {
+                cleanup_exact_created_setup_lock(directory, &file, identity)?;
+            }
+            return Err(PosixStoreError::Unsafe);
+        }
+        Err(error) => {
+            if let Some(identity) = created_identity {
+                cleanup_exact_created_setup_lock(directory, &file, identity)?;
+            }
+            return Err(error);
+        }
+    };
+    Ok((file, created_identity))
 }
 
 pub(crate) fn acquire_setup_lease(
@@ -1117,13 +1688,14 @@ pub(crate) fn acquire_setup_lease(
     let ensured = ensure_private_directory(path)?;
     let directory_disposition = ensured.disposition;
     let directory = ensured.directory;
-    let (lock, created) = match open_or_create_setup_lock(&directory) {
+    let (lock, created_identity) = match open_or_create_setup_lock(&directory) {
         Ok(value) => value,
         Err(PosixStoreError::Unsafe | PosixStoreError::Lost) => {
             return Ok(SetupLeaseAcquireResult::Busy);
         }
         Err(error) => return Err(error),
     };
+    let created = created_identity.is_some();
 
     match rustix_fs::flock(&lock, FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => {}
@@ -1171,6 +1743,223 @@ pub(crate) fn acquire_setup_lease(
         return Err(PosixStoreError::Lost);
     }
     Ok(SetupLeaseAcquireResult::Acquired {
+        prior,
+        directory: directory_disposition,
+        lease,
+    })
+}
+
+fn cleanup_observed_attempt(
+    directory: &mut PosixPrivateDirectory,
+    created_lock: Option<(&File, ObjectIdentity)>,
+    created_directory: bool,
+) -> Result<(), PosixStoreError> {
+    if let Some((lock, identity)) = created_lock {
+        cleanup_exact_created_setup_lock(directory, lock, identity)?;
+    }
+    if created_directory {
+        cleanup_exact_created_directory(directory)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn acquire_observed_setup_lease<F>(
+    path: &Path,
+    nonce: &str,
+    expected: ObservedDirectoryExpectation<'_>,
+    validate: F,
+) -> Result<ObservedSetupLeaseAcquireResult, PosixStoreError>
+where
+    F: FnOnce(&PosixPrivateDirectory) -> Result<bool, PosixStoreError>,
+{
+    let nonce = ValidatedUuidV4::parse(nonce)?;
+    let normalized = NormalizedAbsolutePath::parse(path)?;
+    let (mut directory, directory_disposition) = match expected {
+        ObservedDirectoryExpectation::Present => match open_private_directory(path) {
+            Ok(PrivateDirectoryOpenResult::Opened(directory)) => {
+                (directory, DirectoryDisposition::Existing)
+            }
+            Ok(PrivateDirectoryOpenResult::Missing)
+            | Err(PosixStoreError::Missing | PosixStoreError::Unsafe | PosixStoreError::Lost) => {
+                return Ok(ObservedSetupLeaseAcquireResult::PreconditionFailed);
+            }
+            Err(error) => return Err(error),
+        },
+        ObservedDirectoryExpectation::Missing(binding) => {
+            match create_bound_private_directory(&normalized, binding)? {
+                BoundDirectoryCreateResult::PreconditionFailed => {
+                    return Ok(ObservedSetupLeaseAcquireResult::PreconditionFailed);
+                }
+                BoundDirectoryCreateResult::Created(directory) => {
+                    (directory, DirectoryDisposition::Created)
+                }
+            }
+        }
+    };
+    let created_directory = directory_disposition == DirectoryDisposition::Created;
+
+    let (lock, created_lock) = match open_or_create_setup_lock(&directory) {
+        Ok(value) => value,
+        Err(error @ (PosixStoreError::Unsafe | PosixStoreError::Lost)) => {
+            if created_directory {
+                cleanup_observed_attempt(&mut directory, None, true)?;
+            }
+            let _ = error;
+            return Ok(ObservedSetupLeaseAcquireResult::Busy);
+        }
+        Err(error) => {
+            if created_directory {
+                cleanup_observed_attempt(&mut directory, None, true)?;
+            }
+            return Err(error);
+        }
+    };
+    let lock_created = created_lock.is_some();
+
+    match rustix_fs::flock(&lock, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {}
+        Err(error) if error == Errno::WOULDBLOCK || error == Errno::AGAIN => {
+            cleanup_observed_attempt(
+                &mut directory,
+                created_lock.map(|identity| (&lock, identity)),
+                created_directory,
+            )?;
+            return Ok(ObservedSetupLeaseAcquireResult::Busy);
+        }
+        Err(_) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                created_lock.map(|identity| (&lock, identity)),
+                created_directory,
+            )?;
+            return Err(PosixStoreError::Io);
+        }
+    }
+    match exact_setup_lock(&directory, &lock) {
+        Ok(true) => {}
+        Ok(false) | Err(PosixStoreError::Unsafe | PosixStoreError::Lost) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                created_lock.map(|identity| (&lock, identity)),
+                created_directory,
+            )?;
+            return Ok(ObservedSetupLeaseAcquireResult::Busy);
+        }
+        Err(error) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                created_lock.map(|identity| (&lock, identity)),
+                created_directory,
+            )?;
+            return Err(error);
+        }
+    }
+
+    match validate(&directory) {
+        Ok(true) => {}
+        Ok(false) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                created_lock.map(|identity| (&lock, identity)),
+                created_directory,
+            )?;
+            return Ok(ObservedSetupLeaseAcquireResult::PreconditionFailed);
+        }
+        Err(error) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                created_lock.map(|identity| (&lock, identity)),
+                created_directory,
+            )?;
+            return Err(error);
+        }
+    }
+
+    let prior = match read_lock_record(&lock) {
+        Ok(LockRecordState::Uninitialized) => match initialize_clean_lock_record(&lock) {
+            Ok(()) => PriorLease::Absent,
+            Err(error) => {
+                cleanup_observed_attempt(
+                    &mut directory,
+                    created_lock.map(|identity| (&lock, identity)),
+                    created_directory,
+                )?;
+                return Err(error);
+            }
+        },
+        Ok(LockRecordState::Clean) => PriorLease::Absent,
+        Ok(LockRecordState::Held(_)) => {
+            if let Err(error) = write_lock_state(&lock, LOCK_STATE_CLEAN) {
+                cleanup_observed_attempt(
+                    &mut directory,
+                    created_lock.map(|identity| (&lock, identity)),
+                    created_directory,
+                )?;
+                return Err(error);
+            }
+            PriorLease::ProvenAbandoned
+        }
+        Err(PosixStoreError::Unsafe) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                created_lock.map(|identity| (&lock, identity)),
+                created_directory,
+            )?;
+            return Ok(ObservedSetupLeaseAcquireResult::Busy);
+        }
+        Err(error) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                created_lock.map(|identity| (&lock, identity)),
+                created_directory,
+            )?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = write_held_lock_record(&lock, nonce) {
+        cleanup_observed_attempt(
+            &mut directory,
+            created_lock.map(|identity| (&lock, identity)),
+            created_directory,
+        )?;
+        return Err(error);
+    }
+    if lock_created {
+        let state = lock_unpoisoned(&directory.core.state)?;
+        let directory_file = state.directory.as_ref().ok_or(PosixStoreError::Closed)?;
+        if let Err(error) = platform::sync_directory(directory_file) {
+            drop(state);
+            cleanup_observed_attempt(
+                &mut directory,
+                created_lock.map(|identity| (&lock, identity)),
+                created_directory,
+            )?;
+            return Err(error);
+        }
+    }
+    if !exact_setup_lock(&directory, &lock)?
+        || read_lock_record(&lock)? != LockRecordState::Held(nonce)
+    {
+        cleanup_observed_attempt(
+            &mut directory,
+            created_lock.map(|identity| (&lock, identity)),
+            created_directory,
+        )?;
+        return Err(PosixStoreError::Lost);
+    }
+
+    let lease = PosixSetupLease {
+        core: Arc::new(LeaseCore {
+            nonce,
+            runtime: Mutex::new(LeaseRuntime {
+                status: LeaseStatus::Held,
+                generation: 0,
+                directory: Some(directory),
+                lock: Some(lock),
+            }),
+        }),
+    };
+    Ok(ObservedSetupLeaseAcquireResult::Acquired {
         prior,
         directory: directory_disposition,
         lease,
@@ -2260,6 +3049,205 @@ mod tests {
                 lease,
             } => (prior, directory, lease),
         }
+    }
+
+    #[test]
+    fn observed_missing_acquisition_is_parent_bound_and_leaves_no_failed_residue() {
+        let success = TestRoot::new();
+        let binding = observe_missing_private_directory(&success.store)
+            .expect("missing directory observation must complete")
+            .expect("store must initially be missing");
+        let acquired = acquire_observed_setup_lease(
+            &success.store,
+            NONCE_1,
+            ObservedDirectoryExpectation::Missing(&binding),
+            |directory| {
+                assert!(directory.list_managed_temporary_entries()?.is_empty());
+                Ok(matches!(
+                    directory.observe_managed_entry(ManagedEntry::credential())?,
+                    PrivateManagedEntryObservation::Missing
+                ))
+            },
+        )
+        .expect("observed acquisition must complete");
+        let mut lease = match acquired {
+            ObservedSetupLeaseAcquireResult::Acquired {
+                prior,
+                directory,
+                lease,
+            } => {
+                assert_eq!(prior, PriorLease::Absent);
+                assert_eq!(directory, DirectoryDisposition::Created);
+                lease
+            }
+            ObservedSetupLeaseAcquireResult::Busy => panic!("new store must not be busy"),
+            ObservedSetupLeaseAcquireResult::PreconditionFailed => {
+                panic!("fresh missing observation must remain valid")
+            }
+        };
+        assert!(success.store.join(SETUP_LOCK_ENTRY).is_file());
+        lease.release().expect("observed lease must release");
+
+        let rejected = TestRoot::new();
+        let binding = observe_missing_private_directory(&rejected.store)
+            .expect("missing directory observation must complete")
+            .expect("store must initially be missing");
+        assert!(matches!(
+            acquire_observed_setup_lease(
+                &rejected.store,
+                NONCE_2,
+                ObservedDirectoryExpectation::Missing(&binding),
+                |_| Ok(false),
+            ),
+            Ok(ObservedSetupLeaseAcquireResult::PreconditionFailed)
+        ));
+        assert!(
+            !rejected.store.exists(),
+            "failed validation must durably remove its exact new lock and directory"
+        );
+
+        let stale = TestRoot::new();
+        let binding = observe_missing_private_directory(&stale.store)
+            .expect("missing directory observation must complete")
+            .expect("store must initially be missing");
+        create_private_directory(&stale.store);
+        assert!(matches!(
+            acquire_observed_setup_lease(
+                &stale.store,
+                NONCE_3,
+                ObservedDirectoryExpectation::Missing(&binding),
+                |_| panic!("stale missing evidence must fail before validation"),
+            ),
+            Ok(ObservedSetupLeaseAcquireResult::PreconditionFailed)
+        ));
+        assert!(
+            !stale.store.join(SETUP_LOCK_ENTRY).exists(),
+            "stale evidence must not create a lock in the raced directory"
+        );
+    }
+
+    #[test]
+    fn observed_acquisition_gets_exclusion_before_validation() {
+        let test = TestRoot::new();
+        let (_, _, mut held) = acquired_lease(&test.store, NONCE_1);
+        let mut validation_called = false;
+        let result = acquire_observed_setup_lease(
+            &test.store,
+            NONCE_2,
+            ObservedDirectoryExpectation::Present,
+            |_| {
+                validation_called = true;
+                Ok(true)
+            },
+        )
+        .expect("busy observation must complete");
+        assert!(matches!(result, ObservedSetupLeaseAcquireResult::Busy));
+        assert!(
+            !validation_called,
+            "validation must not run before kernel exclusion is held"
+        );
+        held.release().expect("fixture lease must release");
+    }
+
+    #[test]
+    fn allowlisted_legacy_reads_classify_content_and_refuse_unsafe_sources() {
+        let loaded = TestRoot::new();
+        let loaded_path = loaded.root.join("legacy.json");
+        create_private_file(&loaded_path, br#"{"apiKey":"secret"}"#);
+        match read_allowlisted_legacy_credential(&loaded_path, OsStr::new("legacy.json"), 128)
+            .expect("legacy read must complete")
+        {
+            LegacyCredentialReadResult::Loaded(bytes) => {
+                assert_eq!(bytes, br#"{"apiKey":"secret"}"#);
+            }
+            _ => panic!("safe legacy source must load"),
+        }
+        assert!(matches!(
+            read_allowlisted_legacy_credential(&loaded_path, OsStr::new("wrong.json"), 128),
+            Err(PosixStoreError::InvalidInput)
+        ));
+
+        let empty = TestRoot::new();
+        let empty_path = empty.root.join("legacy.json");
+        create_private_file(&empty_path, b"");
+        assert!(matches!(
+            read_allowlisted_legacy_credential(&empty_path, OsStr::new("legacy.json"), 128),
+            Ok(LegacyCredentialReadResult::Malformed)
+        ));
+
+        let oversized = TestRoot::new();
+        let oversized_path = oversized.root.join("legacy.json");
+        create_private_file(&oversized_path, b"123456789");
+        assert!(matches!(
+            read_allowlisted_legacy_credential(&oversized_path, OsStr::new("legacy.json"), 8),
+            Ok(LegacyCredentialReadResult::Oversized)
+        ));
+
+        let missing = TestRoot::new();
+        assert!(matches!(
+            read_allowlisted_legacy_credential(
+                &missing.root.join("legacy.json"),
+                OsStr::new("legacy.json"),
+                128
+            ),
+            Ok(LegacyCredentialReadResult::Missing)
+        ));
+
+        let broad = TestRoot::new();
+        let broad_path = broad.root.join("legacy.json");
+        create_private_file(&broad_path, b"do-not-read");
+        fs::set_permissions(&broad_path, fs::Permissions::from_mode(0o644))
+            .expect("unsafe legacy mode must be set");
+        assert!(matches!(
+            read_allowlisted_legacy_credential(&broad_path, OsStr::new("legacy.json"), 128),
+            Ok(LegacyCredentialReadResult::Unsafe)
+        ));
+        fs::set_permissions(&broad_path, fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+            .expect("private legacy mode must be restored");
+
+        let linked = TestRoot::new();
+        let linked_path = linked.root.join("legacy.json");
+        symlink(&linked.outside, &linked_path).expect("legacy symlink fixture must be created");
+        assert!(matches!(
+            read_allowlisted_legacy_credential(&linked_path, OsStr::new("legacy.json"), 128),
+            Ok(LegacyCredentialReadResult::Unsafe)
+        ));
+        assert_eq!(
+            fs::read_to_string(&linked.outside).expect("outside canary must remain readable"),
+            "outside-canary\n"
+        );
+        fs::remove_file(&linked_path).expect("legacy symlink fixture must be removed");
+
+        let hard_linked = TestRoot::new();
+        let source = hard_linked.root.join("source");
+        let alias = hard_linked.root.join("legacy.json");
+        create_private_file(&source, b"do-not-read");
+        fs::hard_link(&source, &alias).expect("legacy hard-link fixture must be created");
+        assert!(matches!(
+            read_allowlisted_legacy_credential(&alias, OsStr::new("legacy.json"), 128),
+            Ok(LegacyCredentialReadResult::Unsafe)
+        ));
+        fs::remove_file(&alias).expect("legacy hard-link alias must be removed");
+        fs::remove_file(&source).expect("legacy hard-link source must be removed");
+    }
+
+    #[test]
+    fn allowlisted_legacy_read_rejects_path_replacement_races() {
+        let test = TestRoot::new();
+        let path = test.root.join("legacy.json");
+        let retained = test.root.join("retained-original");
+        create_private_file(&path, b"original-secret");
+        let result = read_allowlisted_legacy_credential_with_hook(
+            &path,
+            OsStr::new("legacy.json"),
+            128,
+            || {
+                fs::rename(&path, &retained).expect("original legacy source must be retained");
+                create_private_file(&path, b"replacement");
+            },
+        )
+        .expect("raced legacy read must complete");
+        assert!(matches!(result, LegacyCredentialReadResult::Unsafe));
     }
 
     #[test]

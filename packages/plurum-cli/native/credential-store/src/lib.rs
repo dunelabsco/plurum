@@ -1,6 +1,9 @@
 #![deny(unsafe_code)]
 
-use napi::{bindgen_prelude::ObjectRef, Env};
+use napi::{
+    bindgen_prelude::{Object, ObjectRef},
+    Env,
+};
 use napi_derive::napi;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -27,7 +30,7 @@ pub const magic: &str = "plurum-native-credential-store";
 
 #[allow(non_upper_case_globals)]
 #[napi]
-pub const abiVersion: u32 = 1;
+pub const abiVersion: u32 = 2;
 
 #[allow(non_upper_case_globals)]
 #[napi]
@@ -42,10 +45,13 @@ pub const packageVersion: &str = env!("CARGO_PKG_VERSION");
 pub const target: &str = TARGET_VALUE;
 
 #[napi(js_name = "createAdapters")]
-pub fn create_adapters(env: Env) -> napi::Result<Option<ObjectRef<false>>> {
+pub fn create_adapters(
+    env: Env,
+    configuration: Object<'_>,
+) -> napi::Result<Option<ObjectRef<false>>> {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
-        bridge::create_adapters(&env).map(Some)
+        bridge::create_adapters(&env, &configuration).map(Some)
     }
 }
 
@@ -58,7 +64,7 @@ mod tests {
     #[test]
     fn descriptor_values_are_stable() {
         assert_eq!(magic, "plurum-native-credential-store");
-        assert_eq!(abiVersion, 1);
+        assert_eq!(abiVersion, 2);
         assert_eq!(nodeApiVersion, 8);
         assert_eq!(packageVersion, "0.0.0-development");
         assert_eq!(target, TARGET_VALUE);

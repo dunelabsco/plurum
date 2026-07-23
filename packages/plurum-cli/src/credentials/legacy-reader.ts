@@ -74,7 +74,11 @@ function inspectAdapterResult(
       return null;
     }
     const status = value.status;
-    if (status === "missing" || status === "unsafe") {
+    if (
+      status === "missing" ||
+      status === "unsafe" ||
+      status === "malformed"
+    ) {
       return hasExactKeys(value, ["status"])
         ? Object.freeze({ status })
         : null;
@@ -208,7 +212,11 @@ export async function readLegacyCredential(
   if (inspected === null) {
     return result("unavailable", source);
   }
-  if (inspected.status === "missing" || inspected.status === "unsafe") {
+  if (
+    inspected.status === "missing" ||
+    inspected.status === "unsafe" ||
+    inspected.status === "malformed"
+  ) {
     return result(inspected.status, source);
   }
 

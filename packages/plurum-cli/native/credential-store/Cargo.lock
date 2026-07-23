@@ -278,6 +278,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "plurum-native-macos-acl",
+ "plurum-native-secret-memory",
  "plurum-windows-syscall",
  "rustix",
  "sha2",
@@ -286,6 +287,13 @@ dependencies = [
 [[package]]
 name = "plurum-native-macos-acl"
 version = "0.0.0-development"
+
+[[package]]
+name = "plurum-native-secret-memory"
+version = "0.0.0-development"
+dependencies = [
+ "napi",
+]
 
 [[package]]
 name = "plurum-windows-syscall"

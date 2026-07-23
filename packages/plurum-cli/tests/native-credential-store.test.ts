@@ -15,9 +15,96 @@ import type {
   CredentialSetupLeaseNonce,
   CredentialTemporaryEntry,
 } from "../src/credentials/store-mutation-contracts.js";
+import type {
+  CredentialStoreObservationDirectoryHandle,
+} from "../src/credentials/store-observation-contracts.js";
+import type { CredentialStoreWholePassEvidence } from "../src/credentials/store-contracts.js";
 
 const TARGET = "darwin-arm64" satisfies NativeCredentialTarget;
 const SECRET_SENTINEL = "plrm_live_NATIVE_PROVIDER_SECRET_SENTINEL";
+const LEGACY_PATHS = Object.freeze({
+  hermes: "/isolated/hermes/config.json",
+  openclaw: "/isolated/openclaw/config.json",
+  removedCli: "/isolated/plurum/legacy.json",
+});
+const CONFIGURATION = Object.freeze({ legacyPaths: LEGACY_PATHS });
+
+function defaultRawLegacyAdapter(): Record<string, unknown> {
+  return {
+    read() {
+      return { status: "missing" as const };
+    },
+  };
+}
+
+function defaultRawObservationAdapter(): Record<string, unknown> {
+  return {
+    openPrivateDirectory() {
+      return {
+        status: "missing" as const,
+        evidence: Object.freeze({}),
+      };
+    },
+  };
+}
+
+function completeRawAdapterPair(
+  read: Record<string, unknown>,
+  mutation: Record<string, unknown>,
+  options: Readonly<{
+    legacy?: Record<string, unknown>;
+    observation?: Record<string, unknown>;
+  }> = Object.freeze({}),
+): Record<string, unknown> {
+  if (!Object.hasOwn(mutation, "acquireObservedSetupLease")) {
+    Object.defineProperty(mutation, "acquireObservedSetupLease", {
+      configurable: true,
+      enumerable: true,
+      value() {
+        return { status: "busy" as const };
+      },
+      writable: true,
+    });
+  }
+  return {
+    legacy: options.legacy ?? defaultRawLegacyAdapter(),
+    mutation,
+    observation: options.observation ?? defaultRawObservationAdapter(),
+    read,
+  };
+}
+
+function rawMutationLease(
+  overrides: Readonly<Record<string, unknown>> = Object.freeze({}),
+): Record<string, unknown> {
+  return {
+    abandon() {},
+    attestDirectory() {
+      return rawDirectoryAttestation();
+    },
+    createTemporaryExclusive() {
+      return { status: "conflict" as const };
+    },
+    listTemporaryEntries() {
+      return [];
+    },
+    moveTemporaryConditionally() {
+      return { status: "conflict" as const };
+    },
+    observeEntry() {
+      return { status: "missing" as const, snapshot: Object.freeze({}) };
+    },
+    release() {},
+    removeConditionally() {
+      return { status: "conflict" as const };
+    },
+    renew() {
+      return { status: "held" as const };
+    },
+    syncDirectory() {},
+    ...overrides,
+  };
+}
 
 function createNativeModule(
   overrides: Readonly<Record<string, unknown>> = {},
@@ -27,11 +114,14 @@ function createNativeModule(
       return { status: "missing" as const };
     },
   });
-  const mutation = Object.freeze({
+  const mutation = {
+    acquireObservedSetupLease() {
+      return { status: "busy" as const };
+    },
     acquireSetupLease() {
       return { status: "busy" as const };
     },
-  });
+  };
 
   return {
     magic: NATIVE_CREDENTIAL_STORE_MAGIC,
@@ -40,7 +130,7 @@ function createNativeModule(
     packageVersion: CLI_VERSION,
     target: TARGET,
     createAdapters() {
-      return { read, mutation };
+      return completeRawAdapterPair(read, mutation);
     },
     ...overrides,
   };
@@ -90,6 +180,7 @@ function loadAvailable(moduleValue: unknown) {
   const loaded = createNativeCredentialStoreProvider(
     TARGET,
     resolverReturning(moduleValue),
+    CONFIGURATION,
   ).load();
   expect(loaded.status).toBe("available");
   if (loaded.status !== "available") {
@@ -119,18 +210,18 @@ describe("native credential store provider", () => {
     const module = createNativeModule({
       createAdapters() {
         factoryCalls += 1;
-        return {
-          read: {
+        return completeRawAdapterPair(
+          {
             openPrivateDirectory() {
               return { status: "missing" as const };
             },
           },
-          mutation: {
+          {
             acquireSetupLease() {
               return { status: "busy" as const };
             },
           },
-        };
+        );
       },
     });
     const provider = createNativeCredentialStoreProvider(
@@ -140,6 +231,7 @@ describe("native credential store provider", () => {
         expect(target).toBe(TARGET);
         return module;
       },
+      CONFIGURATION,
     );
 
     expect(resolveCalls).toBe(0);
@@ -168,6 +260,7 @@ describe("native credential store provider", () => {
     const provider = createNativeCredentialStoreProvider(
       TARGET,
       selectedResolver,
+      CONFIGURATION,
     );
 
     selectedResolver = replacementResolver;
@@ -178,7 +271,7 @@ describe("native credential store provider", () => {
     expect(selectedResolver).toBe(replacementResolver);
   });
 
-  it("wraps and freezes only the two high-level credential adapters", async () => {
+  it("wraps and freezes only the four high-level credential adapters", async () => {
     const calls: string[] = [];
     let rawRead: Record<string, unknown>;
     rawRead = {
@@ -219,10 +312,11 @@ describe("native credential store provider", () => {
       resolverReturning(
         createNativeModule({
           createAdapters() {
-            return { read: rawRead, mutation: rawMutation };
+            return completeRawAdapterPair(rawRead, rawMutation);
           },
         }),
       ),
+      CONFIGURATION,
     );
     const loaded = provider.load();
 
@@ -232,10 +326,24 @@ describe("native credential store provider", () => {
     }
 
     expect(Object.isFrozen(loaded)).toBe(true);
+    expect(Object.isFrozen(loaded.legacy)).toBe(true);
     expect(Object.isFrozen(loaded.read)).toBe(true);
+    expect(Object.isFrozen(loaded.observation)).toBe(true);
     expect(Object.isFrozen(loaded.mutation)).toBe(true);
+    expect(Object.keys(loaded).sort()).toEqual([
+      "legacy",
+      "mutation",
+      "observation",
+      "read",
+      "status",
+    ]);
+    expect(Object.keys(loaded.legacy)).toEqual(["read"]);
     expect(Object.keys(loaded.read)).toEqual(["openPrivateDirectory"]);
-    expect(Object.keys(loaded.mutation)).toEqual(["acquireSetupLease"]);
+    expect(Object.keys(loaded.observation)).toEqual(["openPrivateDirectory"]);
+    expect(Object.keys(loaded.mutation)).toEqual([
+      "acquireSetupLease",
+      "acquireObservedSetupLease",
+    ]);
 
     await expect(
       loaded.read.openPrivateDirectory("/isolated/plurum", {
@@ -254,6 +362,896 @@ describe("native credential store provider", () => {
       "read:/isolated/plurum:true",
       "mutation:/isolated/plurum:true:true:018f5d10-ee3a-476f-9bfb-c1e93dd50074",
     ]);
+  });
+
+  it("snapshots and deep-freezes the exact legacy allowlist for the raw factory", () => {
+    let configurationReads = 0;
+    let hermesReads = 0;
+    let receivedConfiguration: unknown;
+    const legacyPaths = Object.defineProperties(
+      {},
+      {
+        hermes: {
+          enumerable: true,
+          get() {
+            hermesReads += 1;
+            return hermesReads === 1
+              ? LEGACY_PATHS.hermes
+              : SECRET_SENTINEL;
+          },
+        },
+        openclaw: {
+          enumerable: true,
+          value: LEGACY_PATHS.openclaw,
+        },
+        removedCli: {
+          enumerable: true,
+          value: LEGACY_PATHS.removedCli,
+        },
+      },
+    );
+    const configuration = Object.defineProperty({}, "legacyPaths", {
+      enumerable: true,
+      get() {
+        configurationReads += 1;
+        return configurationReads === 1
+          ? legacyPaths
+          : Object.freeze({
+              hermes: SECRET_SENTINEL,
+              openclaw: SECRET_SENTINEL,
+              removedCli: SECRET_SENTINEL,
+            });
+      },
+    }) as typeof CONFIGURATION;
+    const module = createNativeModule({
+      createAdapters(rawConfiguration: unknown) {
+        receivedConfiguration = rawConfiguration;
+        return completeRawAdapterPair(
+          {
+            openPrivateDirectory() {
+              return { status: "missing" as const };
+            },
+          },
+          {
+            acquireSetupLease() {
+              return { status: "busy" as const };
+            },
+          },
+        );
+      },
+    });
+    const provider = createNativeCredentialStoreProvider(
+      TARGET,
+      resolverReturning(module),
+      configuration,
+    );
+
+    expect(configurationReads).toBe(1);
+    expect(hermesReads).toBe(1);
+    expect(provider.load().status).toBe("available");
+    expect(receivedConfiguration).toEqual(CONFIGURATION);
+    expect(receivedConfiguration).not.toBe(configuration);
+    expect(
+      Object.isFrozen(receivedConfiguration as Record<string, unknown>),
+    ).toBe(true);
+    const receivedPaths = (
+      receivedConfiguration as { readonly legacyPaths: unknown }
+    ).legacyPaths;
+    expect(receivedPaths).not.toBe(legacyPaths);
+    expect(Object.isFrozen(receivedPaths)).toBe(true);
+    expect(Object.keys(receivedPaths as object).sort()).toEqual([
+      "hermes",
+      "openclaw",
+      "removedCli",
+    ]);
+  });
+
+  it("fails closed on non-exact legacy configuration before resolving native code", () => {
+    const invalidConfigurations: unknown[] = [
+      Object.freeze({}),
+      Object.freeze({
+        legacyPaths: LEGACY_PATHS,
+        unexpected: SECRET_SENTINEL,
+      }),
+      Object.freeze({
+        legacyPaths: Object.freeze({
+          hermes: LEGACY_PATHS.hermes,
+          openclaw: LEGACY_PATHS.openclaw,
+        }),
+      }),
+      Object.freeze({
+        legacyPaths: Object.freeze({
+          ...LEGACY_PATHS,
+          hermes: "",
+        }),
+      }),
+      Object.freeze({
+        legacyPaths: Object.freeze({
+          ...LEGACY_PATHS,
+          openclaw: `${LEGACY_PATHS.openclaw}\0${SECRET_SENTINEL}`,
+        }),
+      }),
+    ];
+
+    for (const configuration of invalidConfigurations) {
+      let resolveCalls = 0;
+      const provider = createNativeCredentialStoreProvider(
+        TARGET,
+        () => {
+          resolveCalls += 1;
+          return createNativeModule();
+        },
+        configuration as typeof CONFIGURATION,
+      );
+
+      expect(provider.load()).toEqual({
+        status: "unavailable",
+        code: "native_credential_store_unavailable",
+      });
+      expect(provider.load()).toBe(provider.load());
+      expect(resolveCalls).toBe(0);
+    }
+  });
+
+  it("allowlists exact legacy reads and copies then wipes native buffers", async () => {
+    let rawCalls = 0;
+    let delegated:
+      | Readonly<{
+          source: unknown;
+          path: unknown;
+          options: unknown;
+        }>
+      | undefined;
+    let unexpectedSpeciesAllocations = 0;
+    class UnexpectedLegacyBytes extends Uint8Array {
+      constructor(length: number) {
+        super(length);
+        unexpectedSpeciesAllocations += 1;
+      }
+    }
+    const rawBytes = new Uint8Array([17, 23, 42]);
+    Object.defineProperty(rawBytes, "constructor", {
+      value: {
+        get [Symbol.species]() {
+          return UnexpectedLegacyBytes;
+        },
+      },
+    });
+    let rawResult: unknown = { status: "loaded", bytes: rawBytes };
+    let rawLegacy: Record<string, unknown>;
+    rawLegacy = {
+      read(
+        this: unknown,
+        source: unknown,
+        path: unknown,
+        options: unknown,
+      ) {
+        expect(this).toBe(rawLegacy);
+        rawCalls += 1;
+        delegated = Object.freeze({ source, path, options });
+        return rawResult;
+      },
+    };
+    const loaded = loadAvailable(
+      createNativeModule({
+        createAdapters() {
+          return completeRawAdapterPair(
+            {
+              openPrivateDirectory() {
+                return { status: "missing" as const };
+              },
+            },
+            {
+              acquireSetupLease() {
+                return { status: "busy" as const };
+              },
+            },
+            { legacy: rawLegacy },
+          );
+        },
+      }),
+    );
+    const options = Object.freeze({
+      noFollow: true as const,
+      maxBytes: 16_384 as const,
+    });
+
+    const readPromise = loaded.legacy.read(
+      "hermes",
+      LEGACY_PATHS.hermes,
+      options,
+    );
+    expect([...rawBytes]).toEqual([0, 0, 0]);
+    const result = await readPromise;
+    expect(result.status).toBe("loaded");
+    if (result.status !== "loaded") {
+      throw new Error("raw legacy fixture unexpectedly missing");
+    }
+    expect([...result.bytes]).toEqual([17, 23, 42]);
+    expect(result.bytes).not.toBe(rawBytes);
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(unexpectedSpeciesAllocations).toBe(0);
+    expect(delegated).toEqual({
+      source: "hermes",
+      path: LEGACY_PATHS.hermes,
+      options,
+    });
+    expect(Object.isFrozen(delegated?.options)).toBe(true);
+
+    for (const status of ["missing", "unsafe", "malformed"] as const) {
+      rawResult = { status };
+      await expect(
+        loaded.legacy.read("openclaw", LEGACY_PATHS.openclaw, options),
+      ).resolves.toEqual({ status });
+    }
+    rawResult = { status: "loaded", bytes: new Uint8Array() };
+    await expect(
+      loaded.legacy.read("hermes", LEGACY_PATHS.hermes, options),
+    ).rejects.toThrow("The native credential operation failed.");
+    const callsBeforeRejection = rawCalls;
+    await expect(
+      loaded.legacy.read("hermes", LEGACY_PATHS.openclaw, options),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+    await expect(
+      loaded.legacy.read(
+        "removed-cli",
+        LEGACY_PATHS.removedCli,
+        Object.freeze({
+          noFollow: true,
+          maxBytes: 16_383,
+        }) as unknown as typeof options,
+      ),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+    await expect(
+      loaded.legacy.read(
+        "hermes",
+        LEGACY_PATHS.hermes,
+        Object.freeze({
+          noFollow: true,
+          maxBytes: 16_384,
+          unexpected: SECRET_SENTINEL,
+        }) as unknown as typeof options,
+      ),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+    expect(rawCalls).toBe(callsBeforeRejection);
+  });
+
+  it("keeps whole-pass evidence pair-scoped, one-use, and burned on busy", async () => {
+    const rawEvidence = Object.freeze({});
+    let observedAcquireCalls = 0;
+    let delegatedOptions: Record<string, unknown> | undefined;
+    const mutation = {
+      acquireObservedSetupLease(
+        _directory: string,
+        options: Record<string, unknown>,
+      ) {
+        observedAcquireCalls += 1;
+        delegatedOptions = options;
+        return { status: "busy" as const };
+      },
+      acquireSetupLease() {
+        return { status: "busy" as const };
+      },
+    };
+    const loaded = loadAvailable(
+      createNativeModule({
+        createAdapters() {
+          return completeRawAdapterPair(
+            {
+              openPrivateDirectory() {
+                return { status: "missing" as const };
+              },
+            },
+            mutation,
+            {
+              observation: {
+                openPrivateDirectory() {
+                  return { status: "missing", evidence: rawEvidence };
+                },
+              },
+            },
+          );
+        },
+      }),
+    );
+    const other = loadAvailable(createNativeModule());
+    const observed = await loaded.observation.openPrivateDirectory(
+      "/isolated/plurum",
+      { noFollow: true },
+    );
+    expect(observed.status).toBe("missing");
+    if (observed.status !== "missing") {
+      throw new Error("raw observation fixture unexpectedly opened");
+    }
+    expect(Object.isFrozen(observed.evidence)).toBe(true);
+    expect(Object.keys(observed.evidence)).toEqual([]);
+    expect(observed.evidence).not.toBe(rawEvidence);
+
+    await expect(
+      other.mutation.acquireObservedSetupLease("/isolated/plurum", {
+        noFollow: true,
+        createDirectory: true,
+        evidence: observed.evidence,
+      }),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+    await expect(
+      loaded.mutation.acquireObservedSetupLease("/isolated/plurum", {
+        noFollow: true,
+        createDirectory: true,
+        evidence: Object.freeze({}) as CredentialStoreWholePassEvidence,
+      }),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+    await expect(
+      loaded.mutation.acquireObservedSetupLease(
+        "/isolated/plurum",
+        Object.freeze({
+          noFollow: true,
+          createDirectory: true,
+          evidence: observed.evidence,
+          nonce: "018f5d10-ee3a-476f-9bfb-c1e93dd50074",
+        }) as unknown as Parameters<
+          typeof loaded.mutation.acquireObservedSetupLease
+        >[1],
+      ),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+
+    await expect(
+      loaded.mutation.acquireObservedSetupLease("/isolated/plurum", {
+        noFollow: true,
+        createDirectory: true,
+        evidence: observed.evidence,
+      }),
+    ).resolves.toEqual({ status: "busy" });
+    expect(observedAcquireCalls).toBe(1);
+    expect(Object.isFrozen(delegatedOptions)).toBe(true);
+    expect(Object.keys(delegatedOptions ?? {}).sort()).toEqual([
+      "createDirectory",
+      "evidence",
+      "noFollow",
+      "nonce",
+    ]);
+    expect(delegatedOptions?.evidence).toBe(rawEvidence);
+    expect(delegatedOptions?.noFollow).toBe(true);
+    expect(delegatedOptions?.createDirectory).toBe(true);
+    expect(delegatedOptions?.nonce).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    );
+    await expect(
+      loaded.mutation.acquireObservedSetupLease("/isolated/plurum", {
+        noFollow: true,
+        createDirectory: true,
+        evidence: observed.evidence,
+      }),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+    expect(observedAcquireCalls).toBe(1);
+  });
+
+  it("normalizes observed preconditions and acquired leases and abandons malformed leases", async () => {
+    const rawEvidence: object[] = [];
+    let acquireCalls = 0;
+    let releaseCalls = 0;
+    let malformedAbandonCalls = 0;
+    let malformedResultAbandonCalls = 0;
+    const goodLease = rawMutationLease({
+      release() {
+        releaseCalls += 1;
+      },
+    });
+    const malformedLease = {
+      abandon() {
+        malformedAbandonCalls += 1;
+      },
+    };
+    const malformedResultLease = rawMutationLease({
+      abandon() {
+        malformedResultAbandonCalls += 1;
+      },
+    });
+    const loaded = loadAvailable(
+      createNativeModule({
+        createAdapters() {
+          return completeRawAdapterPair(
+            {
+              openPrivateDirectory() {
+                return { status: "missing" as const };
+              },
+            },
+            {
+              acquireObservedSetupLease() {
+                acquireCalls += 1;
+                if (acquireCalls === 1) {
+                  return { status: "precondition-failed" as const };
+                }
+                return {
+                  status: "acquired" as const,
+                  priorLease: "absent" as const,
+                  directory: "existing" as const,
+                  lease:
+                    acquireCalls === 2
+                      ? goodLease
+                      : acquireCalls === 3
+                        ? malformedLease
+                        : malformedResultLease,
+                  ...(acquireCalls === 4
+                    ? { unexpected: SECRET_SENTINEL }
+                    : {}),
+                };
+              },
+              acquireSetupLease() {
+                return { status: "busy" as const };
+              },
+            },
+            {
+              observation: {
+                openPrivateDirectory() {
+                  const evidence = Object.freeze({});
+                  rawEvidence.push(evidence);
+                  return { status: "missing" as const, evidence };
+                },
+              },
+            },
+          );
+        },
+      }),
+    );
+    async function evidence(): Promise<CredentialStoreWholePassEvidence> {
+      const observed = await loaded.observation.openPrivateDirectory(
+        "/isolated/plurum",
+        { noFollow: true },
+      );
+      if (observed.status !== "missing") {
+        throw new Error("raw observation fixture unexpectedly opened");
+      }
+      return observed.evidence;
+    }
+    const first = await evidence();
+    await expect(
+      loaded.mutation.acquireObservedSetupLease("/isolated/plurum", {
+        noFollow: true,
+        createDirectory: true,
+        evidence: first,
+      }),
+    ).resolves.toEqual({ status: "precondition-failed" });
+    await expect(
+      loaded.mutation.acquireObservedSetupLease("/isolated/plurum", {
+        noFollow: true,
+        createDirectory: true,
+        evidence: first,
+      }),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+
+    const acquired = await loaded.mutation.acquireObservedSetupLease(
+      "/isolated/plurum",
+      {
+        noFollow: true,
+        createDirectory: true,
+        evidence: await evidence(),
+      },
+    );
+    expect(acquired.status).toBe("acquired");
+    if (acquired.status !== "acquired") {
+      throw new Error("raw observed lease fixture unexpectedly unavailable");
+    }
+    expect(Object.isFrozen(acquired.lease)).toBe(true);
+    await acquired.lease.release();
+    expect(releaseCalls).toBe(1);
+
+    const malformedEvidence = await evidence();
+    await expect(
+      loaded.mutation.acquireObservedSetupLease("/isolated/plurum", {
+        noFollow: true,
+        createDirectory: true,
+        evidence: malformedEvidence,
+      }),
+    ).rejects.toThrow("The native credential operation failed.");
+    expect(malformedAbandonCalls).toBe(1);
+    await expect(
+      loaded.mutation.acquireObservedSetupLease("/isolated/plurum", {
+        noFollow: true,
+        createDirectory: true,
+        evidence: malformedEvidence,
+      }),
+    ).rejects.toThrow("The native credential adapter request is invalid.");
+
+    await expect(
+      loaded.mutation.acquireObservedSetupLease("/isolated/plurum", {
+        noFollow: true,
+        createDirectory: true,
+        evidence: await evidence(),
+      }),
+    ).rejects.toThrow("The native credential operation failed.");
+    expect(malformedResultAbandonCalls).toBe(1);
+    expect(rawEvidence).toHaveLength(4);
+  });
+
+  it("rejects malformed and replayed raw whole-pass evidence", async () => {
+    let rawEvidence: object = Object.freeze({
+      unexpected: SECRET_SENTINEL,
+    });
+    const loaded = loadAvailable(
+      createNativeModule({
+        createAdapters() {
+          return completeRawAdapterPair(
+            {
+              openPrivateDirectory() {
+                return { status: "missing" as const };
+              },
+            },
+            {
+              acquireSetupLease() {
+                return { status: "busy" as const };
+              },
+            },
+            {
+              observation: {
+                openPrivateDirectory() {
+                  return { status: "missing" as const, evidence: rawEvidence };
+                },
+              },
+            },
+          );
+        },
+      }),
+    );
+
+    await expect(
+      loaded.observation.openPrivateDirectory("/isolated/plurum", {
+        noFollow: true,
+      }),
+    ).rejects.toThrow("The native credential operation failed.");
+
+    rawEvidence = Object.freeze({});
+    const first = await loaded.observation.openPrivateDirectory(
+      "/isolated/plurum",
+      { noFollow: true },
+    );
+    expect(first.status).toBe("missing");
+    await expect(
+      loaded.observation.openPrivateDirectory("/isolated/plurum", {
+        noFollow: true,
+      }),
+    ).rejects.toThrow("The native credential operation failed.");
+  });
+
+  it("membranes opened observations and invalidates children when finishing", async () => {
+    const rawBytes = new Uint8Array([3, 1, 4]);
+    const rawEvidence = Object.freeze({});
+    let rawDirectoryCloseCalls = 0;
+    let finishCalls = 0;
+    let delegatedEntryOptions: unknown;
+    const rawFile = {
+      attest() {
+        return rawFileAttestation(3);
+      },
+      readBounded() {
+        return { bytes: rawBytes, endOfFile: true };
+      },
+      close() {},
+    };
+    const rawDirectory = {
+      attest() {
+        return rawDirectoryAttestation();
+      },
+      close() {
+        rawDirectoryCloseCalls += 1;
+      },
+      finishObservation() {
+        finishCalls += 1;
+        return rawEvidence;
+      },
+      listTemporaryEntries() {
+        return [];
+      },
+      observeEntry(options: unknown) {
+        delegatedEntryOptions = options;
+        return {
+          status: "opened",
+          attestation: rawFileAttestation(3),
+          file: rawFile,
+        };
+      },
+    };
+    const loaded = loadAvailable(
+      createNativeModule({
+        createAdapters() {
+          return completeRawAdapterPair(
+            {
+              openPrivateDirectory() {
+                return { status: "missing" as const };
+              },
+            },
+            {
+              acquireSetupLease() {
+                return { status: "busy" as const };
+              },
+            },
+            {
+              observation: {
+                openPrivateDirectory() {
+                  return { status: "opened", directory: rawDirectory };
+                },
+              },
+            },
+          );
+        },
+      }),
+    );
+    const opened = await loaded.observation.openPrivateDirectory(
+      "/isolated/plurum",
+      { noFollow: true },
+    );
+    expect(opened.status).toBe("opened");
+    if (opened.status !== "opened") {
+      throw new Error("raw observation fixture unexpectedly missing");
+    }
+    expect(Object.keys(opened.directory).sort()).toEqual([
+      "attest",
+      "close",
+      "finishObservation",
+      "listTemporaryEntries",
+      "observeEntry",
+    ]);
+    await expect(opened.directory.attest()).resolves.toEqual(
+      rawDirectoryAttestation(),
+    );
+    await expect(opened.directory.listTemporaryEntries()).resolves.toEqual([]);
+    const entry = Object.freeze({
+      kind: "canonical" as const,
+      role: "credential" as const,
+      name: "credentials.json" as const,
+    });
+    const observed = await opened.directory.observeEntry({
+      entry,
+      noFollow: true,
+    });
+    expect(observed.status).toBe("opened");
+    if (observed.status !== "opened") {
+      throw new Error("raw entry fixture unexpectedly missing");
+    }
+    expect(Object.isFrozen(delegatedEntryOptions)).toBe(true);
+    expect(delegatedEntryOptions).toEqual({ entry, noFollow: true });
+    const bounded = await observed.file.readBounded({ maxBytes: 3 });
+    expect([...bounded.bytes]).toEqual([3, 1, 4]);
+    expect([...rawBytes]).toEqual([0, 0, 0]);
+
+    const finishPromise = opened.directory.finishObservation();
+    expect([...bounded.bytes]).toEqual([0, 0, 0]);
+    const evidence = await finishPromise;
+    expect(Object.isFrozen(evidence)).toBe(true);
+    expect(Object.keys(evidence)).toEqual([]);
+    expect(evidence).not.toBe(rawEvidence);
+    expect(finishCalls).toBe(1);
+    await expect(observed.file.attest()).rejects.toThrow(
+      "The native credential operation failed.",
+    );
+    await expect(opened.directory.attest()).rejects.toThrow(
+      "The native credential operation failed.",
+    );
+    await expect(opened.directory.finishObservation()).rejects.toThrow(
+      "The native credential operation failed.",
+    );
+    await opened.directory.close();
+    expect(rawDirectoryCloseCalls).toBe(1);
+  });
+
+  it("best-effort closes malformed observation directories and entry handles", async () => {
+    let malformedDirectoryCloseCalls = 0;
+    const malformedDirectory = {
+      attest() {
+        return rawDirectoryAttestation();
+      },
+      close() {
+        malformedDirectoryCloseCalls += 1;
+      },
+      finishObservation() {
+        return Object.freeze({});
+      },
+      listTemporaryEntries() {
+        return [];
+      },
+      observeEntry: SECRET_SENTINEL,
+    };
+    const malformedDirectoryProvider = loadAvailable(
+      createNativeModule({
+        createAdapters() {
+          return completeRawAdapterPair(
+            {
+              openPrivateDirectory() {
+                return { status: "missing" as const };
+              },
+            },
+            {
+              acquireSetupLease() {
+                return { status: "busy" as const };
+              },
+            },
+            {
+              observation: {
+                openPrivateDirectory() {
+                  return {
+                    status: "opened",
+                    directory: malformedDirectory,
+                    unexpected: SECRET_SENTINEL,
+                  };
+                },
+              },
+            },
+          );
+        },
+      }),
+    );
+    await expect(
+      malformedDirectoryProvider.observation.openPrivateDirectory(
+        "/isolated/plurum",
+        { noFollow: true },
+      ),
+    ).rejects.toThrow("The native credential operation failed.");
+    expect(malformedDirectoryCloseCalls).toBe(1);
+
+    let malformedFileCloseCalls = 0;
+    const malformedFile = {
+      attest() {
+        return rawFileAttestation(0);
+      },
+      close() {
+        malformedFileCloseCalls += 1;
+      },
+      readBounded() {
+        return { bytes: new Uint8Array(), endOfFile: true };
+      },
+    };
+    const rawDirectory = {
+      attest() {
+        return rawDirectoryAttestation();
+      },
+      close() {},
+      finishObservation() {
+        return Object.freeze({});
+      },
+      listTemporaryEntries() {
+        return [];
+      },
+      observeEntry() {
+        return {
+          status: "opened",
+          attestation: { kind: "not-a-file" },
+          file: malformedFile,
+          unexpected: SECRET_SENTINEL,
+        };
+      },
+    };
+    const malformedFileProvider = loadAvailable(
+      createNativeModule({
+        createAdapters() {
+          return completeRawAdapterPair(
+            {
+              openPrivateDirectory() {
+                return { status: "missing" as const };
+              },
+            },
+            {
+              acquireSetupLease() {
+                return { status: "busy" as const };
+              },
+            },
+            {
+              observation: {
+                openPrivateDirectory() {
+                  return { status: "opened", directory: rawDirectory };
+                },
+              },
+            },
+          );
+        },
+      }),
+    );
+    const opened = await malformedFileProvider.observation.openPrivateDirectory(
+      "/isolated/plurum",
+      { noFollow: true },
+    );
+    if (opened.status !== "opened") {
+      throw new Error("raw observation fixture unexpectedly missing");
+    }
+    await expect(
+      opened.directory.observeEntry({
+        entry: Object.freeze({
+          kind: "canonical",
+          role: "credential",
+          name: "credentials.json",
+        }),
+        noFollow: true,
+      }),
+    ).rejects.toThrow("The native credential operation failed.");
+    expect(malformedFileCloseCalls).toBe(1);
+    await opened.directory.close();
+  });
+
+  it("fails closed when an observation is finished reentrantly", async () => {
+    const rawEvidence = Object.freeze({});
+    let publicDirectory: CredentialStoreObservationDirectoryHandle | undefined;
+    let finishPromise: Promise<CredentialStoreWholePassEvidence> | undefined;
+    let rawFileCloseCalls = 0;
+    const rawFile = {
+      attest() {
+        return rawFileAttestation(0);
+      },
+      close() {
+        rawFileCloseCalls += 1;
+      },
+      readBounded() {
+        return { bytes: new Uint8Array(), endOfFile: true };
+      },
+    };
+    const rawDirectory = {
+      attest() {
+        return rawDirectoryAttestation();
+      },
+      close() {},
+      finishObservation() {
+        return rawEvidence;
+      },
+      listTemporaryEntries() {
+        return [];
+      },
+      observeEntry() {
+        if (publicDirectory === undefined) {
+          throw new Error(SECRET_SENTINEL);
+        }
+        finishPromise = publicDirectory.finishObservation();
+        return {
+          status: "opened",
+          attestation: rawFileAttestation(0),
+          file: rawFile,
+        };
+      },
+    };
+    const loaded = loadAvailable(
+      createNativeModule({
+        createAdapters() {
+          return completeRawAdapterPair(
+            {
+              openPrivateDirectory() {
+                return { status: "missing" as const };
+              },
+            },
+            {
+              acquireSetupLease() {
+                return { status: "busy" as const };
+              },
+            },
+            {
+              observation: {
+                openPrivateDirectory() {
+                  return { status: "opened" as const, directory: rawDirectory };
+                },
+              },
+            },
+          );
+        },
+      }),
+    );
+    const opened = await loaded.observation.openPrivateDirectory(
+      "/isolated/plurum",
+      { noFollow: true },
+    );
+    if (opened.status !== "opened") {
+      throw new Error("raw observation fixture unexpectedly missing");
+    }
+    publicDirectory = opened.directory;
+
+    await expect(
+      publicDirectory.observeEntry({
+        entry: Object.freeze({
+          kind: "canonical",
+          role: "credential",
+          name: "credentials.json",
+        }),
+        noFollow: true,
+      }),
+    ).rejects.toThrow("The native credential operation failed.");
+    await expect(finishPromise).resolves.toBeDefined();
+    expect(rawFileCloseCalls).toBe(1);
+    await publicDirectory.close();
   });
 
   it("does not inspect inherited handle fields on terminal result branches", async () => {
@@ -275,18 +1273,18 @@ describe("native credential store provider", () => {
     const loaded = loadAvailable(
       createNativeModule({
         createAdapters() {
-          return {
-            read: {
+          return completeRawAdapterPair(
+            {
               openPrivateDirectory() {
                 return missing;
               },
             },
-            mutation: {
+            {
               acquireSetupLease() {
                 return busy;
               },
             },
-          };
+          );
         },
       }),
     );
@@ -357,19 +1355,19 @@ describe("native credential store provider", () => {
     const loaded = loadAvailable(
       createNativeModule({
         createAdapters() {
-          return {
-            read: {
+          return completeRawAdapterPair(
+            {
               openPrivateDirectory() {
                 rawOpenCalls += 1;
                 return { status: "opened", directory: rawDirectory };
               },
             },
-            mutation: {
+            {
               acquireSetupLease() {
                 return { status: "busy" };
               },
             },
-          };
+          );
         },
       }),
     );
@@ -527,13 +1525,13 @@ describe("native credential store provider", () => {
     const loaded = loadAvailable(
       createNativeModule({
         createAdapters() {
-          return {
-            read: {
+          return completeRawAdapterPair(
+            {
               openPrivateDirectory() {
                 return { status: "missing" };
               },
             },
-            mutation: {
+            {
               acquireSetupLease() {
                 const fixture = rawLeases[acquireCalls];
                 acquireCalls += 1;
@@ -548,7 +1546,7 @@ describe("native credential store provider", () => {
                 };
               },
             },
-          };
+          );
         },
       }),
     );
@@ -691,13 +1689,13 @@ describe("native credential store provider", () => {
     const loaded = loadAvailable(
       createNativeModule({
         createAdapters() {
-          return {
-            read: {
+          return completeRawAdapterPair(
+            {
               openPrivateDirectory() {
                 return { status: "missing" };
               },
             },
-            mutation: {
+            {
               acquireSetupLease() {
                 return {
                   status: "acquired",
@@ -707,7 +1705,7 @@ describe("native credential store provider", () => {
                 };
               },
             },
-          };
+          );
         },
       }),
     );
@@ -843,13 +1841,13 @@ describe("native credential store provider", () => {
     const loaded = loadAvailable(
       createNativeModule({
         createAdapters() {
-          return {
-            read: {
+          return completeRawAdapterPair(
+            {
               openPrivateDirectory() {
                 return { status: "missing" };
               },
             },
-            mutation: {
+            {
               acquireSetupLease() {
                 return {
                   status: "acquired",
@@ -859,7 +1857,7 @@ describe("native credential store provider", () => {
                 };
               },
             },
-          };
+          );
         },
       }),
     );
@@ -951,13 +1949,13 @@ describe("native credential store provider", () => {
     const loaded = loadAvailable(
       createNativeModule({
         createAdapters() {
-          return {
-            read: {
+          return completeRawAdapterPair(
+            {
               openPrivateDirectory() {
                 return { status: "missing" };
               },
             },
-            mutation: {
+            {
               acquireSetupLease() {
                 return {
                   status: "acquired",
@@ -967,7 +1965,7 @@ describe("native credential store provider", () => {
                 };
               },
             },
-          };
+          );
         },
       }),
     );
@@ -1050,18 +2048,18 @@ describe("native credential store provider", () => {
       const loaded = loadAvailable(
         createNativeModule({
           createAdapters() {
-            return {
-              read: {
+            return completeRawAdapterPair(
+              {
                 openPrivateDirectory() {
                   return { status: "opened", directory: rawDirectory };
                 },
               },
-              mutation: {
+              {
                 acquireSetupLease() {
                   return { status: "busy" };
                 },
               },
-            };
+            );
           },
         }),
       );
@@ -1157,13 +2155,13 @@ describe("native credential store provider", () => {
     const loaded = loadAvailable(
       createNativeModule({
         createAdapters() {
-          return {
-            read: {
+          return completeRawAdapterPair(
+            {
               openPrivateDirectory() {
                 return { status: "missing" };
               },
             },
-            mutation: {
+            {
               acquireSetupLease() {
                 return {
                   status: "acquired",
@@ -1173,7 +2171,7 @@ describe("native credential store provider", () => {
                 };
               },
             },
-          };
+          );
         },
       }),
     );
@@ -1266,16 +2264,18 @@ describe("native credential store provider", () => {
       createNativeModule({
         createAdapters() {
           return {
-            read: {
+            ...completeRawAdapterPair(
+              {
               openPrivateDirectory() {
                 return { status: "missing" as const };
               },
-            },
-            mutation: {
+              },
+              {
               acquireSetupLease() {
                 return { status: "busy" as const };
               },
-            },
+              },
+            ),
             unexpected: SECRET_SENTINEL,
           };
         },
@@ -1285,6 +2285,7 @@ describe("native credential store provider", () => {
     const result = createNativeCredentialStoreProvider(
       TARGET,
       resolverReturning(module),
+      CONFIGURATION,
     ).load();
 
     expect(result).toEqual({
@@ -1312,6 +2313,7 @@ describe("native credential store provider", () => {
       const result = createNativeCredentialStoreProvider(
         TARGET,
         resolverReturning(module),
+        CONFIGURATION,
       ).load();
 
       expect(result).toEqual({
@@ -1340,6 +2342,7 @@ describe("native credential store provider", () => {
             },
           });
         },
+        CONFIGURATION,
       );
 
       const first = provider.load();
@@ -1363,16 +2366,20 @@ describe("native credential store provider", () => {
 
     try {
       for (const failurePoint of ["resolver", "factory"] as const) {
-        const provider = createNativeCredentialStoreProvider(TARGET, () => {
-          if (failurePoint === "resolver") {
-            return Promise.reject(new Error(SECRET_SENTINEL));
-          }
-          return createNativeModule({
-            createAdapters() {
+        const provider = createNativeCredentialStoreProvider(
+          TARGET,
+          () => {
+            if (failurePoint === "resolver") {
               return Promise.reject(new Error(SECRET_SENTINEL));
-            },
-          });
-        });
+            }
+            return createNativeModule({
+              createAdapters() {
+                return Promise.reject(new Error(SECRET_SENTINEL));
+              },
+            });
+          },
+          CONFIGURATION,
+        );
 
         const first = provider.load();
         expect(provider.load()).toBe(first);
@@ -1403,6 +2410,7 @@ describe("native credential store provider", () => {
     const result = createNativeCredentialStoreProvider(
       TARGET,
       resolverReturning(module),
+      CONFIGURATION,
     ).load();
 
     expect(result).toEqual({
@@ -1429,12 +2437,19 @@ describe("native credential store provider", () => {
       },
     });
     const mutation = {
+      acquireObservedSetupLease() {
+        return { status: "busy" as const };
+      },
       acquireSetupLease() {
         return { status: "busy" as const };
       },
     };
     const pair = Object.defineProperties(
-      { mutation },
+      {
+        legacy: defaultRawLegacyAdapter(),
+        mutation,
+        observation: defaultRawObservationAdapter(),
+      },
       {
         read: {
           enumerable: true,
@@ -1469,6 +2484,7 @@ describe("native credential store provider", () => {
     const loaded = createNativeCredentialStoreProvider(
       TARGET,
       resolverReturning(module),
+      CONFIGURATION,
     ).load();
 
     expect(loaded.status).toBe("available");
@@ -1536,12 +2552,17 @@ describe("native credential store provider", () => {
         throw new Error(SECRET_SENTINEL);
       },
     });
-    mutationReceiver = { acquireSetupLease };
+    mutationReceiver = {
+      acquireObservedSetupLease() {
+        return { status: "busy" as const };
+      },
+      acquireSetupLease,
+    };
 
     const createAdapters = function (this: unknown): unknown {
       factoryInvocations += 1;
       expect(this).toBe(moduleValue);
-      return { read: readReceiver, mutation: mutationReceiver };
+      return completeRawAdapterPair(readReceiver, mutationReceiver);
     };
     Object.defineProperty(createAdapters, "call", {
       configurable: true,
@@ -1555,6 +2576,7 @@ describe("native credential store provider", () => {
     const loaded = createNativeCredentialStoreProvider(
       TARGET,
       resolverReturning(moduleValue),
+      CONFIGURATION,
     ).load();
 
     expect(loaded.status).toBe("available");
@@ -1598,22 +2620,23 @@ describe("native credential store provider", () => {
       resolverReturning(
         createNativeModule({
           createAdapters() {
-            return {
-              read: {
+            return completeRawAdapterPair(
+              {
                 openPrivateDirectory() {
                   return { status: "missing" as const };
                 },
               },
-              mutation: {
+              {
                 acquireSetupLease() {
                   mutationCalls += 1;
                   return { status: "busy" as const };
                 },
               },
-            };
+            );
           },
         }),
       ),
+      CONFIGURATION,
     ).load();
 
     expect(loaded.status).toBe("available");
@@ -1640,13 +2663,13 @@ describe("native credential store provider", () => {
       resolverReturning(
         createNativeModule({
           createAdapters() {
-            return {
-              read: {
+            return completeRawAdapterPair(
+              {
                 openPrivateDirectory() {
                   return { status: "missing" as const };
                 },
               },
-              mutation: {
+              {
                 acquireSetupLease(
                   _directory: string,
                   options: {
@@ -1657,10 +2680,11 @@ describe("native credential store provider", () => {
                   return { status: "busy" as const };
                 },
               },
-            };
+            );
           },
         }),
       ),
+      CONFIGURATION,
     ).load();
     const options = Object.defineProperties(
       {},
@@ -1707,7 +2731,11 @@ describe("native credential store provider", () => {
         },
       });
     };
-    provider = createNativeCredentialStoreProvider(TARGET, resolver);
+    provider = createNativeCredentialStoreProvider(
+      TARGET,
+      resolver,
+      CONFIGURATION,
+    );
 
     const first = provider.load();
 
@@ -1744,6 +2772,7 @@ describe("native credential store provider", () => {
     provider = createNativeCredentialStoreProvider(
       TARGET,
       resolverReturning(moduleValue),
+      CONFIGURATION,
     );
 
     const first = provider.load();
@@ -1768,6 +2797,7 @@ describe("native credential store provider", () => {
         resolveCalls += 1;
         return createNativeModule();
       },
+      CONFIGURATION,
     );
 
     expect(provider.load()).toEqual({

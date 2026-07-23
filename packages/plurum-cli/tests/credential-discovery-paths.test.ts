@@ -139,36 +139,6 @@ describe("legacy credential discovery paths", () => {
     ]);
   });
 
-  it("accepts ordinary absolute UNC host locations", () => {
-    expect(
-      resolve(
-        "win32",
-        {
-          LOCALAPPDATA: "\\\\server\\profiles\\example\\AppData\\Local",
-          USERPROFILE: "\\\\server\\profiles\\example",
-        },
-        {
-          HERMES_HOME: "\\\\server\\profiles\\example\\hermes",
-          OPENCLAW_HOME: "\\\\server\\profiles\\example\\openclaw-home",
-        },
-      ),
-    ).toEqual([
-      {
-        source: "hermes",
-        path: "\\\\server\\profiles\\example\\hermes\\plurum.json",
-      },
-      {
-        source: "openclaw",
-        path:
-          "\\\\server\\profiles\\example\\openclaw-home\\.openclaw\\plurum.json",
-      },
-      {
-        source: "removed-cli",
-        path: "\\\\server\\profiles\\example\\.plurum\\config.json",
-      },
-    ]);
-  });
-
   it.each([
     ["unsupported", {}],
     ["darwin", {}],
@@ -182,6 +152,7 @@ describe("legacy credential discovery paths", () => {
     ["win32", { USERPROFILE: "C:\\" }],
     ["win32", { USERPROFILE: "\\\\?\\C:\\Users\\example" }],
     ["win32", { USERPROFILE: "\\\\.\\C:\\Users\\example" }],
+    ["win32", { USERPROFILE: "\\\\server\\profiles\\example" }],
     ["win32", { USERPROFILE: "C:\\Users\\example:stream" }],
     ["win32", { USERPROFILE: "C:\\Users\\CON" }],
     ["win32", { USERPROFILE: "C:\\Users\\example." }],

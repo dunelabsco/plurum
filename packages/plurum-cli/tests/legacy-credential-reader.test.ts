@@ -163,6 +163,7 @@ describe("legacy credential reader", () => {
   it.each([
     ["missing", { status: "missing" }],
     ["unsafe", { status: "unsafe" }],
+    ["malformed", { status: "malformed" }],
   ] as const)("preserves the fixed %s source state", async (status, adapterResult) => {
     const result = await readLegacyCredential(
       adapterReturning(adapterResult),
@@ -209,6 +210,10 @@ describe("legacy credential reader", () => {
     {
       label: "extra unsafe field",
       value: { status: "unsafe", reason: KEY },
+    },
+    {
+      label: "extra malformed field",
+      value: { status: "malformed", reason: KEY },
     },
     { label: "missing bytes", value: { status: "loaded" } },
     { label: "non-byte body", value: { status: "loaded", bytes: KEY } },

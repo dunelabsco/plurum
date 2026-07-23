@@ -46,10 +46,13 @@ function isWindowsAbsolutePath(value: string): boolean {
   ) {
     return false;
   }
-  return (
-    /^[A-Za-z]:\\/u.test(windowsValue) ||
-    /^\\\\[^\\]+\\[^\\]+(?:\\|$)/u.test(windowsValue)
-  );
+  /*
+   * Credential sources must remain on a local volume whose filesystem,
+   * owner SID, DACL, integrity label, file ID, and flush behavior can all be
+   * attested by the native Windows authority. UNC and other network paths do
+   * not satisfy that trust boundary.
+   */
+  return /^[A-Za-z]:\\/u.test(windowsValue);
 }
 
 function hasUnsafeWindowsComponent(value: string): boolean {

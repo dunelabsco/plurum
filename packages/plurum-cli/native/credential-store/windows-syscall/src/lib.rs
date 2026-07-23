@@ -29,16 +29,17 @@ use windows_sys::Win32::Security::{
     GetSecurityDescriptorControl, GetSecurityDescriptorLength, GetTokenInformation, InitializeAcl,
     InitializeSecurityDescriptor, IsValidAcl, IsValidSid, IsWellKnownSid,
     SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
-    TokenIntegrityLevel, TokenUser, WinMediumLabelSid, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
-    ACL_REVISION, ACL_SIZE_INFORMATION, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
-    INHERITED_ACE, LABEL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
-    PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SE_DACL_PROTECTED, SID,
-    SYSTEM_MANDATORY_LABEL_ACE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
+    TokenIntegrityLevel, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+    WinMediumLabelSid, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION,
+    CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, INHERITED_ACE, INHERIT_ONLY_ACE,
+    LABEL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSID,
+    SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SE_DACL_PROTECTED, SID, SYSTEM_MANDATORY_LABEL_ACE,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
 };
 #[cfg(feature = "test-support")]
 use windows_sys::Win32::Security::{
-    AddMandatoryAce, CreateWellKnownSid, SetTokenInformation, WinBuiltinAdministratorsSid,
-    WinWorldSid, PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES,
+    AddMandatoryAce, CreateWellKnownSid, SetTokenInformation, WinWorldSid,
+    PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES,
     TOKEN_ADJUST_DEFAULT, UNPROTECTED_DACL_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{
@@ -59,8 +60,9 @@ use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
 #[cfg(feature = "test-support")]
 use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
 use windows_sys::Win32::System::SystemServices::{
-    ACCESS_ALLOWED_ACE_TYPE, FILE_PERSISTENT_ACLS, SE_GROUP_INTEGRITY, SE_GROUP_INTEGRITY_ENABLED,
-    SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+    ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, FILE_PERSISTENT_ACLS, SE_GROUP_INTEGRITY,
+    SE_GROUP_INTEGRITY_ENABLED, SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+    SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
@@ -71,6 +73,16 @@ use windows_sys::Win32::System::IO::{IO_STATUS_BLOCK, OVERLAPPED};
 
 const DRIVE_FIXED: u32 = 3;
 const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+const DELETE_ACCESS: u32 = 0x0001_0000;
+const WRITE_DACL_ACCESS: u32 = 0x0004_0000;
+const WRITE_OWNER_ACCESS: u32 = 0x0008_0000;
+const GENERIC_ALL_ACCESS: u32 = 0x1000_0000;
+const FILE_DELETE_CHILD_ACCESS: u32 = 0x0000_0040;
+const NAMESPACE_CONTROL_ACCESS: u32 = DELETE_ACCESS
+    | WRITE_DACL_ACCESS
+    | WRITE_OWNER_ACCESS
+    | GENERIC_ALL_ACCESS
+    | FILE_DELETE_CHILD_ACCESS;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
@@ -523,6 +535,123 @@ pub fn attest_security(
         semantic_medium_label,
         descriptor: descriptor_bytes,
     })
+}
+
+/// Returns whether no untrusted principal has authority to replace or retarget this directory.
+///
+/// Create-only sibling rights are intentionally not treated as replacement authority. Callers
+/// retain no-delete handles for every traversed component, while this check rejects rights that
+/// can delete a bound name or change the ACL/owner. Unknown ACE semantics fail closed.
+pub fn attest_no_untrusted_namespace_control(
+    handle: BorrowedHandle<'_>,
+    process: &ProcessIdentity,
+) -> Result<bool> {
+    process.verify()?;
+    let mut owner: PSID = null_mut();
+    let mut dacl: *mut ACL = null_mut();
+    let mut descriptor = null_mut();
+    // SAFETY: output pointers are valid and descriptor is released by DescriptorGuard.
+    let status = unsafe {
+        GetSecurityInfo(
+            raw(handle),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            &mut dacl,
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(WinError::code(ErrorKind::Other, status));
+    }
+    let descriptor = DescriptorGuard(descriptor);
+    if descriptor.0.is_null()
+        || owner.is_null()
+        // SAFETY: owner belongs to the live security descriptor.
+        || unsafe { IsValidSid(owner) } == 0
+        || !trusted_namespace_sid(owner, process)
+        || dacl.is_null()
+    {
+        return Ok(false);
+    }
+    // SAFETY: dacl belongs to the live descriptor.
+    if unsafe { IsValidAcl(dacl) } == 0 {
+        return Ok(false);
+    }
+    let mut info = ACL_SIZE_INFORMATION::default();
+    // SAFETY: dacl is a valid ACL and output is sized exactly.
+    if unsafe {
+        GetAclInformation(
+            dacl,
+            (&mut info as *mut ACL_SIZE_INFORMATION).cast(),
+            size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+    {
+        return Err(WinError::last(ErrorKind::Other));
+    }
+
+    for index in 0..info.AceCount {
+        let mut ace: *mut c_void = null_mut();
+        // SAFETY: index is bounded by the ACE count reported for the validated ACL.
+        if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
+            return Err(WinError::last(ErrorKind::Other));
+        }
+        // SAFETY: IsValidAcl plus GetAce proves a readable ACE_HEADER.
+        let header = unsafe { &*(ace.cast::<ACE_HEADER>()) };
+        if header.AceType == ACCESS_DENIED_ACE_TYPE as u8 {
+            continue;
+        }
+        if header.AceType != ACCESS_ALLOWED_ACE_TYPE as u8 {
+            return Ok(false);
+        }
+        if header.AceFlags & INHERIT_ONLY_ACE as u8 != 0 {
+            continue;
+        }
+
+        let sid_offset = size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>();
+        let sid_header_length = size_of::<SID>() - size_of::<u32>();
+        let ace_length = header.AceSize as usize;
+        if ace_length < sid_offset + sid_header_length {
+            return Ok(false);
+        }
+        // SAFETY: the validated ACE type/size proves the fixed ACCESS_ALLOWED_ACE fields.
+        let allowed = unsafe { &*(ace.cast::<ACCESS_ALLOWED_ACE>()) };
+        if allowed.Mask & NAMESPACE_CONTROL_ACCESS == 0 {
+            continue;
+        }
+        let sid: PSID = (&allowed.SidStart as *const u32).cast_mut().cast();
+        // SAFETY: the range from SidStart through AceSize belongs to this validated ACE.
+        let sid_bytes =
+            unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), ace_length - sid_offset) };
+        let sid_length = 8_usize
+            .checked_add(usize::from(sid_bytes[1]).saturating_mul(size_of::<u32>()))
+            .ok_or_else(|| WinError::code(ErrorKind::Other, ERROR_INVALID_PARAMETER))?;
+        if sid_length > sid_bytes.len()
+            // SAFETY: the complete SID was range-checked within the ACE.
+            || unsafe { IsValidSid(sid) } == 0
+            // SAFETY: IsValidSid succeeded for the complete in-range SID.
+            || unsafe { GetLengthSid(sid) } as usize != sid_length
+        {
+            return Ok(false);
+        }
+        if !trusted_namespace_sid(sid, process) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn trusted_namespace_sid(sid: PSID, process: &ProcessIdentity) -> bool {
+    // SAFETY: callers supply a live valid SID and process.sid is captured and valid.
+    (unsafe { EqualSid(sid, process.sid()) }) != 0
+        // SAFETY: callers supply a live valid SID.
+        || unsafe { IsWellKnownSid(sid, WinLocalSystemSid) } != 0
+        // SAFETY: callers supply a live valid SID.
+        || unsafe { IsWellKnownSid(sid, WinBuiltinAdministratorsSid) } != 0
 }
 
 fn attest_semantic_medium_label(label_acl: *mut ACL, kind: SecurityKind) -> Result<bool> {

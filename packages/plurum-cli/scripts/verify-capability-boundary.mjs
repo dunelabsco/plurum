@@ -9,10 +9,13 @@ const sourceRoot = join(packageRoot, "src");
 
 const nativeCredentialPackagePath =
   "src/adapters/node/native-credential-package.ts";
+const nativeCredentialStorePath =
+  "src/adapters/node/native-credential-store.ts";
 const exactNativeCredentialStoreImports = Object.freeze([
   "NATIVE_CREDENTIAL_STORE_ABI_VERSION",
   "NATIVE_CREDENTIAL_STORE_NODE_API_VERSION",
   "createNativeCredentialStoreProvider",
+  "type:NativeCredentialStoreConfiguration",
   "type:NativeCredentialStoreProvider",
   "type:NativeCredentialTarget",
 ]);
@@ -20,8 +23,12 @@ const exactNativeCredentialStoreLocalImports = Object.freeze([
   "NATIVE_CREDENTIAL_STORE_ABI_VERSION:NATIVE_CREDENTIAL_STORE_ABI_VERSION",
   "NATIVE_CREDENTIAL_STORE_NODE_API_VERSION:NATIVE_CREDENTIAL_STORE_NODE_API_VERSION",
   "createNativeCredentialStoreProvider:createNativeCredentialStoreProvider",
+  "type:NativeCredentialStoreConfiguration:NativeCredentialStoreConfiguration",
   "type:NativeCredentialStoreProvider:NativeCredentialStoreProvider",
   "type:NativeCredentialTarget:NativeCredentialTarget",
+]);
+const exactNativeCredentialStoreExternalLocalImports = new Map([
+  ["node:crypto", ["randomUUID:nodeRandomUUID"]],
 ]);
 const exactNativeCredentialPackageExternalImports = new Map([
   ["node:crypto", ["createHash"]],
@@ -85,6 +92,10 @@ const allowedExternalImports = new Map([
   [
     "src/adapters/node/hash.ts",
     new Map([["node:crypto", ["createHash"]]]),
+  ],
+  [
+    nativeCredentialStorePath,
+    new Map([["node:crypto", ["randomUUID"]]]),
   ],
   [
     "src/adapters/node/network.ts",
@@ -1715,6 +1726,8 @@ function scanText(relativePath, text) {
       const exactLocalBindings =
         relativePath === nativeCredentialPackagePath
           ? exactNativeCredentialPackageLocalImports.get(specifier)
+          : relativePath === nativeCredentialStorePath
+            ? exactNativeCredentialStoreExternalLocalImports.get(specifier)
           : undefined;
       if (
         exactLocalBindings !== undefined &&
@@ -3606,7 +3619,7 @@ const positiveFixtures = [
   ],
   [
     nativeCredentialPackagePath,
-    'import { createHash } from "node:crypto"; import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from "node:fs"; import { createRequire } from "node:module"; import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"; import { fileURLToPath } from "node:url"; import { NATIVE_CREDENTIAL_STORE_ABI_VERSION, NATIVE_CREDENTIAL_STORE_NODE_API_VERSION, createNativeCredentialStoreProvider, type NativeCredentialStoreProvider, type NativeCredentialTarget } from "./native-credential-store.js"; const FIXED_NATIVE_REQUIRE = createRequire(import.meta.url); const FIXED_NATIVE_CACHE = FIXED_NATIVE_REQUIRE.cache; function defaultLoadAddon(artifactPath: string): unknown { return FIXED_NATIVE_REQUIRE(artifactPath); } function normalizeOptions(): unknown { return Object.freeze({ packageRoot: DEFAULT_PACKAGE_ROOT, loadAddon: defaultLoadAddon, enforceCommonJsCache: true }); } void createHash; void closeSync; void fsConstants; void fstatSync; void lstatSync; void openSync; void readSync; void readdirSync; void realpathSync; void basename; void dirname; void isAbsolute; void join; void relative; void resolve; void sep; void fileURLToPath; void NATIVE_CREDENTIAL_STORE_ABI_VERSION; void NATIVE_CREDENTIAL_STORE_NODE_API_VERSION; void createNativeCredentialStoreProvider; void normalizeOptions; type Provider = NativeCredentialStoreProvider; type Target = NativeCredentialTarget;',
+    'import { createHash } from "node:crypto"; import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from "node:fs"; import { createRequire } from "node:module"; import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"; import { fileURLToPath } from "node:url"; import { NATIVE_CREDENTIAL_STORE_ABI_VERSION, NATIVE_CREDENTIAL_STORE_NODE_API_VERSION, createNativeCredentialStoreProvider, type NativeCredentialStoreConfiguration, type NativeCredentialStoreProvider, type NativeCredentialTarget } from "./native-credential-store.js"; const FIXED_NATIVE_REQUIRE = createRequire(import.meta.url); const FIXED_NATIVE_CACHE = FIXED_NATIVE_REQUIRE.cache; function defaultLoadAddon(artifactPath: string): unknown { return FIXED_NATIVE_REQUIRE(artifactPath); } function normalizeOptions(): unknown { return Object.freeze({ packageRoot: DEFAULT_PACKAGE_ROOT, loadAddon: defaultLoadAddon, enforceCommonJsCache: true }); } void createHash; void closeSync; void fsConstants; void fstatSync; void lstatSync; void openSync; void readSync; void readdirSync; void realpathSync; void basename; void dirname; void isAbsolute; void join; void relative; void resolve; void sep; void fileURLToPath; void NATIVE_CREDENTIAL_STORE_ABI_VERSION; void NATIVE_CREDENTIAL_STORE_NODE_API_VERSION; void createNativeCredentialStoreProvider; void normalizeOptions; type Configuration = NativeCredentialStoreConfiguration; type Provider = NativeCredentialStoreProvider; type Target = NativeCredentialTarget;',
   ],
   ["src/adapters/node/clock.ts", "Date.now();"],
   [
@@ -3631,11 +3644,15 @@ const positiveFixtures = [
   ],
   ["src/example.ts", "new Date(0); Date.parse('2026-01-01'); Date.UTC(2026, 0);"],
   [
-    "src/adapters/node/native-credential-store.ts",
+    nativeCredentialStorePath,
+    'import { randomUUID as nodeRandomUUID } from "node:crypto"; nodeRandomUUID();',
+  ],
+  [
+    nativeCredentialStorePath,
     "Reflect.apply(() => 1, undefined, []);",
   ],
   [
-    "src/adapters/node/native-credential-store.ts",
+    nativeCredentialStorePath,
     "Reflect.ownKeys(Object.freeze({}));",
   ],
   [

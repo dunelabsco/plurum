@@ -41,6 +41,16 @@ const PACKAGE_BY_TARGET = Object.freeze(Object.fromEntries(
     `@dunelabs/plurum-native-${target}`,
   ]),
 ));
+let verificationStage = "bootstrap";
+process.on("uncaughtExceptionMonitor", () => {
+  try {
+    process.stderr.write(
+      `packaged native verifier failed at ${verificationStage}\n`,
+    );
+  } catch {
+    // The original failure remains authoritative.
+  }
+});
 
 function requiredEnvironment(name) {
   const value = process.env[name];
@@ -174,6 +184,7 @@ assert.equal(["available", "missing", "omit"].includes(mode), true);
 const cachePolicy = requiredEnvironment("PLURUM_NATIVE_VERIFY_CACHE_POLICY");
 assert.equal(["normal", "preloaded"].includes(cachePolicy), true);
 assert.equal(cachePolicy === "preloaded" ? mode : "available", "available");
+verificationStage = "manifest";
 const manifest = expectedManifest();
 const expectedPackageName = PACKAGE_BY_TARGET[target];
 assert.equal(manifest.name, expectedPackageName);
@@ -254,6 +265,7 @@ const resolverPath = join(
   "native-credential-package.js",
 );
 directRegularFile(resolverPath, "installed native package resolver", 1024 * 1024);
+verificationStage = "resolver-import";
 const resolverModule = await import(pathToFileURL(resolverPath).href);
 assert.deepEqual(Object.keys(resolverModule).sort(), [
   "NATIVE_CREDENTIAL_PACKAGE_BY_TARGET",
@@ -277,7 +289,18 @@ if (cachePolicy === "preloaded") {
   assert.strictEqual(nativeRequire.cache[artifactPath], preloadedEntry);
 }
 
-const provider = resolverModule.createNativeCredentialPackageProvider(target);
+const nativeConfiguration = Object.freeze({
+  legacyPaths: Object.freeze({
+    hermes: join(testRoot, "legacy-hermes", "plurum.json"),
+    openclaw: join(testRoot, "legacy-openclaw", "plurum.json"),
+    removedCli: join(testRoot, "legacy-removed", "config.json"),
+  }),
+});
+verificationStage = "provider-construction";
+const provider = resolverModule.createNativeCredentialPackageProvider(
+  target,
+  nativeConfiguration,
+);
 assert.equal(Object.isFrozen(provider), true);
 assert.deepEqual(Object.keys(provider), ["load"]);
 if (cachePolicy === "preloaded") {
@@ -296,6 +319,7 @@ if (cachePolicy === "preloaded") {
     manifest.plurumNative.sha256,
   );
 } else if (mode === "available") {
+  verificationStage = "provider-load";
   assert.ok(artifactPath !== undefined && artifactIdentity !== undefined);
   assert.deepEqual(
     identity(lstatSync(artifactPath)),
@@ -308,14 +332,31 @@ if (cachePolicy === "preloaded") {
     assert.fail("installed native package resolver must load the packaged addon");
   }
   assert.equal(Object.isFrozen(loaded), true);
-  assert.deepEqual(Object.keys(loaded).sort(), ["mutation", "read", "status"]);
+  assert.deepEqual(Object.keys(loaded).sort(), [
+    "legacy",
+    "mutation",
+    "observation",
+    "read",
+    "status",
+  ]);
+  assert.equal(Object.isFrozen(loaded.legacy), true);
   assert.equal(Object.isFrozen(loaded.read), true);
+  assert.equal(Object.isFrozen(loaded.observation), true);
   assert.equal(Object.isFrozen(loaded.mutation), true);
+  assert.deepEqual(Object.keys(loaded.legacy), ["read"]);
   assert.deepEqual(Object.keys(loaded.read), ["openPrivateDirectory"]);
-  assert.deepEqual(Object.keys(loaded.mutation), ["acquireSetupLease"]);
+  assert.deepEqual(Object.keys(loaded.observation), ["openPrivateDirectory"]);
+  assert.deepEqual(Object.keys(loaded.mutation).sort(), [
+    "acquireObservedSetupLease",
+    "acquireSetupLease",
+  ]);
+  verificationStage = "provider-reuse";
   assert.strictEqual(provider.load(), loaded);
   assert.deepEqual(identity(lstatSync(artifactPath)), artifactIdentity);
-  const laterProvider = resolverModule.createNativeCredentialPackageProvider(target);
+  const laterProvider = resolverModule.createNativeCredentialPackageProvider(
+    target,
+    nativeConfiguration,
+  );
   assert.equal(Object.isFrozen(laterProvider), true);
   assert.notStrictEqual(laterProvider, provider);
   assert.deepEqual(identity(lstatSync(artifactPath)), artifactIdentity);
@@ -325,11 +366,25 @@ if (cachePolicy === "preloaded") {
     assert.fail("later providers must reuse the one verified native addon");
   }
   assert.equal(Object.isFrozen(laterLoaded), true);
-  assert.deepEqual(Object.keys(laterLoaded).sort(), ["mutation", "read", "status"]);
+  assert.deepEqual(Object.keys(laterLoaded).sort(), [
+    "legacy",
+    "mutation",
+    "observation",
+    "read",
+    "status",
+  ]);
+  assert.equal(Object.isFrozen(laterLoaded.legacy), true);
   assert.equal(Object.isFrozen(laterLoaded.read), true);
+  assert.equal(Object.isFrozen(laterLoaded.observation), true);
   assert.equal(Object.isFrozen(laterLoaded.mutation), true);
+  assert.deepEqual(Object.keys(laterLoaded.legacy), ["read"]);
   assert.deepEqual(Object.keys(laterLoaded.read), ["openPrivateDirectory"]);
-  assert.deepEqual(Object.keys(laterLoaded.mutation), ["acquireSetupLease"]);
+  assert.deepEqual(Object.keys(laterLoaded.observation), ["openPrivateDirectory"]);
+  assert.deepEqual(Object.keys(laterLoaded.mutation).sort(), [
+    "acquireObservedSetupLease",
+    "acquireSetupLease",
+  ]);
+  verificationStage = "cache-fail-closed";
   assert.strictEqual(laterProvider.load(), laterLoaded);
   assert.deepEqual(
     identity(lstatSync(artifactPath)),
@@ -341,7 +396,10 @@ if (cachePolicy === "preloaded") {
   assert.equal(loadedCacheEntry.filename, artifactPath);
   assert.equal(delete nativeRequire.cache[artifactPath], true);
   assert.equal(Object.hasOwn(nativeRequire.cache, artifactPath), false);
-  const thirdProvider = resolverModule.createNativeCredentialPackageProvider(target);
+  const thirdProvider = resolverModule.createNativeCredentialPackageProvider(
+    target,
+    nativeConfiguration,
+  );
   assert.equal(Object.isFrozen(thirdProvider), true);
   const poisoned = thirdProvider.load();
   assert.equal(Object.isFrozen(poisoned), true);
@@ -364,6 +422,7 @@ if (cachePolicy === "preloaded") {
   assert.equal(sha256(artifactAfter), manifest.plurumNative.sha256);
   assert.equal(dirname(realpathSync(artifactPath)), presentCandidates[0]);
 } else {
+  verificationStage = "unavailable-provider";
   const unavailable = provider.load();
   assert.equal(Object.isFrozen(unavailable), true);
   assert.deepEqual(unavailable, {
@@ -374,6 +433,7 @@ if (cachePolicy === "preloaded") {
   assert.deepEqual(candidates.filter(pathExists), []);
 }
 
+verificationStage = "complete";
 process.stdout.write(
   `packaged native provider verified (${mode}/${cachePolicy})\n`,
 );

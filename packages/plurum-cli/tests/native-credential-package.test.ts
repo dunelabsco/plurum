@@ -28,6 +28,7 @@ import {
   NATIVE_CREDENTIAL_STORE_ABI_VERSION,
   NATIVE_CREDENTIAL_STORE_MAGIC,
   NATIVE_CREDENTIAL_STORE_NODE_API_VERSION,
+  type NativeCredentialStoreConfiguration,
   type NativeCredentialTarget,
 } from "../src/adapters/node/native-credential-store.js";
 import { SUPPORTED_NODE_RUNTIME_RANGES } from "../src/system/runtime-support.js";
@@ -40,6 +41,13 @@ const ARTIFACT_BYTES = new TextEncoder().encode(
 const SECRET = "plrm_live_NATIVE_PACKAGE_SECRET_SENTINEL";
 const ROOT_PREFIX = "plurum-native-package-test-";
 const TEST_REQUIRE_CACHE = createRequire(import.meta.url).cache;
+const NATIVE_CONFIGURATION = Object.freeze({
+  legacyPaths: Object.freeze({
+    hermes: "/isolated/home/.hermes/plurum.json",
+    openclaw: "/isolated/home/.openclaw/plurum.json",
+    removedCli: "/isolated/home/.plurum/config.json",
+  }),
+}) satisfies NativeCredentialStoreConfiguration;
 
 interface TemporaryRoot {
   readonly path: string;
@@ -236,14 +244,30 @@ function createNativeModule(
   target: NativeCredentialTarget = TARGET,
   overrides: Readonly<Record<string, unknown>> = {},
 ): Record<string, unknown> {
+  const legacy = Object.freeze({
+    read() {
+      return { status: "missing" as const };
+    },
+  });
   const read = Object.freeze({
     openPrivateDirectory() {
       return { status: "missing" as const };
     },
   });
   const mutation = Object.freeze({
+    acquireObservedSetupLease() {
+      return { status: "busy" as const };
+    },
     acquireSetupLease() {
       return { status: "busy" as const };
+    },
+  });
+  const observation = Object.freeze({
+    openPrivateDirectory() {
+      return {
+        status: "missing" as const,
+        evidence: Object.freeze({}),
+      };
     },
   });
   return {
@@ -253,7 +277,7 @@ function createNativeModule(
     packageVersion: CLI_VERSION,
     target,
     createAdapters() {
-      return { read, mutation };
+      return { legacy, mutation, observation, read };
     },
     ...overrides,
   };
@@ -276,6 +300,7 @@ function loadFixture(
 ) {
   return createNativeCredentialPackageProvider(
     fixture.target,
+    NATIVE_CONFIGURATION,
     verificationOptions(fixture, loadAddon),
   ).load();
 }
@@ -314,6 +339,7 @@ describe("native credential package resolver", () => {
     });
     const provider = createNativeCredentialPackageProvider(
       TARGET,
+      NATIVE_CONFIGURATION,
       verificationOptions(fixture, loader),
     );
 
@@ -374,6 +400,7 @@ describe("native credential package resolver", () => {
     });
     const provider = createNativeCredentialPackageProvider(
       "linux-x64-musl",
+      NATIVE_CONFIGURATION,
       Object.freeze({
         packageRoot: join(tmpdir(), `missing-plurum-${SECRET}`),
         loadAddon: loader,
@@ -601,6 +628,7 @@ describe("native credential package resolver", () => {
     });
     const provider = createNativeCredentialPackageProvider(
       fixture.target,
+      NATIVE_CONFIGURATION,
       verificationOptions(fixture, loader),
     );
 
@@ -677,7 +705,11 @@ describe("native credential package resolver", () => {
       loadAddon: loader,
     };
 
-    const provider = createNativeCredentialPackageProvider(TARGET, options);
+    const provider = createNativeCredentialPackageProvider(
+      TARGET,
+      NATIVE_CONFIGURATION,
+      options,
+    );
     expect(provider.load()).toEqual(unavailable());
     const policyInjection = Object.freeze({
       packageRoot: fixture.packageRoot,
@@ -685,7 +717,11 @@ describe("native credential package resolver", () => {
       enforceCommonJsCache: true,
     });
     expect(
-      createNativeCredentialPackageProvider(TARGET, policyInjection).load(),
+      createNativeCredentialPackageProvider(
+        TARGET,
+        NATIVE_CONFIGURATION,
+        policyInjection,
+      ).load(),
     ).toEqual(unavailable());
     expect(loader).not.toHaveBeenCalled();
   });

@@ -184,6 +184,14 @@ pub(crate) enum ManagedEntryObservation {
     },
 }
 
+pub(crate) enum PrivateManagedEntryObservation {
+    Missing,
+    Opened {
+        attestation: CredentialFileAttestation,
+        file: PosixCredentialReadHandle,
+    },
+}
+
 pub(crate) enum ExclusiveCreateResult {
     Conflict,
     Created(PosixExclusiveWriteHandle),
@@ -193,14 +201,6 @@ pub(crate) enum ExclusiveCreateResult {
 pub(crate) enum ConditionalMutationResult {
     Applied,
     Conflict,
-}
-
-enum CurrentEntry {
-    Missing,
-    Present {
-        file: PosixCredentialReadHandle,
-        attestation: CredentialFileAttestation,
-    },
 }
 
 fn scope_matches(
@@ -249,23 +249,6 @@ fn next_generation(runtime: &mut LeaseRuntime) -> Result<u64, PosixStoreError> {
     Ok(next)
 }
 
-fn current_entry(
-    directory: &PosixPrivateDirectory,
-    entry: ManagedEntry,
-) -> Result<CurrentEntry, PosixStoreError> {
-    let name = entry.file_name();
-    match directory.open_managed_read_only(name.as_os_str())? {
-        CredentialReadOpenResult::Missing => Ok(CurrentEntry::Missing),
-        CredentialReadOpenResult::Opened(mut file) => match file.attest() {
-            Ok(attestation) => Ok(CurrentEntry::Present { file, attestation }),
-            Err(error) => {
-                file.close();
-                Err(error)
-            }
-        },
-    }
-}
-
 fn entry_is_missing(directory: &File, name: &OsStr) -> Result<bool, PosixStoreError> {
     match rustix_fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
         Err(error) if error == Errno::NOENT => Ok(true),
@@ -297,17 +280,74 @@ fn expected_matches(
     directory: DirectoryAttestation,
     entry: ManagedEntry,
     expected: ExpectedEntrySnapshot<'_>,
-    current: &CurrentEntry,
+    current: &PrivateManagedEntryObservation,
 ) -> bool {
     match (expected, current) {
-        (ExpectedEntrySnapshot::Missing(snapshot), CurrentEntry::Missing) => {
+        (ExpectedEntrySnapshot::Missing(snapshot), PrivateManagedEntryObservation::Missing) => {
             scope_matches(lease, runtime, directory, entry, &snapshot.scope)
         }
-        (ExpectedEntrySnapshot::Present(snapshot), CurrentEntry::Present { attestation, .. }) => {
+        (
+            ExpectedEntrySnapshot::Present(snapshot),
+            PrivateManagedEntryObservation::Opened { attestation, .. },
+        ) => {
             scope_matches(lease, runtime, directory, entry, &snapshot.scope)
                 && snapshot.attestation == *attestation
         }
         _ => false,
+    }
+}
+
+impl PosixPrivateDirectory {
+    pub(crate) fn observe_managed_entry(
+        &self,
+        entry: ManagedEntry,
+    ) -> Result<PrivateManagedEntryObservation, PosixStoreError> {
+        let name = entry.file_name();
+        match self.open_managed_read_only(name.as_os_str())? {
+            CredentialReadOpenResult::Missing => Ok(PrivateManagedEntryObservation::Missing),
+            CredentialReadOpenResult::Opened(mut file) => match file.attest() {
+                Ok(attestation) => Ok(PrivateManagedEntryObservation::Opened { file, attestation }),
+                Err(error) => {
+                    file.close();
+                    Err(error)
+                }
+            },
+        }
+    }
+
+    pub(crate) fn list_managed_temporary_entries(
+        &self,
+    ) -> Result<Vec<TemporaryEntry>, PosixStoreError> {
+        let state = lock_unpoisoned(&self.core.state)?;
+        self.core.require_secure_locked(&state)?;
+        let directory_file = state.directory.as_ref().ok_or(PosixStoreError::Closed)?;
+        let mut stream = Dir::read_from(directory_file).map_err(|_| PosixStoreError::Io)?;
+        let mut scanned = 0_usize;
+        let mut entries = Vec::new();
+        while let Some(raw_entry) = stream.read() {
+            let raw_entry = raw_entry.map_err(|_| PosixStoreError::Io)?;
+            let bytes = raw_entry.file_name().to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            scanned = scanned.checked_add(1).ok_or(PosixStoreError::Limit)?;
+            if scanned > MAX_DIRECTORY_ENTRIES {
+                return Err(PosixStoreError::Limit);
+            }
+            if let Some(entry) = TemporaryEntry::from_file_name(bytes) {
+                if entries.len() == MAX_TEMPORARY_ENTRIES {
+                    return Err(PosixStoreError::Limit);
+                }
+                entries.push(entry);
+            }
+        }
+        self.core.require_secure_locked(&state)?;
+        entries.sort_by(|left, right| {
+            left.file_name()
+                .as_bytes()
+                .cmp(right.file_name().as_bytes())
+        });
+        Ok(entries)
     }
 }
 
@@ -429,7 +469,7 @@ impl PosixExclusiveWriteHandle {
             .map_err(|_| PosixStoreError::Io)
         })();
         if result.is_err() {
-            bytes.fill(0);
+            zeroize_bytes(bytes.as_mut_slice());
             mark_lost(&mut runtime);
             return Err(PosixStoreError::Lost);
         }
@@ -438,14 +478,14 @@ impl PosixExclusiveWriteHandle {
             let after = self.file.attest()?;
             let mut readback = self.file.read_bounded(self.max_bytes + 1)?;
             let exact_bytes = readback.end_of_file && readback.bytes == bytes;
-            readback.bytes.fill(0);
+            zeroize_bytes(readback.bytes.as_mut_slice());
             Ok(after.security.identity == before.security.identity
                 && after.security.parent_identity == before.security.parent_identity
                 && after.security.size == input.len() as u64
                 && after.revision != before.revision
                 && exact_bytes)
         })();
-        bytes.fill(0);
+        zeroize_bytes(bytes.as_mut_slice());
         if !matches!(verified, Ok(true)) {
             mark_lost(&mut runtime);
             return Err(PosixStoreError::Lost);
@@ -526,20 +566,22 @@ impl PosixSetupLease {
             directory_identity: directory_attestation.identity,
             entry,
         };
-        match current_entry(directory, entry)? {
-            CurrentEntry::Missing => Ok(ManagedEntryObservation::Missing {
+        match directory.observe_managed_entry(entry)? {
+            PrivateManagedEntryObservation::Missing => Ok(ManagedEntryObservation::Missing {
                 snapshot: MissingEntrySnapshot { scope },
             }),
-            CurrentEntry::Present { file, attestation } => Ok(ManagedEntryObservation::Opened {
-                snapshot: Box::new(PresentEntrySnapshot { scope, attestation }),
-                attestation,
-                file: PosixLeaseReadHandle {
-                    lease: Arc::downgrade(&self.core),
-                    entry,
-                    file,
-                    closed: false,
-                },
-            }),
+            PrivateManagedEntryObservation::Opened { file, attestation } => {
+                Ok(ManagedEntryObservation::Opened {
+                    snapshot: Box::new(PresentEntrySnapshot { scope, attestation }),
+                    attestation,
+                    file: PosixLeaseReadHandle {
+                        lease: Arc::downgrade(&self.core),
+                        entry,
+                        file,
+                        closed: false,
+                    },
+                })
+            }
         }
     }
 
@@ -547,36 +589,8 @@ impl PosixSetupLease {
         let mut runtime = lock_lease_runtime(&self.core)?;
         self.core.verify_or_latch_locked(&mut runtime)?;
         let directory = runtime.directory.as_ref().ok_or(PosixStoreError::Closed)?;
-        let state = lock_unpoisoned(&directory.core.state)?;
-        directory.core.require_secure_locked(&state)?;
-        let directory_file = state.directory.as_ref().ok_or(PosixStoreError::Closed)?;
-        let mut stream = Dir::read_from(directory_file).map_err(|_| PosixStoreError::Io)?;
-        let mut scanned = 0_usize;
-        let mut entries = Vec::new();
-        while let Some(raw_entry) = stream.read() {
-            let raw_entry = raw_entry.map_err(|_| PosixStoreError::Io)?;
-            let bytes = raw_entry.file_name().to_bytes();
-            if bytes == b"." || bytes == b".." {
-                continue;
-            }
-            scanned = scanned.checked_add(1).ok_or(PosixStoreError::Limit)?;
-            if scanned > MAX_DIRECTORY_ENTRIES {
-                return Err(PosixStoreError::Limit);
-            }
-            if let Some(entry) = TemporaryEntry::from_file_name(bytes) {
-                if entries.len() == MAX_TEMPORARY_ENTRIES {
-                    return Err(PosixStoreError::Limit);
-                }
-                entries.push(entry);
-            }
-        }
-        drop(state);
+        let entries = directory.list_managed_temporary_entries()?;
         self.core.verify_or_latch_locked(&mut runtime)?;
-        entries.sort_by(|left, right| {
-            left.file_name()
-                .as_bytes()
-                .cmp(right.file_name().as_bytes())
-        });
         Ok(entries)
     }
 
@@ -695,8 +709,8 @@ impl PosixSetupLease {
             (
                 Arc::clone(&directory.core),
                 directory.attest()?,
-                current_entry(directory, source_entry)?,
-                current_entry(directory, destination_entry)?,
+                directory.observe_managed_entry(source_entry)?,
+                directory.observe_managed_entry(destination_entry)?,
             )
         };
         if !expected_matches(
@@ -717,8 +731,12 @@ impl PosixSetupLease {
             return Ok(ConditionalMutationResult::Conflict);
         }
         let source_identity = match &current_source {
-            CurrentEntry::Present { attestation, .. } => attestation.security.identity,
-            CurrentEntry::Missing => return Ok(ConditionalMutationResult::Conflict),
+            PrivateManagedEntryObservation::Opened { attestation, .. } => {
+                attestation.security.identity
+            }
+            PrivateManagedEntryObservation::Missing => {
+                return Ok(ConditionalMutationResult::Conflict);
+            }
         };
         self.core.verify_or_latch_locked(&mut runtime)?;
 
@@ -805,7 +823,7 @@ impl PosixSetupLease {
             (
                 Arc::clone(&directory.core),
                 directory.attest()?,
-                current_entry(directory, entry)?,
+                directory.observe_managed_entry(entry)?,
             )
         };
         if !expected_matches(
@@ -819,8 +837,12 @@ impl PosixSetupLease {
             return Ok(ConditionalMutationResult::Conflict);
         }
         let expected_identity = match &current {
-            CurrentEntry::Present { attestation, .. } => attestation.security.identity,
-            CurrentEntry::Missing => return Ok(ConditionalMutationResult::Conflict),
+            PrivateManagedEntryObservation::Opened { attestation, .. } => {
+                attestation.security.identity
+            }
+            PrivateManagedEntryObservation::Missing => {
+                return Ok(ConditionalMutationResult::Conflict);
+            }
         };
         self.core.verify_or_latch_locked(&mut runtime)?;
 
@@ -847,13 +869,13 @@ impl PosixSetupLease {
         let postcondition: Result<bool, PosixStoreError> = (|| {
             let path_missing = entry_is_missing(directory_file, name.as_os_str())?;
             let detached = match &mut current {
-                CurrentEntry::Present { file, .. } => {
+                PrivateManagedEntryObservation::Opened { file, .. } => {
                     let slot = lock_unpoisoned(&file.slot)?;
                     let opened = slot.as_ref().ok_or(PosixStoreError::Closed)?;
                     let facts = metadata(opened)?;
                     facts.identity == expected_identity && facts.links == 0
                 }
-                CurrentEntry::Missing => false,
+                PrivateManagedEntryObservation::Missing => false,
             };
             Ok(path_missing && detached)
         })();

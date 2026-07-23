@@ -3,6 +3,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsHandle;
 use std::sync::{Arc, Weak};
 
+use plurum_native_secret_memory::zeroize_bytes;
 use plurum_windows_syscall::{
     create_private_file, flush_file, remove_by_handle, rename_by_handle, FileCreateAttempt,
     MutationAttempt,
@@ -145,7 +146,11 @@ impl ManagedEntry {
         Self::Canonical(CanonicalEntryRole::Credential)
     }
 
-    fn file_name(self) -> OsString {
+    pub(crate) fn transaction() -> Self {
+        Self::Canonical(CanonicalEntryRole::Transaction)
+    }
+
+    pub(crate) fn file_name(self) -> OsString {
         match self {
             Self::Canonical(CanonicalEntryRole::Credential) => OsString::from(CREDENTIAL_ENTRY),
             Self::Canonical(CanonicalEntryRole::Transaction) => OsString::from(TRANSACTION_ENTRY),
@@ -153,7 +158,7 @@ impl ManagedEntry {
         }
     }
 
-    fn max_bytes(self) -> usize {
+    pub(crate) fn max_bytes(self) -> usize {
         match self {
             Self::Canonical(CanonicalEntryRole::Transaction)
             | Self::Temporary(TemporaryEntry {
@@ -223,6 +228,60 @@ enum CurrentEntry {
     },
 }
 
+pub(crate) enum PrivateManagedEntryObservation {
+    Missing,
+    Opened {
+        attestation: CredentialFileAttestation,
+        file: WindowsCredentialReadHandle,
+    },
+}
+
+impl WindowsPrivateDirectory {
+    pub(crate) fn observe_managed_entry(
+        &self,
+        entry: ManagedEntry,
+    ) -> Result<PrivateManagedEntryObservation, WindowsStoreError> {
+        let name = entry.file_name();
+        match self.open_managed_read_only(name.as_os_str())? {
+            CredentialReadOpenResult::Missing => Ok(PrivateManagedEntryObservation::Missing),
+            CredentialReadOpenResult::Opened(mut file) => match file.attest() {
+                Ok(attestation) => Ok(PrivateManagedEntryObservation::Opened { attestation, file }),
+                Err(error) => {
+                    file.close();
+                    Err(error)
+                }
+            },
+        }
+    }
+
+    pub(crate) fn list_managed_temporary_entries(
+        &self,
+    ) -> Result<Vec<TemporaryEntry>, WindowsStoreError> {
+        let state = lock_unpoisoned(&self.core.state)?;
+        self.core.require_secure_locked(&state)?;
+        let mut scanned = 0_usize;
+        let mut entries = Vec::new();
+        for raw_entry in
+            std::fs::read_dir(&self.core.path.path).map_err(|_| WindowsStoreError::Io)?
+        {
+            let raw_entry = raw_entry.map_err(|_| WindowsStoreError::Io)?;
+            scanned = scanned.checked_add(1).ok_or(WindowsStoreError::Limit)?;
+            if scanned > MAX_DIRECTORY_ENTRIES {
+                return Err(WindowsStoreError::Limit);
+            }
+            if let Some(entry) = TemporaryEntry::from_file_name(&raw_entry.file_name()) {
+                if entries.len() == MAX_TEMPORARY_ENTRIES {
+                    return Err(WindowsStoreError::Limit);
+                }
+                entries.push(entry);
+            }
+        }
+        self.core.require_secure_locked(&state)?;
+        entries.sort_by_key(|entry| entry.file_name());
+        Ok(entries)
+    }
+}
+
 fn scope_matches(
     lease: &Arc<LeaseCore>,
     runtime: &LeaseRuntime,
@@ -275,16 +334,11 @@ fn current_entry(
     directory: &WindowsPrivateDirectory,
     entry: ManagedEntry,
 ) -> Result<CurrentEntry, WindowsStoreError> {
-    let name = entry.file_name();
-    match directory.open_managed_read_only(name.as_os_str())? {
-        CredentialReadOpenResult::Missing => Ok(CurrentEntry::Missing),
-        CredentialReadOpenResult::Opened(mut file) => match file.attest() {
-            Ok(attestation) => Ok(CurrentEntry::Present { file, attestation }),
-            Err(error) => {
-                file.close();
-                Err(error)
-            }
-        },
+    match directory.observe_managed_entry(entry)? {
+        PrivateManagedEntryObservation::Missing => Ok(CurrentEntry::Missing),
+        PrivateManagedEntryObservation::Opened { file, attestation } => {
+            Ok(CurrentEntry::Present { file, attestation })
+        }
     }
 }
 
@@ -470,7 +524,7 @@ impl WindowsExclusiveWriteHandle {
                 .map_err(|_| WindowsStoreError::Io)
         })();
         if result.is_err() {
-            bytes.fill(0);
+            zeroize_bytes(bytes.as_mut_slice());
             mark_lost(&mut runtime);
             return Err(WindowsStoreError::Lost);
         }
@@ -478,14 +532,14 @@ impl WindowsExclusiveWriteHandle {
             let after = self.file.attest()?;
             let mut readback = self.file.read_bounded(self.max_bytes + 1)?;
             let exact_bytes = readback.end_of_file && readback.bytes == bytes;
-            readback.bytes.fill(0);
+            zeroize_bytes(readback.bytes.as_mut_slice());
             Ok(after.security.identity == before.security.identity
                 && after.security.parent_identity == before.security.parent_identity
                 && after.security.size == input.len() as u64
                 && after.revision != before.revision
                 && exact_bytes)
         })();
-        bytes.fill(0);
+        zeroize_bytes(bytes.as_mut_slice());
         if !matches!(verified, Ok(true)) {
             mark_lost(&mut runtime);
             return Err(WindowsStoreError::Lost);
@@ -600,29 +654,8 @@ impl WindowsSetupLease {
             .directory
             .as_ref()
             .ok_or(WindowsStoreError::Closed)?;
-        let state = lock_unpoisoned(&directory.core.state)?;
-        directory.core.require_secure_locked(&state)?;
-        let mut scanned = 0_usize;
-        let mut entries = Vec::new();
-        for raw_entry in
-            std::fs::read_dir(&directory.core.path.path).map_err(|_| WindowsStoreError::Io)?
-        {
-            let raw_entry = raw_entry.map_err(|_| WindowsStoreError::Io)?;
-            scanned = scanned.checked_add(1).ok_or(WindowsStoreError::Limit)?;
-            if scanned > MAX_DIRECTORY_ENTRIES {
-                return Err(WindowsStoreError::Limit);
-            }
-            if let Some(entry) = TemporaryEntry::from_file_name(&raw_entry.file_name()) {
-                if entries.len() == MAX_TEMPORARY_ENTRIES {
-                    return Err(WindowsStoreError::Limit);
-                }
-                entries.push(entry);
-            }
-        }
-        directory.core.require_secure_locked(&state)?;
-        drop(state);
+        let entries = directory.list_managed_temporary_entries()?;
         self.core.verify_or_latch_locked(&mut runtime)?;
-        entries.sort_by_key(|entry| entry.file_name());
         Ok(entries)
     }
 

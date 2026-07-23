@@ -43,7 +43,7 @@ const graph = new Map([
   ],
   [
     "dist/adapters/node/native-credential-store.js",
-    new Set(["../../version.js"]),
+    new Set(["node:crypto", "../../version.js"]),
   ],
   ["dist/system/runtime-support.js", new Set()],
   ["dist/version.js", new Set()],

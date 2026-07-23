@@ -15,6 +15,7 @@ export interface LegacyCredentialReadOptions {
 export type LegacyCredentialAdapterReadResult =
   | Readonly<{ status: "missing" }>
   | Readonly<{ status: "unsafe" }>
+  | Readonly<{ status: "malformed" }>
   | Readonly<{
       status: "loaded";
       /*
@@ -27,7 +28,9 @@ export type LegacyCredentialAdapterReadResult =
 /*
  * Implementations must perform a bounded, no-follow read of the exact
  * allowlisted source path and classify any ownership, access, link, binding,
- * or stability failure as unsafe. This port has no mutation or repair method.
+ * or stability failure as unsafe. Empty, oversized, truncated, or otherwise
+ * structurally unreadable source bytes are malformed. This port has no
+ * mutation or repair method.
  */
 export interface LegacyCredentialReadAdapter {
   read(

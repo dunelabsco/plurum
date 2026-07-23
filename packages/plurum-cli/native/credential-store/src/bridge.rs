@@ -1,3 +1,5 @@
+use std::ffi::OsStr;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::{
@@ -5,6 +7,10 @@ use napi::bindgen_prelude::{
     Object, ObjectRef, Uint8Array,
 };
 use napi::{Env, Error, JsValue, Result, Status};
+use plurum_native_secret_memory::{
+    create_guarded_bounded_read_result, create_guarded_loaded_result, zeroize_bytes,
+    GuardedObjectRef,
+};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::posix as platform;
@@ -12,12 +18,15 @@ use crate::posix as platform;
 use crate::windows as platform;
 
 use platform::{
-    acquire_setup_lease, open_private_directory, BoundedRead, CanonicalEntryRole,
+    acquire_observed_setup_lease, acquire_setup_lease, observe_missing_private_directory,
+    open_private_directory, read_allowlisted_legacy_credential, BoundedRead, CanonicalEntryRole,
     ConditionalMutationResult, CredentialFileAttestation, CredentialReadOpenResult,
     DirectoryAttestation, DirectoryDisposition, ExclusiveCreateResult, ExpectedEntrySnapshot,
-    LeaseRenewal, ManagedEntry, ManagedEntryObservation, MissingEntrySnapshot, ObjectIdentity,
-    PresentEntrySnapshot, PriorLease, PrivateDirectoryOpenResult, SetupLeaseAcquireResult,
-    TemporaryEntry, TemporaryEntryRole, MAX_ATTESTED_BYTES,
+    LeaseRenewal, LegacyCredentialReadResult, ManagedEntry, ManagedEntryObservation,
+    MissingDirectoryBinding, MissingEntrySnapshot, ObjectIdentity, ObservedDirectoryExpectation,
+    ObservedSetupLeaseAcquireResult, PresentEntrySnapshot, PriorLease, PrivateDirectoryOpenResult,
+    PrivateManagedEntryObservation, SetupLeaseAcquireResult, TemporaryEntry, TemporaryEntryRole,
+    MAX_ATTESTED_BYTES,
 };
 
 type SharedHandle<T> = Arc<Mutex<Option<T>>>;
@@ -51,6 +60,92 @@ enum SnapshotToken {
     Missing(MissingEntrySnapshot),
     Present(Box<PresentEntrySnapshot>),
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegacyPaths {
+    hermes: String,
+    openclaw: String,
+    removed_cli: String,
+}
+
+#[derive(Debug)]
+struct AdapterAuthority {
+    legacy_paths: LegacyPaths,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObservedEntryState {
+    Missing,
+    Present(CredentialFileAttestation),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObservedEntry {
+    entry: ManagedEntry,
+    state: ObservedEntryState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StoreSnapshot {
+    directory: DirectoryAttestation,
+    entries: Vec<ObservedEntry>,
+}
+
+struct PresentEvidence {
+    binding: PlatformPrivateDirectory,
+    snapshot: StoreSnapshot,
+}
+
+enum EvidenceState {
+    Missing(MissingDirectoryBinding),
+    Present(PresentEvidence),
+}
+
+struct WholePassEvidence {
+    authority: Arc<AdapterAuthority>,
+    directory: String,
+    state: EvidenceState,
+}
+
+struct EvidenceToken {
+    value: Mutex<Option<WholePassEvidence>>,
+}
+
+struct ObservationProgress {
+    authority: Arc<AdapterAuthority>,
+    directory_path: String,
+    directory: Option<PlatformPrivateDirectory>,
+    attestations: Vec<DirectoryAttestation>,
+    listed_temporaries: Option<Vec<TemporaryEntry>>,
+    entries: Vec<ObservedEntry>,
+    file_protocols: Vec<Arc<Mutex<ObservationFileProtocol>>>,
+    finished: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObservationFileReadPlan {
+    AttestOnly,
+    ReadBounded(usize),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObservationFileStage {
+    FirstAttestation,
+    Read,
+    SecondAttestation,
+    Close,
+    Complete,
+    Failed,
+}
+
+struct ObservationFileProtocol {
+    declared: CredentialFileAttestation,
+    plan: ObservationFileReadPlan,
+    stage: ObservationFileStage,
+}
+
+const CREDENTIAL_OBSERVATION_READ_BYTES: usize = 16_385;
+const TRANSACTION_OBSERVATION_READ_BYTES: usize = 40_961;
 
 fn bridge_error() -> Error {
     Error::new(
@@ -135,6 +230,40 @@ fn expect_true(object: &Object<'_>, name: &str) -> Result<()> {
     } else {
         Err(invalid_request())
     }
+}
+
+fn parse_legacy_paths(configuration: &Object<'_>) -> Result<LegacyPaths> {
+    exact_keys(configuration, &["legacyPaths"])?;
+    let paths = property::<Object<'_>>(configuration, "legacyPaths")?;
+    exact_keys(&paths, &["hermes", "openclaw", "removedCli"])?;
+    let hermes = property::<String>(&paths, "hermes")?;
+    let openclaw = property::<String>(&paths, "openclaw")?;
+    let removed_cli = property::<String>(&paths, "removedCli")?;
+    if hermes.is_empty() || openclaw.is_empty() || removed_cli.is_empty() {
+        return Err(invalid_request());
+    }
+    Ok(LegacyPaths {
+        hermes,
+        openclaw,
+        removed_cli,
+    })
+}
+
+fn take_evidence_property(object: &Object<'_>, name: &str) -> Result<WholePassEvidence> {
+    let external = property::<&External<Arc<EvidenceToken>>>(object, name)?;
+    external
+        .as_ref()
+        .value
+        .lock()
+        .map_err(|_| bridge_error())?
+        .take()
+        .ok_or_else(invalid_request)
+}
+
+fn evidence_external(value: WholePassEvidence) -> External<Arc<EvidenceToken>> {
+    External::new(Arc::new(EvidenceToken {
+        value: Mutex::new(Some(value)),
+    }))
 }
 
 fn with_handle<T, R>(
@@ -288,15 +417,9 @@ fn file_attestation(env: &Env, value: CredentialFileAttestation) -> Result<Bridg
     finish_object(&result)
 }
 
-fn bounded_read(env: &Env, value: BoundedRead) -> Result<BridgeObject> {
-    let mut result = Object::new(env).map_err(|_| bridge_error())?;
-    result
-        .set_named_property("bytes", Uint8Array::from(value.bytes))
-        .map_err(|_| bridge_error())?;
-    result
-        .set_named_property("endOfFile", value.end_of_file)
-        .map_err(|_| bridge_error())?;
-    finish_object(&result)
+fn bounded_read(env: &Env, value: BoundedRead) -> Result<GuardedObjectRef> {
+    create_guarded_bounded_read_result(env, value.bytes, value.end_of_file)
+        .map_err(|_| bridge_error())
 }
 
 fn parse_canonical_entry(object: &Object<'_>) -> Result<CanonicalEntryRole> {
@@ -337,6 +460,92 @@ fn parse_managed_entry(object: &Object<'_>) -> Result<ManagedEntry> {
         "temporary" => parse_temporary_entry(object).map(ManagedEntry::Temporary),
         _ => Err(invalid_request()),
     }
+}
+
+fn same_directory_authority(left: DirectoryAttestation, right: DirectoryAttestation) -> bool {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        left.identity == right.identity
+            && left.canonical_current == right.canonical_current
+            && left.current_user == right.current_user
+            && left.private_mode == right.private_mode
+            && left.private_access == right.private_access
+    }
+    #[cfg(target_os = "windows")]
+    {
+        left.identity == right.identity
+            && left.canonical_current == right.canonical_current
+            && left.current_user == right.current_user
+            && left.private_mode == right.private_mode
+    }
+}
+
+fn observe_entry_state(
+    directory: &PlatformPrivateDirectory,
+    entry: ManagedEntry,
+) -> std::result::Result<ObservedEntryState, PlatformStoreError> {
+    match directory.observe_managed_entry(entry)? {
+        PrivateManagedEntryObservation::Missing => Ok(ObservedEntryState::Missing),
+        PrivateManagedEntryObservation::Opened {
+            attestation,
+            mut file,
+        } => {
+            file.close();
+            Ok(ObservedEntryState::Present(attestation))
+        }
+    }
+}
+
+fn capture_store_snapshot(
+    directory: &PlatformPrivateDirectory,
+) -> std::result::Result<StoreSnapshot, PlatformStoreError> {
+    let before = directory.attest()?;
+    let mut entries = Vec::new();
+    for entry in [ManagedEntry::credential(), ManagedEntry::transaction()] {
+        entries.push(ObservedEntry {
+            entry,
+            state: observe_entry_state(directory, entry)?,
+        });
+    }
+    let temporaries = directory.list_managed_temporary_entries()?;
+    for temporary in temporaries {
+        let entry = ManagedEntry::Temporary(temporary);
+        let state = observe_entry_state(directory, entry)?;
+        if state == ObservedEntryState::Missing {
+            return Err(PlatformStoreError::Lost);
+        }
+        entries.push(ObservedEntry { entry, state });
+    }
+    let after = directory.attest()?;
+    if before != after {
+        return Err(PlatformStoreError::Lost);
+    }
+    Ok(StoreSnapshot {
+        directory: after,
+        entries,
+    })
+}
+
+fn empty_store_snapshot(
+    directory: &PlatformPrivateDirectory,
+) -> std::result::Result<bool, PlatformStoreError> {
+    let snapshot = capture_store_snapshot(directory)?;
+    Ok(snapshot.entries.len() == 2
+        && snapshot
+            .entries
+            .iter()
+            .all(|entry| entry.state == ObservedEntryState::Missing))
+}
+
+fn present_snapshot_matches(
+    directory: &PlatformPrivateDirectory,
+    expected: &StoreSnapshot,
+) -> std::result::Result<bool, PlatformStoreError> {
+    let current = capture_store_snapshot(directory)?;
+    Ok(
+        same_directory_authority(current.directory, expected.directory)
+            && current.entries == expected.entries,
+    )
 }
 
 fn snapshot_property(object: &Object<'_>, name: &str) -> Result<Arc<SnapshotToken>> {
@@ -394,6 +603,178 @@ fn make_credential_read_handle(
             let mut handle = take_handle(&close_handle)?;
             handle.close();
             Ok(())
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("close", close)
+        .map_err(|_| bridge_error())?;
+
+    finish_object(&result)
+}
+
+fn observation_read_plan(entry: ManagedEntry) -> ObservationFileReadPlan {
+    match entry {
+        ManagedEntry::Canonical(CanonicalEntryRole::Credential) => {
+            ObservationFileReadPlan::ReadBounded(CREDENTIAL_OBSERVATION_READ_BYTES)
+        }
+        ManagedEntry::Canonical(CanonicalEntryRole::Transaction) => {
+            ObservationFileReadPlan::ReadBounded(TRANSACTION_OBSERVATION_READ_BYTES)
+        }
+        ManagedEntry::Temporary(_) => ObservationFileReadPlan::AttestOnly,
+    }
+}
+
+fn fail_observation_file(protocol: &Arc<Mutex<ObservationFileProtocol>>) {
+    let mut state = match protocol.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    state.stage = ObservationFileStage::Failed;
+}
+
+fn make_observation_read_handle(
+    env: &Env,
+    handle: PlatformCredentialReadHandle,
+    protocol: Arc<Mutex<ObservationFileProtocol>>,
+) -> Result<BridgeObject> {
+    let shared = Arc::new(Mutex::new(Some(handle)));
+    let mut result = Object::new(env).map_err(|_| bridge_error())?;
+
+    let attest_handle = Arc::clone(&shared);
+    let attest_protocol = Arc::clone(&protocol);
+    let attest = env
+        .create_function_from_closure::<(), _, _>("attest", move |context| {
+            exact_argument_count(&context, 0)?;
+            let expected_stage = {
+                let state = attest_protocol.lock().map_err(|_| bridge_error())?;
+                match state.stage {
+                    ObservationFileStage::FirstAttestation
+                    | ObservationFileStage::SecondAttestation => state.stage,
+                    _ => return Err(bridge_error()),
+                }
+            };
+            let value = match with_handle(&attest_handle, |handle| handle.attest()) {
+                Ok(value) => value,
+                Err(error) => {
+                    fail_observation_file(&attest_protocol);
+                    return Err(error);
+                }
+            };
+            let rendered = match file_attestation(context.env, value) {
+                Ok(rendered) => rendered,
+                Err(error) => {
+                    fail_observation_file(&attest_protocol);
+                    return Err(error);
+                }
+            };
+            let mut state = attest_protocol.lock().map_err(|_| bridge_error())?;
+            if state.stage != expected_stage || value != state.declared {
+                state.stage = ObservationFileStage::Failed;
+                return Err(bridge_error());
+            }
+            state.stage = match expected_stage {
+                ObservationFileStage::FirstAttestation => match state.plan {
+                    ObservationFileReadPlan::AttestOnly => ObservationFileStage::SecondAttestation,
+                    ObservationFileReadPlan::ReadBounded(_) => ObservationFileStage::Read,
+                },
+                ObservationFileStage::SecondAttestation => ObservationFileStage::Close,
+                _ => unreachable!("the stage was restricted above"),
+            };
+            Ok(rendered)
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("attest", attest)
+        .map_err(|_| bridge_error())?;
+
+    let read_handle = Arc::clone(&shared);
+    let read_protocol = Arc::clone(&protocol);
+    let read = env
+        .create_function_from_closure::<(), _, _>("readBounded", move |context| {
+            exact_argument_count(&context, 1)?;
+            let options = argument::<Object<'_>>(&context, 0)?;
+            exact_keys(&options, &["maxBytes"])?;
+            let max_bytes = property::<f64>(&options, "maxBytes")?;
+            let expected = {
+                let state = read_protocol.lock().map_err(|_| bridge_error())?;
+                match (state.stage, state.plan) {
+                    (
+                        ObservationFileStage::Read,
+                        ObservationFileReadPlan::ReadBounded(expected),
+                    ) => expected,
+                    _ => return Err(bridge_error()),
+                }
+            };
+            if max_bytes != expected as f64 {
+                fail_observation_file(&read_protocol);
+                return Err(invalid_request());
+            }
+            let mut value = match with_handle(&read_handle, |handle| handle.read_bounded(expected))
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    fail_observation_file(&read_protocol);
+                    return Err(error);
+                }
+            };
+            let valid = {
+                let state = read_protocol.lock().map_err(|_| bridge_error())?;
+                state.stage == ObservationFileStage::Read
+                    && state.plan == ObservationFileReadPlan::ReadBounded(expected)
+                    && value.end_of_file
+                    && u64::try_from(value.bytes.len()).ok() == Some(state.declared.security.size)
+            };
+            if !valid {
+                zeroize_bytes(&mut value.bytes);
+                fail_observation_file(&read_protocol);
+                return Err(bridge_error());
+            }
+            let rendered = match bounded_read(context.env, value) {
+                Ok(rendered) => rendered,
+                Err(error) => {
+                    fail_observation_file(&read_protocol);
+                    return Err(error);
+                }
+            };
+            let mut state = read_protocol.lock().map_err(|_| bridge_error())?;
+            if state.stage != ObservationFileStage::Read {
+                state.stage = ObservationFileStage::Failed;
+                return Err(bridge_error());
+            }
+            state.stage = ObservationFileStage::SecondAttestation;
+            Ok(rendered)
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("readBounded", read)
+        .map_err(|_| bridge_error())?;
+
+    let close_handle = Arc::clone(&shared);
+    let close_protocol = Arc::clone(&protocol);
+    let close = env
+        .create_function_from_closure::<(), (), _>("close", move |context| {
+            exact_argument_count(&context, 0)?;
+            let valid = close_protocol.lock().map_err(|_| bridge_error())?.stage
+                == ObservationFileStage::Close;
+            let mut handle = match take_handle(&close_handle) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    fail_observation_file(&close_protocol);
+                    return Err(error);
+                }
+            };
+            handle.close();
+            let mut state = close_protocol.lock().map_err(|_| bridge_error())?;
+            state.stage = if valid {
+                ObservationFileStage::Complete
+            } else {
+                ObservationFileStage::Failed
+            };
+            if valid {
+                Ok(())
+            } else {
+                Err(bridge_error())
+            }
         })
         .map_err(|_| bridge_error())?;
     result
@@ -568,6 +949,217 @@ fn make_private_directory(env: &Env, handle: PlatformPrivateDirectory) -> Result
             exact_argument_count(&context, 0)?;
             let mut handle = take_handle(&close_handle)?;
             handle.close();
+            Ok(())
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("close", close)
+        .map_err(|_| bridge_error())?;
+
+    finish_object(&result)
+}
+
+fn expected_observation_entry(progress: &ObservationProgress, entry: ManagedEntry) -> bool {
+    match progress.entries.len() {
+        0 => entry == ManagedEntry::credential() && progress.listed_temporaries.is_none(),
+        1 => entry == ManagedEntry::transaction() && progress.listed_temporaries.is_none(),
+        index => progress
+            .listed_temporaries
+            .as_ref()
+            .and_then(|temporaries| temporaries.get(index - 2))
+            .is_some_and(|expected| entry == ManagedEntry::Temporary(*expected)),
+    }
+}
+
+fn make_observation_directory(
+    env: &Env,
+    authority: Arc<AdapterAuthority>,
+    directory_path: String,
+    directory: PlatformPrivateDirectory,
+) -> Result<BridgeObject> {
+    let shared = Arc::new(Mutex::new(Some(ObservationProgress {
+        authority,
+        directory_path,
+        directory: Some(directory),
+        attestations: Vec::new(),
+        listed_temporaries: None,
+        entries: Vec::new(),
+        file_protocols: Vec::new(),
+        finished: false,
+    })));
+    let mut result = Object::new(env).map_err(|_| bridge_error())?;
+
+    let attest_handle = Arc::clone(&shared);
+    let attest = env
+        .create_function_from_closure::<(), _, _>("attest", move |context| {
+            exact_argument_count(&context, 0)?;
+            let mut slot = attest_handle.lock().map_err(|_| bridge_error())?;
+            let progress = slot.as_mut().ok_or_else(bridge_error)?;
+            if progress.finished || progress.attestations.len() >= 2 {
+                return Err(bridge_error());
+            }
+            let directory = progress.directory.as_ref().ok_or_else(bridge_error)?;
+            let value = native_result(directory.attest())?;
+            progress.attestations.push(value);
+            directory_attestation(context.env, value)
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("attest", attest)
+        .map_err(|_| bridge_error())?;
+
+    let observe_handle = Arc::clone(&shared);
+    let observe = env
+        .create_function_from_closure::<(), _, _>("observeEntry", move |context| {
+            exact_argument_count(&context, 1)?;
+            let options = argument::<Object<'_>>(&context, 0)?;
+            exact_keys(&options, &["entry", "noFollow"])?;
+            expect_true(&options, "noFollow")?;
+            let entry = parse_managed_entry(&property::<Object<'_>>(&options, "entry")?)?;
+
+            let mut slot = observe_handle.lock().map_err(|_| bridge_error())?;
+            let progress = slot.as_mut().ok_or_else(bridge_error)?;
+            if progress.finished
+                || progress.attestations.len() != 1
+                || !expected_observation_entry(progress, entry)
+            {
+                return Err(bridge_error());
+            }
+            let directory = progress.directory.as_ref().ok_or_else(bridge_error)?;
+            let observed = native_result(directory.observe_managed_entry(entry))?;
+            let mut value = Object::new(context.env).map_err(|_| bridge_error())?;
+            match observed {
+                PrivateManagedEntryObservation::Missing => {
+                    progress.entries.push(ObservedEntry {
+                        entry,
+                        state: ObservedEntryState::Missing,
+                    });
+                    value
+                        .set_named_property("status", "missing")
+                        .map_err(|_| bridge_error())?;
+                }
+                PrivateManagedEntryObservation::Opened { attestation, file } => {
+                    let protocol = Arc::new(Mutex::new(ObservationFileProtocol {
+                        declared: attestation,
+                        plan: observation_read_plan(entry),
+                        stage: ObservationFileStage::FirstAttestation,
+                    }));
+                    let rendered_file =
+                        make_observation_read_handle(context.env, file, Arc::clone(&protocol))?;
+                    progress.entries.push(ObservedEntry {
+                        entry,
+                        state: ObservedEntryState::Present(attestation),
+                    });
+                    progress.file_protocols.push(protocol);
+                    value
+                        .set_named_property("status", "opened")
+                        .map_err(|_| bridge_error())?;
+                    value
+                        .set_named_property(
+                            "attestation",
+                            file_attestation(context.env, attestation)?,
+                        )
+                        .map_err(|_| bridge_error())?;
+                    value
+                        .set_named_property("file", rendered_file)
+                        .map_err(|_| bridge_error())?;
+                }
+            }
+            finish_object(&value)
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("observeEntry", observe)
+        .map_err(|_| bridge_error())?;
+
+    let list_handle = Arc::clone(&shared);
+    let list = env
+        .create_function_from_closure::<(), _, _>("listTemporaryEntries", move |context| {
+            exact_argument_count(&context, 0)?;
+            let mut slot = list_handle.lock().map_err(|_| bridge_error())?;
+            let progress = slot.as_mut().ok_or_else(bridge_error)?;
+            if progress.finished
+                || progress.attestations.len() != 1
+                || progress.entries.len() != 2
+                || progress.listed_temporaries.is_some()
+            {
+                return Err(bridge_error());
+            }
+            let directory = progress.directory.as_ref().ok_or_else(bridge_error)?;
+            let entries = native_result(directory.list_managed_temporary_entries())?;
+            let result = entries
+                .iter()
+                .copied()
+                .map(|entry| temporary_entry_object(context.env, entry))
+                .collect::<Result<Vec<_>>>()?;
+            progress.listed_temporaries = Some(entries);
+            Ok(result)
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("listTemporaryEntries", list)
+        .map_err(|_| bridge_error())?;
+
+    let finish_handle = Arc::clone(&shared);
+    let finish = env
+        .create_function_from_closure::<(), _, _>("finishObservation", move |context| {
+            exact_argument_count(&context, 0)?;
+            let mut slot = finish_handle.lock().map_err(|_| bridge_error())?;
+            let progress = slot.as_mut().ok_or_else(bridge_error)?;
+            if progress.finished || progress.attestations.len() != 2 {
+                return Err(bridge_error());
+            }
+            let listed = progress
+                .listed_temporaries
+                .as_ref()
+                .ok_or_else(bridge_error)?;
+            if progress.attestations[0] != progress.attestations[1]
+                || progress.entries.len() != listed.len() + 2
+                || progress.entries[2..].iter().any(|entry| {
+                    entry.state == ObservedEntryState::Missing
+                        || !matches!(entry.entry, ManagedEntry::Temporary(_))
+                })
+                || progress.file_protocols.iter().any(|protocol| {
+                    protocol
+                        .lock()
+                        .map_or(true, |state| state.stage != ObservationFileStage::Complete)
+                })
+            {
+                return Err(bridge_error());
+            }
+            let directory = progress.directory.as_ref().ok_or_else(bridge_error)?;
+            let expected = StoreSnapshot {
+                directory: progress.attestations[1],
+                entries: progress.entries.clone(),
+            };
+            let current = native_result(capture_store_snapshot(directory))?;
+            if current != expected {
+                return Err(bridge_error());
+            }
+            let binding = progress.directory.take().ok_or_else(bridge_error)?;
+            progress.finished = true;
+            Ok(evidence_external(WholePassEvidence {
+                authority: Arc::clone(&progress.authority),
+                directory: progress.directory_path.clone(),
+                state: EvidenceState::Present(PresentEvidence {
+                    binding,
+                    snapshot: expected,
+                }),
+            }))
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("finishObservation", finish)
+        .map_err(|_| bridge_error())?;
+
+    let close_handle = Arc::clone(&shared);
+    let close = env
+        .create_function_from_closure::<(), (), _>("close", move |context| {
+            exact_argument_count(&context, 0)?;
+            let mut progress = take_handle(&close_handle)?;
+            if let Some(mut directory) = progress.directory.take() {
+                directory.close();
+            }
             Ok(())
         })
         .map_err(|_| bridge_error())?;
@@ -898,7 +1490,128 @@ fn make_read_adapter(env: &Env) -> Result<BridgeObject> {
     finish_object(&result)
 }
 
-fn make_mutation_adapter(env: &Env) -> Result<BridgeObject> {
+fn make_legacy_adapter(env: &Env, authority: Arc<AdapterAuthority>) -> Result<BridgeObject> {
+    let mut result = Object::new(env).map_err(|_| bridge_error())?;
+    let read = env
+        .create_function_from_closure::<(), _, _>("read", move |context| {
+            exact_argument_count(&context, 3)?;
+            let source = argument::<String>(&context, 0)?;
+            let path = argument::<String>(&context, 1)?;
+            let options = argument::<Object<'_>>(&context, 2)?;
+            exact_keys(&options, &["maxBytes", "noFollow"])?;
+            expect_true(&options, "noFollow")?;
+            if property::<f64>(&options, "maxBytes")? != 16_384.0 {
+                return Err(invalid_request());
+            }
+            let (allowed, expected_leaf) = match source.as_str() {
+                "hermes" => (&authority.legacy_paths.hermes, OsStr::new("plurum.json")),
+                "openclaw" => (&authority.legacy_paths.openclaw, OsStr::new("plurum.json")),
+                "removed-cli" => (
+                    &authority.legacy_paths.removed_cli,
+                    OsStr::new("config.json"),
+                ),
+                _ => return Err(invalid_request()),
+            };
+            if &path != allowed {
+                return Err(invalid_request());
+            }
+            let read =
+                match read_allowlisted_legacy_credential(Path::new(&path), expected_leaf, 16_384) {
+                    Ok(value) => value,
+                    Err(PlatformStoreError::InvalidInput) => return Err(invalid_request()),
+                    Err(_) => return Err(bridge_error()),
+                };
+            let status = match read {
+                LegacyCredentialReadResult::Missing => "missing",
+                LegacyCredentialReadResult::Unsafe => "unsafe",
+                LegacyCredentialReadResult::Oversized | LegacyCredentialReadResult::Malformed => {
+                    "malformed"
+                }
+                LegacyCredentialReadResult::Loaded(bytes) => {
+                    return create_guarded_loaded_result(context.env, bytes)
+                        .map_err(|_| bridge_error());
+                }
+            };
+            let mut value = Object::new(context.env).map_err(|_| bridge_error())?;
+            value
+                .set_named_property("status", status)
+                .map_err(|_| bridge_error())?;
+            Ok(GuardedObjectRef::plain(finish_object(&value)?))
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("read", read)
+        .map_err(|_| bridge_error())?;
+    finish_object(&result)
+}
+
+fn make_observation_adapter(env: &Env, authority: Arc<AdapterAuthority>) -> Result<BridgeObject> {
+    let mut result = Object::new(env).map_err(|_| bridge_error())?;
+    let open = env
+        .create_function_from_closure::<(), _, _>("openPrivateDirectory", move |context| {
+            exact_argument_count(&context, 2)?;
+            let directory_path = argument::<String>(&context, 0)?;
+            let options = argument::<Object<'_>>(&context, 1)?;
+            exact_keys(&options, &["noFollow"])?;
+            expect_true(&options, "noFollow")?;
+            let opened = match open_private_directory(Path::new(&directory_path)) {
+                Ok(value) => value,
+                Err(PlatformStoreError::InvalidInput) => return Err(invalid_request()),
+                Err(_) => return Err(bridge_error()),
+            };
+            let mut value = Object::new(context.env).map_err(|_| bridge_error())?;
+            match opened {
+                PrivateDirectoryOpenResult::Missing => {
+                    let binding =
+                        match observe_missing_private_directory(Path::new(&directory_path)) {
+                            Ok(Some(binding)) => binding,
+                            Ok(None) => return Err(bridge_error()),
+                            Err(PlatformStoreError::InvalidInput) => {
+                                return Err(invalid_request());
+                            }
+                            Err(_) => return Err(bridge_error()),
+                        };
+                    value
+                        .set_named_property("status", "missing")
+                        .map_err(|_| bridge_error())?;
+                    value
+                        .set_named_property(
+                            "evidence",
+                            evidence_external(WholePassEvidence {
+                                authority: Arc::clone(&authority),
+                                directory: directory_path,
+                                state: EvidenceState::Missing(binding),
+                            }),
+                        )
+                        .map_err(|_| bridge_error())?;
+                }
+                PrivateDirectoryOpenResult::Opened(directory) => {
+                    value
+                        .set_named_property("status", "opened")
+                        .map_err(|_| bridge_error())?;
+                    value
+                        .set_named_property(
+                            "directory",
+                            make_observation_directory(
+                                context.env,
+                                Arc::clone(&authority),
+                                directory_path,
+                                directory,
+                            )?,
+                        )
+                        .map_err(|_| bridge_error())?;
+                }
+            }
+            finish_object(&value)
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("openPrivateDirectory", open)
+        .map_err(|_| bridge_error())?;
+    finish_object(&result)
+}
+
+fn make_mutation_adapter(env: &Env, authority: Arc<AdapterAuthority>) -> Result<BridgeObject> {
     let mut result = Object::new(env).map_err(|_| bridge_error())?;
     let acquire = env
         .create_function_from_closure::<(), _, _>("acquireSetupLease", move |context| {
@@ -958,16 +1671,138 @@ fn make_mutation_adapter(env: &Env) -> Result<BridgeObject> {
     result
         .set_named_property("acquireSetupLease", acquire)
         .map_err(|_| bridge_error())?;
+
+    let observed_authority = Arc::clone(&authority);
+    let acquire_observed = env
+        .create_function_from_closure::<(), _, _>("acquireObservedSetupLease", move |context| {
+            exact_argument_count(&context, 2)?;
+            let directory_path = argument::<String>(&context, 0)?;
+            let options = argument::<Object<'_>>(&context, 1)?;
+            exact_keys(
+                &options,
+                &["createDirectory", "evidence", "noFollow", "nonce"],
+            )?;
+            expect_true(&options, "noFollow")?;
+            expect_true(&options, "createDirectory")?;
+            let evidence_object = property::<Object<'_>>(&options, "evidence")?;
+            exact_keys(&evidence_object, &[])?;
+            let nonce = property::<String>(&options, "nonce")?;
+            let evidence = take_evidence_property(&options, "evidence")?;
+            if !Arc::ptr_eq(&evidence.authority, &observed_authority) {
+                return Err(invalid_request());
+            }
+
+            let mut value = Object::new(context.env).map_err(|_| bridge_error())?;
+            if evidence.directory != directory_path {
+                value
+                    .set_named_property("status", "precondition-failed")
+                    .map_err(|_| bridge_error())?;
+                return finish_object(&value);
+            }
+
+            let acquired = match evidence.state {
+                EvidenceState::Missing(binding) => acquire_observed_setup_lease(
+                    Path::new(&directory_path),
+                    &nonce,
+                    ObservedDirectoryExpectation::Missing(&binding),
+                    empty_store_snapshot,
+                ),
+                EvidenceState::Present(present) => {
+                    let retained = present.binding.attest();
+                    if !matches!(
+                        retained,
+                        Ok(current) if current == present.snapshot.directory
+                    ) {
+                        value
+                            .set_named_property("status", "precondition-failed")
+                            .map_err(|_| bridge_error())?;
+                        return finish_object(&value);
+                    }
+                    acquire_observed_setup_lease(
+                        Path::new(&directory_path),
+                        &nonce,
+                        ObservedDirectoryExpectation::Present,
+                        |directory| present_snapshot_matches(directory, &present.snapshot),
+                    )
+                }
+            };
+            let acquired = match acquired {
+                Ok(value) => value,
+                Err(PlatformStoreError::InvalidInput) => {
+                    return Err(invalid_request());
+                }
+                Err(_) => return Err(bridge_error()),
+            };
+            match acquired {
+                ObservedSetupLeaseAcquireResult::Busy => {
+                    value
+                        .set_named_property("status", "busy")
+                        .map_err(|_| bridge_error())?;
+                }
+                ObservedSetupLeaseAcquireResult::PreconditionFailed => {
+                    value
+                        .set_named_property("status", "precondition-failed")
+                        .map_err(|_| bridge_error())?;
+                }
+                ObservedSetupLeaseAcquireResult::Acquired {
+                    prior,
+                    directory,
+                    lease,
+                } => {
+                    value
+                        .set_named_property("status", "acquired")
+                        .map_err(|_| bridge_error())?;
+                    value
+                        .set_named_property(
+                            "priorLease",
+                            match prior {
+                                PriorLease::Absent => "absent",
+                                PriorLease::ProvenAbandoned => "proven-abandoned",
+                            },
+                        )
+                        .map_err(|_| bridge_error())?;
+                    value
+                        .set_named_property(
+                            "directory",
+                            match directory {
+                                DirectoryDisposition::Created => "created",
+                                DirectoryDisposition::Existing => "existing",
+                            },
+                        )
+                        .map_err(|_| bridge_error())?;
+                    value
+                        .set_named_property("lease", make_setup_lease(context.env, lease)?)
+                        .map_err(|_| bridge_error())?;
+                }
+            }
+            finish_object(&value)
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("acquireObservedSetupLease", acquire_observed)
+        .map_err(|_| bridge_error())?;
     finish_object(&result)
 }
 
-pub(crate) fn create_adapters(env: &Env) -> Result<BridgeObject> {
+pub(crate) fn create_adapters(env: &Env, configuration: &Object<'_>) -> Result<BridgeObject> {
+    let authority = Arc::new(AdapterAuthority {
+        legacy_paths: parse_legacy_paths(configuration)?,
+    });
     let mut result = Object::new(env).map_err(|_| bridge_error())?;
+    result
+        .set_named_property("legacy", make_legacy_adapter(env, Arc::clone(&authority))?)
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property(
+            "observation",
+            make_observation_adapter(env, Arc::clone(&authority))?,
+        )
+        .map_err(|_| bridge_error())?;
     result
         .set_named_property("read", make_read_adapter(env)?)
         .map_err(|_| bridge_error())?;
     result
-        .set_named_property("mutation", make_mutation_adapter(env)?)
+        .set_named_property("mutation", make_mutation_adapter(env, authority)?)
         .map_err(|_| bridge_error())?;
     finish_object(&result)
 }

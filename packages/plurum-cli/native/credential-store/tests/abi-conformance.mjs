@@ -1306,6 +1306,10 @@ async function runChild() {
     { CLI_VERSION },
     { readCredentialStore },
     { recoverCredentialStore, writeCredentialStore },
+    {
+      claimCredentialStoreObservationEvidence,
+      createCredentialStoreObservationAuthority,
+    },
   ] =
     await Promise.all([
       import(
@@ -1320,19 +1324,61 @@ async function runChild() {
           join(packageRoot, "dist", "credentials", "store-writer.js"),
         ).href
       ),
+      import(
+        pathToFileURL(
+          join(packageRoot, "dist", "credentials", "store-observer.js"),
+        ).href
+      ),
     ]);
 
   assert.equal(addon.magic, "plurum-native-credential-store");
-  assert.equal(addon.abiVersion, 1);
+  assert.equal(addon.abiVersion, 2);
   assert.equal(addon.nodeApiVersion, 8);
   assert.equal(addon.packageVersion, CLI_VERSION);
   assert.equal(addon.target, expectedTarget);
   assert.equal(typeof addon.createAdapters, "function");
-  const rawAdapters = Reflect.apply(addon.createAdapters, addon, []);
+  const nativeConfiguration = Object.freeze({
+    legacyPaths: Object.freeze({
+      hermes: join(runRoot, "legacy-hermes", "plurum.json"),
+      openclaw: join(runRoot, "legacy-openclaw", "plurum.json"),
+      removedCli: join(runRoot, "legacy-removed", "config.json"),
+    }),
+  });
+  const rawAdapters = Reflect.apply(addon.createAdapters, addon, [
+    nativeConfiguration,
+  ]);
   assert.ok(rawAdapters !== null && typeof rawAdapters === "object");
-  assert.deepEqual(Object.keys(rawAdapters).sort(), ["mutation", "read"]);
+  assert.deepEqual(Object.keys(rawAdapters).sort(), [
+    "legacy",
+    "mutation",
+    "observation",
+    "read",
+  ]);
+  assert.deepEqual(Object.keys(rawAdapters.legacy), ["read"]);
   assert.deepEqual(Object.keys(rawAdapters.read), ["openPrivateDirectory"]);
-  assert.deepEqual(Object.keys(rawAdapters.mutation), ["acquireSetupLease"]);
+  assert.deepEqual(Object.keys(rawAdapters.observation), [
+    "openPrivateDirectory",
+  ]);
+  assert.deepEqual(Object.keys(rawAdapters.mutation).sort(), [
+    "acquireObservedSetupLease",
+    "acquireSetupLease",
+  ]);
+  assert.throws(
+    () => Reflect.apply(addon.createAdapters, addon, []),
+    /argument|invalid|object/iu,
+    "raw factory must require its exact configuration",
+  );
+  assert.throws(
+    () =>
+      Reflect.apply(addon.createAdapters, addon, [
+        {
+          ...nativeConfiguration,
+          unexpected: true,
+        },
+      ]),
+    /invalid/iu,
+    "raw factory must reject configuration extensions",
+  );
   for (const extension of ["hidden", "symbol"]) {
     const invalidOptions = { noFollow: true };
     Object.defineProperty(
@@ -1351,6 +1397,88 @@ async function runChild() {
     );
   }
 
+  const rawObservedDirectory = join(runRoot, "raw-observed-store");
+  const rawMissing = rawAdapters.observation.openPrivateDirectory(
+    rawObservedDirectory,
+    Object.freeze({ noFollow: true }),
+  );
+  assert.equal(rawMissing.status, "missing");
+  assert.deepEqual(Reflect.ownKeys(rawMissing.evidence), []);
+  const rawObservedAcquired =
+    rawAdapters.mutation.acquireObservedSetupLease(
+      rawObservedDirectory,
+      Object.freeze({
+        createDirectory: true,
+        evidence: rawMissing.evidence,
+        noFollow: true,
+        nonce: randomUUID(),
+      }),
+    );
+  assert.equal(rawObservedAcquired.status, "acquired");
+  assert.equal(rawObservedAcquired.directory, "created");
+  rawObservedAcquired.lease.release();
+  assert.deepEqual(readdirSync(rawObservedDirectory), ["setup.lock"]);
+  assert.throws(
+    () =>
+      rawAdapters.mutation.acquireObservedSetupLease(
+        rawObservedDirectory,
+        Object.freeze({
+          createDirectory: true,
+          evidence: rawMissing.evidence,
+          noFollow: true,
+          nonce: randomUUID(),
+        }),
+      ),
+    /invalid/iu,
+    "raw observation evidence must be one-shot",
+  );
+
+  const rawMismatchDirectory = join(runRoot, "raw-mismatch-store");
+  const rawMismatchEvidence = rawAdapters.observation.openPrivateDirectory(
+    rawMismatchDirectory,
+    Object.freeze({ noFollow: true }),
+  );
+  assert.equal(rawMismatchEvidence.status, "missing");
+  const rawMismatchResult =
+    rawAdapters.mutation.acquireObservedSetupLease(
+      join(runRoot, "raw-mismatch-other"),
+      Object.freeze({
+        createDirectory: true,
+        evidence: rawMismatchEvidence.evidence,
+        noFollow: true,
+        nonce: randomUUID(),
+      }),
+    );
+  assert.deepEqual(rawMismatchResult, { status: "precondition-failed" });
+  assert.equal(pathExists(rawMismatchDirectory), false);
+  assert.equal(pathExists(join(runRoot, "raw-mismatch-other")), false);
+
+  const otherRawAdapters = Reflect.apply(addon.createAdapters, addon, [
+    nativeConfiguration,
+  ]);
+  const rawCrossPairDirectory = join(runRoot, "raw-cross-pair-store");
+  const rawCrossPairEvidence =
+    rawAdapters.observation.openPrivateDirectory(
+      rawCrossPairDirectory,
+      Object.freeze({ noFollow: true }),
+    );
+  assert.equal(rawCrossPairEvidence.status, "missing");
+  assert.throws(
+    () =>
+      otherRawAdapters.mutation.acquireObservedSetupLease(
+        rawCrossPairDirectory,
+        Object.freeze({
+          createDirectory: true,
+          evidence: rawCrossPairEvidence.evidence,
+          noFollow: true,
+          nonce: randomUUID(),
+        }),
+      ),
+    /invalid/iu,
+    "raw observation evidence must remain bound to one adapter pair",
+  );
+  assert.equal(pathExists(rawCrossPairDirectory), false);
+
   let resolverCalls = 0;
   const provider = createNativeCredentialStoreProvider(
     expectedTarget,
@@ -1359,6 +1487,7 @@ async function runChild() {
       assert.equal(target, expectedTarget);
       return addon;
     },
+    nativeConfiguration,
   );
 
   assert.equal(resolverCalls, 0, "native resolution must remain lazy");
@@ -1368,7 +1497,9 @@ async function runChild() {
     assert.fail("native credential adapters must be available");
   }
   assert.equal(Object.isFrozen(first), true);
+  assert.equal(Object.isFrozen(first.legacy), true);
   assert.equal(Object.isFrozen(first.read), true);
+  assert.equal(Object.isFrozen(first.observation), true);
   assert.equal(Object.isFrozen(first.mutation), true);
   assert.equal(resolverCalls, 1);
   assert.strictEqual(provider.load(), first);
@@ -1415,6 +1546,93 @@ async function runChild() {
     random,
   });
 
+  const observationAuthority =
+    createCredentialStoreObservationAuthority(first.observation);
+  const missingObservation = await observationAuthority.inspect(
+    Object.freeze({ directory: credentialDirectory }),
+  );
+  assert.equal(missingObservation.status, "available");
+  assert.equal(missingObservation.canonical, "missing");
+  assert.equal(missingObservation.transaction, "clean");
+  const missingRedeemed = observationAuthority.redeem(
+    Object.freeze({
+      directory: credentialDirectory,
+      identity: missingObservation.identity,
+    }),
+  );
+  assert.equal(missingRedeemed.status, "redeemed");
+  assert.equal(missingRedeemed.credential, null);
+  assert.equal(missingRedeemed.transaction, null);
+  const missingEvidence = claimCredentialStoreObservationEvidence(
+    observationAuthority,
+    missingRedeemed.evidence,
+  );
+  assert.ok(missingEvidence);
+  assert.deepEqual(Reflect.ownKeys(missingEvidence), []);
+  const observedCreation =
+    await first.mutation.acquireObservedSetupLease(
+      credentialDirectory,
+      Object.freeze({
+        createDirectory: true,
+        evidence: missingEvidence,
+        noFollow: true,
+      }),
+    );
+  assert.equal(observedCreation.status, "acquired");
+  assert.equal(observedCreation.directory, "created");
+  await observedCreation.lease.release();
+  assert.deepEqual(readdirSync(credentialDirectory), ["setup.lock"]);
+
+  const crossPairDirectory = join(runRoot, "public-cross-pair-store");
+  const crossPairObservation = await observationAuthority.inspect(
+    Object.freeze({ directory: crossPairDirectory }),
+  );
+  assert.equal(crossPairObservation.status, "available");
+  const crossPairRedeemed = observationAuthority.redeem(
+    Object.freeze({
+      directory: crossPairDirectory,
+      identity: crossPairObservation.identity,
+    }),
+  );
+  assert.equal(crossPairRedeemed.status, "redeemed");
+  const crossPairEvidence = claimCredentialStoreObservationEvidence(
+    observationAuthority,
+    crossPairRedeemed.evidence,
+  );
+  assert.ok(crossPairEvidence);
+  const secondProvider = createNativeCredentialStoreProvider(
+    expectedTarget,
+    () => addon,
+    nativeConfiguration,
+  );
+  const second = secondProvider.load();
+  assert.equal(second.status, "available");
+  await assert.rejects(
+    () =>
+      second.mutation.acquireObservedSetupLease(
+        crossPairDirectory,
+        Object.freeze({
+          createDirectory: true,
+          evidence: crossPairEvidence,
+          noFollow: true,
+        }),
+      ),
+    /invalid/iu,
+    "public observation evidence must remain bound to one adapter pair",
+  );
+  assert.equal(pathExists(crossPairDirectory), false);
+  const crossPairCreation =
+    await first.mutation.acquireObservedSetupLease(
+      crossPairDirectory,
+      Object.freeze({
+        createDirectory: true,
+        evidence: crossPairEvidence,
+        noFollow: true,
+      }),
+    );
+  assert.equal(crossPairCreation.status, "acquired");
+  await crossPairCreation.lease.release();
+
   const written = await writeCredentialStore(
     writerDependencies,
     locations,
@@ -1430,6 +1648,262 @@ async function runChild() {
   );
   assert.deepEqual(unchanged, { status: "unchanged" });
   assert.equal(Object.isFrozen(unchanged), true);
+
+  const presentObservation = await observationAuthority.inspect(
+    Object.freeze({ directory: credentialDirectory }),
+  );
+  assert.equal(presentObservation.status, "available");
+  assert.equal(presentObservation.canonical, "active");
+  assert.equal(presentObservation.transaction, "clean");
+  const presentRedeemed = observationAuthority.redeem(
+    Object.freeze({
+      directory: credentialDirectory,
+      identity: presentObservation.identity,
+    }),
+  );
+  assert.equal(presentRedeemed.status, "redeemed");
+  assert.equal(presentRedeemed.credential.api_key, credentialKey);
+  const staleEvidence = claimCredentialStoreObservationEvidence(
+    observationAuthority,
+    presentRedeemed.evidence,
+  );
+  assert.ok(staleEvidence);
+
+  const changedCredential = Object.freeze({
+    ...credential,
+    agent_name: "Native ABI Changed Agent",
+  });
+  const changed = await writeCredentialStore(
+    writerDependencies,
+    locations,
+    changedCredential,
+  );
+  assert.deepEqual(changed, { status: "written" });
+  const staleAcquire =
+    await first.mutation.acquireObservedSetupLease(
+      credentialDirectory,
+      Object.freeze({
+        createDirectory: true,
+        evidence: staleEvidence,
+        noFollow: true,
+      }),
+    );
+  assert.deepEqual(staleAcquire, { status: "precondition-failed" });
+  await assert.rejects(
+    () =>
+      first.mutation.acquireObservedSetupLease(
+        credentialDirectory,
+        Object.freeze({
+          createDirectory: true,
+          evidence: staleEvidence,
+          noFollow: true,
+        }),
+      ),
+    /invalid/iu,
+    "stale public evidence must still be burned before native CAS",
+  );
+
+  const freshObservation = await observationAuthority.inspect(
+    Object.freeze({ directory: credentialDirectory }),
+  );
+  assert.equal(freshObservation.status, "available");
+  const freshRedeemed = observationAuthority.redeem(
+    Object.freeze({
+      directory: credentialDirectory,
+      identity: freshObservation.identity,
+    }),
+  );
+  assert.equal(freshRedeemed.status, "redeemed");
+  const freshEvidence = claimCredentialStoreObservationEvidence(
+    observationAuthority,
+    freshRedeemed.evidence,
+  );
+  assert.ok(freshEvidence);
+  const freshAcquire =
+    await first.mutation.acquireObservedSetupLease(
+      credentialDirectory,
+      Object.freeze({
+        createDirectory: true,
+        evidence: freshEvidence,
+        noFollow: true,
+      }),
+    );
+  assert.equal(freshAcquire.status, "acquired");
+  assert.equal(freshAcquire.directory, "existing");
+  await freshAcquire.lease.release();
+
+  const incompleteRawObservation =
+    rawAdapters.observation.openPrivateDirectory(
+      credentialDirectory,
+      Object.freeze({ noFollow: true }),
+    );
+  assert.equal(incompleteRawObservation.status, "opened");
+  const incompleteDirectory = incompleteRawObservation.directory;
+  incompleteDirectory.attest();
+  const incompleteCredential = incompleteDirectory.observeEntry(
+    Object.freeze({
+      entry: Object.freeze({
+        kind: "canonical",
+        name: "credentials.json",
+        role: "credential",
+      }),
+      noFollow: true,
+    }),
+  );
+  assert.equal(incompleteCredential.status, "opened");
+  assert.equal(
+    incompleteDirectory.observeEntry(
+      Object.freeze({
+        entry: Object.freeze({
+          kind: "canonical",
+          name: "credentials-transaction.json",
+          role: "transaction",
+        }),
+        noFollow: true,
+      }),
+    ).status,
+    "missing",
+  );
+  assert.deepEqual(incompleteDirectory.listTemporaryEntries(), []);
+  incompleteDirectory.attest();
+  assert.throws(
+    () => incompleteDirectory.finishObservation(),
+    /failed|native|operation/iu,
+    "raw evidence must require each opened file's semantic read protocol",
+  );
+  incompleteDirectory.close();
+
+  const legacyOptions = Object.freeze({
+    maxBytes: 16_384,
+    noFollow: true,
+  });
+  assert.throws(
+    () =>
+      rawAdapters.legacy.read(
+        "hermes",
+        nativeConfiguration.legacyPaths.openclaw,
+        legacyOptions,
+      ),
+    /invalid/iu,
+    "raw legacy reads must remain bound to the configured source/path pair",
+  );
+  if (process.platform === "win32") {
+    assert.deepEqual(
+      rawAdapters.legacy.read(
+        "hermes",
+        nativeConfiguration.legacyPaths.hermes,
+        legacyOptions,
+      ),
+      { status: "missing" },
+    );
+    assert.deepEqual(
+      await first.legacy.read(
+        "hermes",
+        nativeConfiguration.legacyPaths.hermes,
+        legacyOptions,
+      ),
+      { status: "missing" },
+    );
+  } else {
+    const legacyDirectory = dirname(nativeConfiguration.legacyPaths.hermes);
+    mkdirSync(legacyDirectory, { mode: 0o700 });
+    chmodSync(legacyDirectory, 0o700);
+    const legacyDocument = Buffer.from(
+      JSON.stringify({
+        api_key: credentialKey,
+        api_url: "https://api.plurum.ai",
+      }),
+      "utf8",
+    );
+    writeFileSync(nativeConfiguration.legacyPaths.hermes, legacyDocument, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    chmodSync(nativeConfiguration.legacyPaths.hermes, 0o600);
+    const rawLegacy = rawAdapters.legacy.read(
+      "hermes",
+      nativeConfiguration.legacyPaths.hermes,
+      legacyOptions,
+    );
+    assert.equal(rawLegacy.status, "loaded");
+    assert.equal(sha256(rawLegacy.bytes), sha256(legacyDocument));
+    rawLegacy.bytes.fill(0);
+
+    let capturedRawLegacyBytes;
+    const capturingLegacyAdapter = Object.freeze({
+      read(...args) {
+        const result = Reflect.apply(
+          rawAdapters.legacy.read,
+          rawAdapters.legacy,
+          args,
+        );
+        if (result.status === "loaded") {
+          capturedRawLegacyBytes = result.bytes;
+        }
+        return result;
+      },
+    });
+    const capturingModule = Object.freeze({
+      abiVersion: addon.abiVersion,
+      createAdapters(configuration) {
+        assert.deepEqual(configuration, nativeConfiguration);
+        return Object.freeze({
+          legacy: capturingLegacyAdapter,
+          mutation: rawAdapters.mutation,
+          observation: rawAdapters.observation,
+          read: rawAdapters.read,
+        });
+      },
+      magic: addon.magic,
+      nodeApiVersion: addon.nodeApiVersion,
+      packageVersion: addon.packageVersion,
+      target: addon.target,
+    });
+    const capturingProvider = createNativeCredentialStoreProvider(
+      expectedTarget,
+      () => capturingModule,
+      nativeConfiguration,
+    );
+    const capturingLoaded = capturingProvider.load();
+    assert.equal(capturingLoaded.status, "available");
+    const publicLegacy = await capturingLoaded.legacy.read(
+      "hermes",
+      nativeConfiguration.legacyPaths.hermes,
+      legacyOptions,
+    );
+    assert.equal(publicLegacy.status, "loaded");
+    assert.equal(sha256(publicLegacy.bytes), sha256(legacyDocument));
+    assert.ok(capturedRawLegacyBytes instanceof Uint8Array);
+    assert.equal(
+      capturedRawLegacyBytes.every((byte) => byte === 0),
+      true,
+      "the native legacy buffer must be wiped by the public membrane",
+    );
+    publicLegacy.bytes.fill(0);
+    legacyDocument.fill(0);
+
+    writeFileSync(nativeConfiguration.legacyPaths.hermes, Buffer.alloc(0));
+    assert.deepEqual(
+      rawAdapters.legacy.read(
+        "hermes",
+        nativeConfiguration.legacyPaths.hermes,
+        legacyOptions,
+      ),
+      { status: "malformed" },
+    );
+    writeFileSync(
+      nativeConfiguration.legacyPaths.hermes,
+      Buffer.alloc(16_385, 0x78),
+    );
+    assert.deepEqual(
+      rawAdapters.legacy.read(
+        "hermes",
+        nativeConfiguration.legacyPaths.hermes,
+        legacyOptions,
+      ),
+      { status: "malformed" },
+    );
+  }
 
   const recovered = await recoverCredentialStore(
     Object.freeze({ storage: first.mutation, random }),
@@ -1449,6 +1923,7 @@ async function runChild() {
   );
   assert.equal(loaded.credential.agent_id, credential.agent_id);
   assert.equal(loaded.credential.api_origin, credential.api_origin);
+  assert.equal(loaded.credential.agent_name, changedCredential.agent_name);
   assert.deepEqual(readdirSync(credentialDirectory).sort(), [
     "credentials.json",
     "setup.lock",

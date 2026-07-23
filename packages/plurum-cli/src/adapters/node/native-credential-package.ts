@@ -25,6 +25,7 @@ import {
   NATIVE_CREDENTIAL_STORE_ABI_VERSION,
   NATIVE_CREDENTIAL_STORE_NODE_API_VERSION,
   createNativeCredentialStoreProvider,
+  type NativeCredentialStoreConfiguration,
   type NativeCredentialStoreProvider,
   type NativeCredentialTarget,
 } from "./native-credential-store.js";
@@ -989,10 +990,14 @@ function loadNativePackage(
  */
 export function createNativeCredentialPackageProvider(
   target: NativeCredentialTarget,
+  configuration: NativeCredentialStoreConfiguration,
   options?: NativeCredentialPackageVerificationOptions,
 ): NativeCredentialStoreProvider {
-  const configuration = normalizeOptions(options);
-  return createNativeCredentialStoreProvider(target, (requestedTarget) =>
-    loadNativePackage(requestedTarget, configuration),
+  const packageConfiguration = normalizeOptions(options);
+  return createNativeCredentialStoreProvider(
+    target,
+    (requestedTarget) =>
+      loadNativePackage(requestedTarget, packageConfiguration),
+    configuration,
   );
 }

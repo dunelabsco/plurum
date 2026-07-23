@@ -1,3 +1,5 @@
+import { randomUUID as nodeRandomUUID } from "node:crypto";
+
 import type {
   CredentialCanonicalEntry,
   CredentialConditionalMoveResult,
@@ -8,14 +10,21 @@ import type {
   CredentialManagedEntry,
   CredentialManagedEntryObservation,
   CredentialMissingEntrySnapshot,
+  CredentialObservedSetupLeaseAcquireResult,
   CredentialPresentEntrySnapshot,
   CredentialSetupLeaseAcquireResult,
-  CredentialStoreMutationAdapter,
   CredentialStoreMutationLease,
+  CredentialStoreObservedMutationAdapter,
   CredentialSetupLeaseNonce,
   CredentialTemporaryEntry,
   CredentialTemporaryEntryRole,
 } from "../../credentials/store-mutation-contracts.js";
+import type {
+  CredentialStoreObservationAdapter,
+  CredentialStoreObservationDirectoryHandle,
+  CredentialStoreObservationDirectoryOpenResult,
+  CredentialStoreObservationEntryResult,
+} from "../../credentials/store-observation-contracts.js";
 import type {
   BoundedCredentialRead,
   CredentialAccessAttestation,
@@ -27,15 +36,21 @@ import type {
   CredentialObjectIdentity,
   CredentialOwnerAttestation,
   CredentialStoreReadAdapter,
+  CredentialStoreWholePassEvidence,
   PrivateCredentialDirectoryHandle,
   PrivateCredentialDirectoryOpenResult,
   PrivateDirectoryAttestation,
 } from "../../credentials/store-contracts.js";
+import type {
+  LegacyCredentialAdapterReadResult,
+  LegacyCredentialReadAdapter,
+  LegacyCredentialSource,
+} from "../../credentials/legacy-reader-contracts.js";
 import { CLI_VERSION } from "../../version.js";
 
 export const NATIVE_CREDENTIAL_STORE_MAGIC =
   "plurum-native-credential-store" as const;
-export const NATIVE_CREDENTIAL_STORE_ABI_VERSION = 1 as const;
+export const NATIVE_CREDENTIAL_STORE_ABI_VERSION = 2 as const;
 export const NATIVE_CREDENTIAL_STORE_NODE_API_VERSION = 8 as const;
 
 export const NATIVE_CREDENTIAL_TARGET_IDS = Object.freeze([
@@ -62,11 +77,23 @@ export type NativeCredentialModuleResolver = (
   target: NativeCredentialTarget,
 ) => unknown;
 
+export interface NativeCredentialLegacyPathAllowlist {
+  readonly hermes: string;
+  readonly openclaw: string;
+  readonly removedCli: string;
+}
+
+export interface NativeCredentialStoreConfiguration {
+  readonly legacyPaths: NativeCredentialLegacyPathAllowlist;
+}
+
 export type NativeCredentialStoreLoadResult =
   | Readonly<{
       status: "available";
+      legacy: LegacyCredentialReadAdapter;
       read: CredentialStoreReadAdapter;
-      mutation: CredentialStoreMutationAdapter;
+      observation: CredentialStoreObservationAdapter;
+      mutation: CredentialStoreObservedMutationAdapter;
     }>
   | Readonly<{
       status: "unavailable";
@@ -89,19 +116,57 @@ const MODULE_KEYS = Object.freeze([
   "packageVersion",
   "target",
 ] as const);
-const ADAPTER_PAIR_KEYS = Object.freeze(["mutation", "read"] as const);
+const ADAPTER_PAIR_KEYS = Object.freeze([
+  "legacy",
+  "mutation",
+  "observation",
+  "read",
+] as const);
+const LEGACY_PATH_ALLOWLIST_KEYS = Object.freeze([
+  "hermes",
+  "openclaw",
+  "removedCli",
+] as const);
+const PROVIDER_CONFIGURATION_KEYS = Object.freeze(["legacyPaths"] as const);
 const READ_OPTIONS_KEYS = Object.freeze(["noFollow"] as const);
+const LEGACY_READ_OPTIONS_KEYS = Object.freeze([
+  "maxBytes",
+  "noFollow",
+] as const);
 const MUTATION_OPTIONS_KEYS = Object.freeze([
   "createDirectory",
   "noFollow",
   "nonce",
 ] as const);
+const OBSERVED_MUTATION_OPTIONS_KEYS = Object.freeze([
+  "createDirectory",
+  "evidence",
+  "noFollow",
+] as const);
+const OBSERVATION_ENTRY_OPTIONS_KEYS = Object.freeze([
+  "entry",
+  "noFollow",
+] as const);
+const LEGACY_ADAPTER_KEYS = Object.freeze(["read"] as const);
 const READ_ADAPTER_KEYS = Object.freeze(["openPrivateDirectory"] as const);
-const MUTATION_ADAPTER_KEYS = Object.freeze(["acquireSetupLease"] as const);
+const OBSERVATION_ADAPTER_KEYS = Object.freeze([
+  "openPrivateDirectory",
+] as const);
+const MUTATION_ADAPTER_KEYS = Object.freeze([
+  "acquireObservedSetupLease",
+  "acquireSetupLease",
+] as const);
 const DIRECTORY_HANDLE_KEYS = Object.freeze([
   "attest",
   "close",
   "openCredentialReadOnly",
+] as const);
+const OBSERVATION_DIRECTORY_HANDLE_KEYS = Object.freeze([
+  "attest",
+  "close",
+  "finishObservation",
+  "listTemporaryEntries",
+  "observeEntry",
 ] as const);
 const READ_HANDLE_KEYS = Object.freeze([
   "attest",
@@ -162,6 +227,8 @@ const MAX_OPAQUE_CHARACTERS = 512;
 const MAX_NATIVE_READ_BYTES = 40_961;
 const MAX_NATIVE_WRITE_BYTES = 40_960;
 const MAX_NATIVE_TEMPORARY_ENTRIES = 1_024;
+const MAX_LEGACY_READ_BYTES = 16_384;
+const MAX_LEGACY_PATH_CHARACTERS = 32_768;
 const RECOGNIZED_TARGETS = new Set<string>(NATIVE_CREDENTIAL_TARGET_IDS);
 const UNAVAILABLE = Object.freeze({
   status: "unavailable" as const,
@@ -173,6 +240,7 @@ const NATIVE_OPERATION_FAILED = "The native credential operation failed.";
 const LOWERCASE_UUID_V4 =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const OPAQUE_CONTROL = /[\u0000-\u001f\u007f-\u009f]/u;
+const RANDOM_UUID = nodeRandomUUID;
 const FREEZE = Object.freeze;
 const ARRAY_IS_ARRAY = Array.isArray;
 const HAS_OWN = Object.prototype.hasOwnProperty;
@@ -204,10 +272,15 @@ interface NativeCredentialModuleSnapshot {
 }
 
 interface NativeCredentialAdapterPairSnapshot {
+  readonly legacyReceiver: UnknownRecord;
   readonly readReceiver: UnknownRecord;
+  readonly observationReceiver: UnknownRecord;
   readonly mutationReceiver: UnknownRecord;
-  readonly openPrivateDirectory: RawFunction;
+  readonly readLegacy: RawFunction;
+  readonly openReadPrivateDirectory: RawFunction;
+  readonly openObservationPrivateDirectory: RawFunction;
   readonly acquireSetupLease: RawFunction;
+  readonly acquireObservedSetupLease: RawFunction;
 }
 
 interface CapturedRawHandle {
@@ -222,6 +295,18 @@ interface ChildLifecycleState {
 
 interface LeaseMembraneState extends ChildLifecycleState {
   readonly snapshots: WeakMap<object, RawSnapshot>;
+}
+
+interface WholePassEvidenceMembrane {
+  readonly publicToRaw: WeakMap<object, object>;
+  readonly seenRaw: WeakSet<object>;
+}
+
+interface ObservationDirectoryMembraneState {
+  active: boolean;
+  finished: boolean;
+  readonly evidence: WholePassEvidenceMembrane;
+  readonly children: ChildLifecycleState;
 }
 
 interface RawSnapshot {
@@ -306,6 +391,92 @@ function parseModuleDescriptor(
   });
 }
 
+function copyLegacyPath(value: unknown): string | undefined {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_LEGACY_PATH_CHARACTERS &&
+    !value.includes("\0")
+    ? value
+    : undefined;
+}
+
+function normalizeLegacyPathAllowlist(
+  value: unknown,
+): Readonly<NativeCredentialLegacyPathAllowlist> | undefined {
+  try {
+    if (
+      !isRecord(value) ||
+      !hasExactOwnKeys(value, LEGACY_PATH_ALLOWLIST_KEYS)
+    ) {
+      return undefined;
+    }
+    const hermes = copyLegacyPath(captureRawField(value, "hermes"));
+    const openclaw = copyLegacyPath(captureRawField(value, "openclaw"));
+    const removedCli = copyLegacyPath(captureRawField(value, "removedCli"));
+    if (
+      hermes === undefined ||
+      openclaw === undefined ||
+      removedCli === undefined
+    ) {
+      return undefined;
+    }
+    return FREEZE({
+      hermes,
+      openclaw,
+      removedCli,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeProviderConfiguration(
+  value: unknown,
+): Readonly<NativeCredentialStoreConfiguration> | undefined {
+  try {
+    if (
+      !isRecord(value) ||
+      !hasExactOwnKeys(value, PROVIDER_CONFIGURATION_KEYS)
+    ) {
+      return undefined;
+    }
+    const legacyPaths = normalizeLegacyPathAllowlist(
+      captureRawField(value, "legacyPaths"),
+    );
+    return legacyPaths === undefined
+      ? undefined
+      : FREEZE({ legacyPaths });
+  } catch {
+    return undefined;
+  }
+}
+
+function isLegacySource(value: unknown): value is LegacyCredentialSource {
+  return (
+    value === "hermes" ||
+    value === "openclaw" ||
+    value === "removed-cli"
+  );
+}
+
+function validLegacyReadRequest(
+  source: unknown,
+  path: unknown,
+  options: unknown,
+  allowlist: Readonly<NativeCredentialLegacyPathAllowlist>,
+): source is LegacyCredentialSource {
+  return (
+    isLegacySource(source) &&
+    typeof path === "string" &&
+    path ===
+      (source === "removed-cli" ? allowlist.removedCli : allowlist[source]) &&
+    isRecord(options) &&
+    hasExactOwnKeys(options, LEGACY_READ_OPTIONS_KEYS) &&
+    options.noFollow === true &&
+    options.maxBytes === MAX_LEGACY_READ_BYTES
+  );
+}
+
 function validReadRequest(
   directory: unknown,
   options: unknown,
@@ -346,6 +517,23 @@ function parseMutationRequest(
   return nonce as CredentialSetupLeaseNonce;
 }
 
+function parseObservedMutationRequest(
+  directory: unknown,
+  options: unknown,
+): unknown | undefined {
+  if (
+    typeof directory !== "string" ||
+    directory.length === 0 ||
+    !isRecord(options) ||
+    !hasExactOwnKeys(options, OBSERVED_MUTATION_OPTIONS_KEYS)
+  ) {
+    return undefined;
+  }
+  return options.noFollow === true && options.createDirectory === true
+    ? options.evidence
+    : undefined;
+}
+
 function parseAdapterPair(
   value: unknown,
 ): NativeCredentialAdapterPairSnapshot | undefined {
@@ -353,36 +541,60 @@ function parseAdapterPair(
     return undefined;
   }
 
-  const readReceiver = captureRawField(value, "read");
+  const legacyReceiver = captureRawField(value, "legacy");
   const mutationReceiver = captureRawField(value, "mutation");
+  const observationReceiver = captureRawField(value, "observation");
+  const readReceiver = captureRawField(value, "read");
   if (
+    !isRecord(legacyReceiver) ||
+    !hasExactOwnKeys(legacyReceiver, LEGACY_ADAPTER_KEYS) ||
     !isRecord(readReceiver) ||
     !hasExactOwnKeys(readReceiver, READ_ADAPTER_KEYS) ||
+    !isRecord(observationReceiver) ||
+    !hasExactOwnKeys(observationReceiver, OBSERVATION_ADAPTER_KEYS) ||
     !isRecord(mutationReceiver) ||
     !hasExactOwnKeys(mutationReceiver, MUTATION_ADAPTER_KEYS)
   ) {
     return undefined;
   }
-  const openPrivateDirectory = captureRawField(
+  const readLegacy = captureRawField(legacyReceiver, "read");
+  const openReadPrivateDirectory = captureRawField(
     readReceiver,
+    "openPrivateDirectory",
+  );
+  const openObservationPrivateDirectory = captureRawField(
+    observationReceiver,
     "openPrivateDirectory",
   );
   const acquireSetupLease = captureRawField(
     mutationReceiver,
     "acquireSetupLease",
   );
+  const acquireObservedSetupLease = captureRawField(
+    mutationReceiver,
+    "acquireObservedSetupLease",
+  );
   if (
-    typeof openPrivateDirectory !== "function" ||
-    typeof acquireSetupLease !== "function"
+    typeof readLegacy !== "function" ||
+    typeof openReadPrivateDirectory !== "function" ||
+    typeof openObservationPrivateDirectory !== "function" ||
+    typeof acquireSetupLease !== "function" ||
+    typeof acquireObservedSetupLease !== "function"
   ) {
     return undefined;
   }
 
   return Object.freeze({
+    legacyReceiver,
     readReceiver,
+    observationReceiver,
     mutationReceiver,
-    openPrivateDirectory: openPrivateDirectory as RawFunction,
+    readLegacy: readLegacy as RawFunction,
+    openReadPrivateDirectory: openReadPrivateDirectory as RawFunction,
+    openObservationPrivateDirectory:
+      openObservationPrivateDirectory as RawFunction,
     acquireSetupLease: acquireSetupLease as RawFunction,
+    acquireObservedSetupLease: acquireObservedSetupLease as RawFunction,
   });
 }
 
@@ -845,6 +1057,125 @@ function normalizeBoundedRead(
   }
 }
 
+function normalizeLegacyReadResult(
+  value: unknown,
+): LegacyCredentialAdapterReadResult {
+  let rawBytes: unknown;
+  let copiedBytes: Uint8Array | undefined;
+  try {
+    if (!isRecord(value)) {
+      return nativeOperationFailed();
+    }
+    const status = captureRawField(value, "status");
+    if (
+      (status === "malformed" ||
+        status === "missing" ||
+        status === "unsafe") &&
+      hasExactOwnKeys(value, ["status"])
+    ) {
+      return FREEZE({ status });
+    }
+    if (
+      status !== "loaded" ||
+      !hasExactOwnKeys(value, ["bytes", "status"])
+    ) {
+      return nativeOperationFailed();
+    }
+    rawBytes = captureRawField(value, "bytes");
+    copiedBytes = copyBaseBytes(rawBytes, MAX_LEGACY_READ_BYTES, false);
+    if (copiedBytes === undefined) {
+      return nativeOperationFailed();
+    }
+    const result = FREEZE({
+      status: "loaded" as const,
+      bytes: copiedBytes,
+    });
+    copiedBytes = undefined;
+    return result;
+  } catch {
+    return nativeOperationFailed();
+  } finally {
+    if (copiedBytes !== undefined) {
+      wipeBytes(copiedBytes);
+    }
+    try {
+      wipeBytes(rawBytes as Uint8Array);
+    } catch {
+      // The public error remains static even for hostile typed-array objects.
+    }
+  }
+}
+
+function normalizeTemporaryEntries(
+  value: unknown,
+): readonly CredentialTemporaryEntry[] {
+  try {
+    if (!ARRAY_IS_ARRAY(value)) {
+      return nativeOperationFailed();
+    }
+    const length = value.length;
+    if (
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > MAX_NATIVE_TEMPORARY_ENTRIES
+    ) {
+      return nativeOperationFailed();
+    }
+    const entries: CredentialTemporaryEntry[] = [];
+    for (let index = 0; index < length; index += 1) {
+      if (!Reflect.apply(HAS_OWN, value, [index])) {
+        return nativeOperationFailed();
+      }
+      entries[index] = normalizeTemporaryEntry(value[index]);
+    }
+    return FREEZE(entries);
+  } catch {
+    return nativeOperationFailed();
+  }
+}
+
+function mintWholePassEvidence(
+  value: unknown,
+  membrane: WholePassEvidenceMembrane,
+): CredentialStoreWholePassEvidence {
+  try {
+    suppressUnexpectedPromiseRejection(value);
+    if (
+      !isRecord(value) ||
+      !hasExactOwnKeys(value, []) ||
+      isThenable(value) ||
+      membrane.seenRaw.has(value)
+    ) {
+      return nativeOperationFailed();
+    }
+    membrane.seenRaw.add(value);
+    const publicEvidence = FREEZE({});
+    membrane.publicToRaw.set(publicEvidence, value);
+    return publicEvidence as CredentialStoreWholePassEvidence;
+  } catch {
+    return nativeOperationFailed();
+  }
+}
+
+function claimWholePassEvidence(
+  value: unknown,
+  membrane: WholePassEvidenceMembrane,
+): object {
+  try {
+    if (value === null || typeof value !== "object") {
+      return invalidAdapterRequest();
+    }
+    const rawEvidence = membrane.publicToRaw.get(value);
+    membrane.publicToRaw.delete(value);
+    if (rawEvidence === undefined) {
+      return invalidAdapterRequest();
+    }
+    return rawEvidence;
+  } catch {
+    return invalidAdapterRequest();
+  }
+}
+
 function parseReadBoundedOptions(options: unknown): number | undefined {
   try {
     if (
@@ -940,6 +1271,196 @@ function wrapReadHandle(
       callRawVoid(rawMethod(raw, "close"), raw.receiver);
     },
   });
+}
+
+function normalizeObservationEntryResult(
+  value: unknown,
+  parent: ChildLifecycleState,
+): CredentialStoreObservationEntryResult {
+  let possibleFile: unknown;
+  try {
+    if (!isRecord(value)) {
+      return nativeOperationFailed();
+    }
+    const status = captureRawField(value, "status");
+    if (
+      status === "opened" &&
+      Reflect.apply(HAS_OWN, value, ["file"])
+    ) {
+      possibleFile = captureRawField(value, "file");
+    }
+    if (
+      status === "missing" &&
+      hasExactOwnKeys(value, ["status"])
+    ) {
+      return FREEZE({ status: "missing" as const });
+    }
+    if (
+      !hasExactOwnKeys(value, [
+        "attestation",
+        "file",
+        "status",
+      ])
+    ) {
+      return nativeOperationFailed();
+    }
+    if (status !== "opened") {
+      return nativeOperationFailed();
+    }
+    return FREEZE({
+      status: "opened" as const,
+      attestation: normalizeFileAttestation(
+        captureRawField(value, "attestation"),
+      ),
+      file: wrapReadHandle(possibleFile, parent),
+    });
+  } catch {
+    bestEffortRawTerminal(possibleFile, "close");
+    return nativeOperationFailed();
+  }
+}
+
+function wrapObservationDirectory(
+  value: unknown,
+  evidence: WholePassEvidenceMembrane,
+): CredentialStoreObservationDirectoryHandle {
+  const raw = captureRawHandle(value, OBSERVATION_DIRECTORY_HANDLE_KEYS);
+  const state: ObservationDirectoryMembraneState = {
+    active: true,
+    finished: false,
+    evidence,
+    children: {
+      active: true,
+      children: new Set<InvalidatableHandle>(),
+    },
+  };
+
+  function ensureObserving(): void {
+    ensureActive(state.active && !state.finished);
+  }
+
+  function invalidateChildren(): void {
+    state.children.active = false;
+    for (const child of [...state.children.children]) {
+      child.invalidate();
+    }
+    state.children.children.clear();
+  }
+
+  function invalidate(): void {
+    if (!state.active) {
+      return;
+    }
+    state.active = false;
+    invalidateChildren();
+  }
+
+  return FREEZE<CredentialStoreObservationDirectoryHandle>({
+    async attest() {
+      ensureObserving();
+      const result = normalizeDirectoryAttestation(
+        callRaw(rawMethod(raw, "attest"), raw.receiver, []),
+      );
+      ensureObserving();
+      return result;
+    },
+    async observeEntry(options) {
+      let entry: CredentialManagedEntry;
+      try {
+        if (
+          !isRecord(options) ||
+          !hasExactOwnKeys(options, OBSERVATION_ENTRY_OPTIONS_KEYS) ||
+          options.noFollow !== true
+        ) {
+          return invalidAdapterRequest();
+        }
+        entry = normalizeManagedEntry(options.entry);
+      } catch {
+        return invalidAdapterRequest();
+      }
+      ensureObserving();
+      const result = normalizeObservationEntryResult(
+        callRaw(rawMethod(raw, "observeEntry"), raw.receiver, [
+          FREEZE({ entry, noFollow: true as const }),
+        ]),
+        state.children,
+      );
+      ensureObserving();
+      return result;
+    },
+    async listTemporaryEntries() {
+      ensureObserving();
+      const result = normalizeTemporaryEntries(
+        callRaw(
+          rawMethod(raw, "listTemporaryEntries"),
+          raw.receiver,
+          [],
+        ),
+      );
+      ensureObserving();
+      return result;
+    },
+    async finishObservation() {
+      ensureObserving();
+      state.finished = true;
+      invalidateChildren();
+      const result = mintWholePassEvidence(
+        callRaw(rawMethod(raw, "finishObservation"), raw.receiver, []),
+        state.evidence,
+      );
+      ensureActive(state.active);
+      return result;
+    },
+    async close() {
+      ensureActive(state.active);
+      invalidate();
+      callRawVoid(rawMethod(raw, "close"), raw.receiver);
+    },
+  });
+}
+
+function normalizeObservationDirectoryOpenResult(
+  value: unknown,
+  evidence: WholePassEvidenceMembrane,
+): CredentialStoreObservationDirectoryOpenResult {
+  let possibleDirectory: unknown;
+  try {
+    if (!isRecord(value)) {
+      return nativeOperationFailed();
+    }
+    const status = captureRawField(value, "status");
+    if (
+      status === "opened" &&
+      Reflect.apply(HAS_OWN, value, ["directory"])
+    ) {
+      possibleDirectory = captureRawField(value, "directory");
+    }
+    if (
+      status === "missing" &&
+      hasExactOwnKeys(value, ["evidence", "status"])
+    ) {
+      return FREEZE({
+        status: "missing" as const,
+        evidence: mintWholePassEvidence(
+          captureRawField(value, "evidence"),
+          evidence,
+        ),
+      });
+    }
+    if (!hasExactOwnKeys(value, ["directory", "status"])) {
+      return nativeOperationFailed();
+    }
+    if (status !== "opened") {
+      return nativeOperationFailed();
+    }
+    return FREEZE({
+      status: "opened" as const,
+      directory: wrapObservationDirectory(possibleDirectory, evidence),
+    });
+  } catch {
+    bestEffortRawTerminal(possibleDirectory, "close");
+    return nativeOperationFailed();
+  }
 }
 
 function wrapPrivateDirectory(
@@ -1372,35 +1893,15 @@ function wrapMutationLease(value: unknown): CredentialStoreMutationLease {
     },
     async listTemporaryEntries() {
       ensureActive(state.active);
-      const result = callRaw(
-        rawMethod(raw, "listTemporaryEntries"),
-        raw.receiver,
-        [],
+      const entries = normalizeTemporaryEntries(
+        callRaw(
+          rawMethod(raw, "listTemporaryEntries"),
+          raw.receiver,
+          [],
+        ),
       );
-      try {
-        if (!ARRAY_IS_ARRAY(result)) {
-          return nativeOperationFailed();
-        }
-        const length = result.length;
-        if (
-          !Number.isSafeInteger(length) ||
-          length < 0 ||
-          length > MAX_NATIVE_TEMPORARY_ENTRIES
-        ) {
-          return nativeOperationFailed();
-        }
-        const entries: CredentialTemporaryEntry[] = [];
-        for (let index = 0; index < length; index += 1) {
-          if (!Reflect.apply(HAS_OWN, result, [index])) {
-            return nativeOperationFailed();
-          }
-          entries[index] = normalizeTemporaryEntry(result[index]);
-        }
-        ensureActive(state.active);
-        return FREEZE(entries);
-      } catch {
-        return nativeOperationFailed();
-      }
+      ensureActive(state.active);
+      return entries;
     },
     async createTemporaryExclusive(options) {
       let entry: CredentialTemporaryEntry;
@@ -1573,9 +2074,94 @@ function normalizeAcquireResult(
   }
 }
 
+function normalizeObservedAcquireResult(
+  value: unknown,
+): CredentialObservedSetupLeaseAcquireResult {
+  let possibleLease: unknown;
+  try {
+    if (!isRecord(value)) {
+      return nativeOperationFailed();
+    }
+    const status = captureRawField(value, "status");
+    if (
+      status === "acquired" &&
+      Reflect.apply(HAS_OWN, value, ["lease"])
+    ) {
+      possibleLease = captureRawField(value, "lease");
+    }
+    if (
+      (status === "busy" || status === "precondition-failed") &&
+      hasExactOwnKeys(value, ["status"])
+    ) {
+      return FREEZE({ status });
+    }
+    if (
+      !hasExactOwnKeys(value, [
+        "directory",
+        "lease",
+        "priorLease",
+        "status",
+      ])
+    ) {
+      return nativeOperationFailed();
+    }
+    const priorLease = captureRawField(value, "priorLease");
+    const directory = captureRawField(value, "directory");
+    if (
+      status !== "acquired" ||
+      (priorLease !== "absent" && priorLease !== "proven-abandoned") ||
+      (directory !== "created" && directory !== "existing")
+    ) {
+      return nativeOperationFailed();
+    }
+    return FREEZE({
+      status: "acquired" as const,
+      priorLease,
+      directory,
+      lease: wrapMutationLease(possibleLease),
+    });
+  } catch {
+    bestEffortRawTerminal(possibleLease, "abandon");
+    return nativeOperationFailed();
+  }
+}
+
 function wrapAdapterPair(
   pair: NativeCredentialAdapterPairSnapshot,
+  configuration: Readonly<NativeCredentialStoreConfiguration>,
 ): Exclude<NativeCredentialStoreLoadResult, { status: "unavailable" }> {
+  const wholePassEvidence: WholePassEvidenceMembrane = {
+    publicToRaw: new WeakMap<object, object>(),
+    seenRaw: new WeakSet<object>(),
+  };
+  const legacy = FREEZE<LegacyCredentialReadAdapter>({
+    async read(source, path, options) {
+      let valid = false;
+      try {
+        valid = validLegacyReadRequest(
+          source,
+          path,
+          options,
+          configuration.legacyPaths,
+        );
+      } catch {
+        valid = false;
+      }
+      if (!valid) {
+        return invalidAdapterRequest();
+      }
+      return normalizeLegacyReadResult(
+        callRaw(pair.readLegacy, pair.legacyReceiver, [
+          source,
+          path,
+          FREEZE({
+            maxBytes: MAX_LEGACY_READ_BYTES,
+            noFollow: true as const,
+          }),
+        ]),
+      );
+    },
+  });
   const read = FREEZE<CredentialStoreReadAdapter>({
     async openPrivateDirectory(directory, options) {
       let valid = false;
@@ -1588,14 +2174,38 @@ function wrapAdapterPair(
         return invalidAdapterRequest();
       }
       return normalizeDirectoryOpenResult(
-        callRaw(pair.openPrivateDirectory, pair.readReceiver, [
+        callRaw(pair.openReadPrivateDirectory, pair.readReceiver, [
           directory,
           FREEZE({ noFollow: true as const }),
         ]),
       );
     },
   });
-  const mutation = FREEZE<CredentialStoreMutationAdapter>({
+  const observation = FREEZE<CredentialStoreObservationAdapter>({
+    async openPrivateDirectory(directory, options) {
+      let valid = false;
+      try {
+        valid = validReadRequest(directory, options);
+      } catch {
+        valid = false;
+      }
+      if (!valid) {
+        return invalidAdapterRequest();
+      }
+      return normalizeObservationDirectoryOpenResult(
+        callRaw(
+          pair.openObservationPrivateDirectory,
+          pair.observationReceiver,
+          [
+            directory,
+            FREEZE({ noFollow: true as const }),
+          ],
+        ),
+        wholePassEvidence,
+      );
+    },
+  });
+  const mutation = FREEZE<CredentialStoreObservedMutationAdapter>({
     async acquireSetupLease(directory, options) {
       let nonce: CredentialSetupLeaseNonce | undefined;
       try {
@@ -1617,11 +2227,49 @@ function wrapAdapterPair(
         ]),
       );
     },
+    async acquireObservedSetupLease(directory, options) {
+      let publicEvidence: unknown;
+      try {
+        publicEvidence = parseObservedMutationRequest(directory, options);
+      } catch {
+        publicEvidence = undefined;
+      }
+      if (publicEvidence === undefined) {
+        return invalidAdapterRequest();
+      }
+      const rawEvidence = claimWholePassEvidence(
+        publicEvidence,
+        wholePassEvidence,
+      );
+      let nonce: CredentialSetupLeaseNonce;
+      try {
+        const generated = RANDOM_UUID();
+        if (!LOWERCASE_UUID_V4.test(generated)) {
+          return nativeOperationFailed();
+        }
+        nonce = generated as CredentialSetupLeaseNonce;
+      } catch {
+        return nativeOperationFailed();
+      }
+      return normalizeObservedAcquireResult(
+        callRaw(pair.acquireObservedSetupLease, pair.mutationReceiver, [
+          directory,
+          FREEZE({
+            createDirectory: true as const,
+            evidence: rawEvidence,
+            noFollow: true as const,
+            nonce,
+          }),
+        ]),
+      );
+    },
   });
 
   return FREEZE({
     status: "available" as const,
+    legacy,
     read,
+    observation,
     mutation,
   });
 }
@@ -1629,6 +2277,7 @@ function wrapAdapterPair(
 function loadOnce(
   target: NativeCredentialTarget,
   resolve: (target: NativeCredentialTarget) => unknown,
+  configuration: Readonly<NativeCredentialStoreConfiguration>,
   wasReentered: () => boolean,
 ): NativeCredentialStoreLoadResult {
   try {
@@ -1646,14 +2295,16 @@ function loadOnce(
     const adapters = Reflect.apply(
       descriptor.createAdapters,
       descriptor.receiver,
-      [],
+      [configuration],
     );
     suppressUnexpectedPromiseRejection(adapters);
     if (wasReentered() || isThenable(adapters)) {
       return UNAVAILABLE;
     }
     const pair = parseAdapterPair(adapters);
-    return pair === undefined ? UNAVAILABLE : wrapAdapterPair(pair);
+    return pair === undefined
+      ? UNAVAILABLE
+      : wrapAdapterPair(pair, configuration);
   } catch {
     return UNAVAILABLE;
   }
@@ -1662,16 +2313,28 @@ function loadOnce(
 export function createNativeCredentialStoreProvider(
   target: NativeCredentialTarget,
   resolve: NativeCredentialModuleResolver,
+  configuration: NativeCredentialStoreConfiguration,
 ): NativeCredentialStoreProvider {
   let configured:
     | Readonly<{
         target: NativeCredentialTarget;
         resolve: (target: NativeCredentialTarget) => unknown;
+        configuration: Readonly<NativeCredentialStoreConfiguration>;
       }>
     | undefined;
   try {
-    if (RECOGNIZED_TARGETS.has(target) && typeof resolve === "function") {
-      configured = Object.freeze({ target, resolve });
+    const normalizedConfiguration =
+      normalizeProviderConfiguration(configuration);
+    if (
+      RECOGNIZED_TARGETS.has(target) &&
+      typeof resolve === "function" &&
+      normalizedConfiguration !== undefined
+    ) {
+      configured = Object.freeze({
+        target,
+        resolve,
+        configuration: normalizedConfiguration,
+      });
     }
   } catch {
     configured = undefined;
@@ -1699,6 +2362,7 @@ export function createNativeCredentialStoreProvider(
             : loadOnce(
                 configured.target,
                 configured.resolve,
+                configured.configuration,
                 () => reentered,
               );
         cached = reentered ? UNAVAILABLE : result;

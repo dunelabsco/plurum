@@ -28,6 +28,17 @@ const posixPlatformSourcePath = join(
 );
 const macosAclManifestPath = join(crateRoot, "macos-acl", "Cargo.toml");
 const macosAclSourcePath = join(crateRoot, "macos-acl", "src", "lib.rs");
+const secretMemoryManifestPath = join(
+  crateRoot,
+  "secret-memory",
+  "Cargo.toml",
+);
+const secretMemorySourcePath = join(
+  crateRoot,
+  "secret-memory",
+  "src",
+  "lib.rs",
+);
 const windowsSourcePath = join(crateRoot, "src", "windows.rs");
 const windowsMutationSourcePath = join(
   crateRoot,
@@ -168,6 +179,8 @@ for (const path of [
   posixPlatformSourcePath,
   macosAclManifestPath,
   macosAclSourcePath,
+  secretMemoryManifestPath,
+  secretMemorySourcePath,
   windowsSourcePath,
   windowsMutationSourcePath,
   windowsSyscallManifestPath,
@@ -243,6 +256,7 @@ assert.deepEqual(
   [
     "plurum-native-credential-store",
     "plurum-native-macos-acl",
+    "plurum-native-secret-memory",
     "plurum-windows-syscall",
   ],
 );
@@ -313,6 +327,15 @@ assert.deepEqual(dependencies, [
     defaultFeatures: true,
     features: ["test-support"],
     target: 'cfg(target_os = "macos")',
+  },
+  {
+    name: "plurum-native-secret-memory",
+    requirement: "*",
+    kind: null,
+    optional: false,
+    defaultFeatures: true,
+    features: [],
+    target: null,
   },
   {
     name: "plurum-windows-syscall",
@@ -428,6 +451,76 @@ assert.deepEqual([...macosAclNode.features].sort(), [
   "default",
   "test-support",
 ]);
+
+const secretMemoryDependency = rootNode.deps.find(
+  ({ name }) => name === "plurum_native_secret_memory",
+);
+assert.ok(
+  secretMemoryDependency,
+  "Cargo resolution must contain the secret-memory boundary",
+);
+const secretMemoryPackage = cargo.packages.find(
+  ({ id }) => id === secretMemoryDependency.pkg,
+);
+assert.ok(
+  secretMemoryPackage,
+  "Cargo metadata must describe the local secret-memory boundary",
+);
+assert.equal(
+  realpathSync(secretMemoryPackage.manifest_path),
+  realpathSync(secretMemoryManifestPath),
+);
+assert.equal(secretMemoryPackage.name, "plurum-native-secret-memory");
+assert.equal(secretMemoryPackage.version, "0.0.0-development");
+assert.equal(secretMemoryPackage.edition, "2021");
+assert.equal(secretMemoryPackage.rust_version, "1.88");
+assert.equal(secretMemoryPackage.license, "Apache-2.0");
+assert.deepEqual(secretMemoryPackage.publish, []);
+assert.deepEqual(secretMemoryPackage.features, {});
+assert.deepEqual(
+  secretMemoryPackage.dependencies.map((dependency) => ({
+    name: dependency.name,
+    requirement: dependency.req,
+    kind: dependency.kind,
+    optional: dependency.optional,
+    defaultFeatures: dependency.uses_default_features,
+    features: [...dependency.features].sort(),
+    target: dependency.target,
+  })),
+  [
+    {
+      name: "napi",
+      requirement: "=3.10.5",
+      kind: null,
+      optional: false,
+      defaultFeatures: false,
+      features: ["dyn-symbols", "napi8"],
+      target: null,
+    },
+  ],
+);
+assert.equal(secretMemoryPackage.targets.length, 1);
+const secretMemoryLibrary = secretMemoryPackage.targets[0];
+assert.deepEqual(secretMemoryLibrary.kind, ["lib"]);
+assert.deepEqual(secretMemoryLibrary.crate_types, ["lib"]);
+assert.equal(
+  realpathSync(secretMemoryLibrary.src_path),
+  realpathSync(secretMemorySourcePath),
+);
+const secretMemoryNode = cargo.resolve.nodes.find(
+  ({ id }) => id === secretMemoryPackage.id,
+);
+assert.ok(
+  secretMemoryNode,
+  "Cargo resolution must describe the secret-memory boundary",
+);
+const secretMemoryNapiDependency = secretMemoryNode.deps.find(
+  ({ name }) => name === "napi",
+);
+assert.ok(
+  secretMemoryNapiDependency,
+  "secret-memory must resolve through the audited napi package",
+);
 
 const windowsSyscallDependency = rootNode.deps.find(
   ({ name }) => name === "plurum_windows_syscall",
@@ -560,6 +653,11 @@ assert.ok(napiDependency, "Cargo resolution must contain napi");
 const napiPackage = cargo.packages.find(({ id }) => id === napiDependency.pkg);
 assert.ok(napiPackage, "Cargo metadata must describe the resolved napi package");
 assert.equal(napiPackage.version, "3.10.5");
+assert.equal(
+  secretMemoryNapiDependency.pkg,
+  napiPackage.id,
+  "secret-memory and the bridge must share the exact audited napi package",
+);
 const napiNode = cargo.resolve.nodes.find(({ id }) => id === napiPackage.id);
 assert.ok(napiNode, "Cargo resolution must describe napi features");
 assert.deepEqual([...napiNode.features].sort(), [

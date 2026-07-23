@@ -5,10 +5,12 @@ use std::os::windows::io::AsHandle;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
+use plurum_native_secret_memory::zeroize_bytes;
 use plurum_windows_syscall::{
-    attest_local_ntfs, attest_security, create_private_directory, create_private_file,
-    file_identity, file_standard, flush_file, try_lock_exclusive, unlock, DirectoryCreateAttempt,
-    FileCreateAttempt, LockAttempt, ProcessIdentity, SecurityKind, WinError,
+    attest_local_ntfs, attest_no_untrusted_namespace_control, attest_security,
+    create_private_directory, create_private_file, file_identity, file_standard, flush_file,
+    remove_by_handle, try_lock_exclusive, unlock, DirectoryCreateAttempt, FileCreateAttempt,
+    LockAttempt, MutationAttempt, ProcessIdentity, SecurityKind, WinError,
 };
 use sha2::{Digest, Sha256};
 
@@ -17,7 +19,8 @@ mod mutation;
 pub(crate) use mutation::{
     CanonicalEntryRole, ConditionalMutationResult, ExclusiveCreateResult, ExpectedEntrySnapshot,
     ManagedEntry, ManagedEntryObservation, MissingEntrySnapshot, PresentEntrySnapshot,
-    TemporaryEntry, TemporaryEntryRole, WindowsExclusiveWriteHandle, WindowsLeaseReadHandle,
+    PrivateManagedEntryObservation, TemporaryEntry, TemporaryEntryRole,
+    WindowsExclusiveWriteHandle, WindowsLeaseReadHandle,
 };
 
 const CREDENTIAL_ENTRY: &str = "credentials.json";
@@ -53,6 +56,37 @@ const LOCK_HEADER_END: usize = LOCK_HEADER_START + LOCK_HEADER.len();
 const LOCK_NONCE_START: usize = 16;
 const LOCK_NONCE_LENGTH: usize = 36;
 const LOCK_NONCE_END: usize = LOCK_NONCE_START + LOCK_NONCE_LENGTH;
+
+#[cfg(test)]
+const TEST_OBSERVED_ACQUIRE_BUSY_AFTER_PREPARE: u8 = 1;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_OBSERVED_ACQUIRE_FAULT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn inject_observed_acquire_fault(fault: u8) {
+    TEST_OBSERVED_ACQUIRE_FAULT.with(|slot| {
+        assert_eq!(
+            slot.replace(fault),
+            0,
+            "observed-acquire fault already armed"
+        );
+    });
+}
+
+#[cfg(test)]
+fn take_observed_acquire_fault(fault: u8) -> bool {
+    TEST_OBSERVED_ACQUIRE_FAULT.with(|slot| {
+        if slot.get() == fault {
+            slot.set(0);
+            true
+        } else {
+            false
+        }
+    })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowsStoreError {
@@ -321,6 +355,24 @@ fn open_directory_nofollow(path: &Path, relaxed_root_sharing: bool) -> std::io::
         .open(path)
 }
 
+fn open_directory_delete_nofollow(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .access_mode(GENERIC_READ | READ_CONTROL | DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+fn open_object_nofollow(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .access_mode(GENERIC_READ | READ_CONTROL)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
 fn open_file_nofollow(
     path: &Path,
     writable: bool,
@@ -344,6 +396,15 @@ fn open_file_nofollow(
         )
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     options.open(path)
+}
+
+fn open_legacy_file_nofollow(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .access_mode(GENERIC_READ | READ_CONTROL)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
 }
 
 fn classify_path_error(error: std::io::Error) -> WindowsStoreError {
@@ -620,6 +681,115 @@ pub(crate) struct EnsuredPrivateDirectory {
     pub(crate) directory: WindowsPrivateDirectory,
 }
 
+pub(crate) struct MissingDirectoryBinding {
+    process: ProcessIdentity,
+    path: NormalizedAbsolutePath,
+    parent_chain: OpenedDirectoryChain,
+    parent_identities: Vec<ObjectIdentity>,
+}
+
+impl MissingDirectoryBinding {
+    fn parent_is_current(
+        &self,
+        expected_path: &NormalizedAbsolutePath,
+    ) -> Result<bool, WindowsStoreError> {
+        self.process.verify().map_err(|_| WindowsStoreError::Lost)?;
+        if self.path != *expected_path {
+            return Ok(false);
+        }
+        let retained = self
+            .parent_chain
+            .ancestors
+            .iter()
+            .chain(std::iter::once(&self.parent_chain.leaf))
+            .map(metadata)
+            .collect::<Result<Vec<_>, _>>()?;
+        if retained.len() != self.parent_identities.len()
+            || retained.iter().any(|facts| {
+                facts.kind != ObjectKind::Directory
+                    || facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            })
+            || !retained
+                .iter()
+                .map(|facts| facts.identity)
+                .eq(self.parent_identities.iter().copied())
+        {
+            return Ok(false);
+        }
+        let reopened = match expected_path.open_parent() {
+            Ok(chain) => chain,
+            Err(
+                WindowsStoreError::Missing | WindowsStoreError::Unsafe | WindowsStoreError::Lost,
+            ) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let reopened = reopened
+            .ancestors
+            .iter()
+            .chain(std::iter::once(&reopened.leaf))
+            .map(metadata)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(reopened.len() == self.parent_identities.len()
+            && reopened.iter().all(|facts| {
+                facts.kind == ObjectKind::Directory
+                    && facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            })
+            && reopened
+                .iter()
+                .map(|facts| facts.identity)
+                .eq(self.parent_identities.iter().copied()))
+    }
+
+    fn target_is_missing(
+        &self,
+        expected_path: &NormalizedAbsolutePath,
+    ) -> Result<bool, WindowsStoreError> {
+        if !self.parent_is_current(expected_path)? {
+            return Ok(false);
+        }
+        match open_object_nofollow(&expected_path.path) {
+            Ok(_) => Ok(false),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
+                ) =>
+            {
+                Ok(true)
+            }
+            Err(_) => Err(WindowsStoreError::Unsafe),
+        }
+    }
+}
+
+pub(crate) fn observe_missing_private_directory(
+    path: &Path,
+) -> Result<Option<MissingDirectoryBinding>, WindowsStoreError> {
+    let process = ProcessIdentity::capture().map_err(map_win)?;
+    let path = NormalizedAbsolutePath::parse(path)?;
+    let parent_chain = path.open_parent()?;
+    let parent_identities = parent_chain
+        .ancestors
+        .iter()
+        .chain(std::iter::once(&parent_chain.leaf))
+        .map(metadata)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|facts| facts.identity)
+        .collect::<Vec<_>>();
+    let binding = MissingDirectoryBinding {
+        process,
+        path,
+        parent_chain,
+        parent_identities,
+    };
+    if binding.target_is_missing(&binding.path)? {
+        Ok(Some(binding))
+    } else {
+        Ok(None)
+    }
+}
+
 fn directory_from_parts(
     process: ProcessIdentity,
     path: NormalizedAbsolutePath,
@@ -637,6 +807,72 @@ fn directory_from_parts(
                 children: Vec::new(),
             }),
         }),
+    }
+}
+
+fn remove_exact_created_directory(
+    binding: &MissingDirectoryBinding,
+    path: &NormalizedAbsolutePath,
+    expected: ObjectIdentity,
+    pinned: Option<File>,
+) -> Result<(), WindowsStoreError> {
+    if let Some(pinned) = pinned {
+        let facts = metadata(&pinned)?;
+        let security = attest_security(
+            pinned.as_handle(),
+            &binding.process,
+            SecurityKind::Directory,
+        )
+        .map_err(map_win)?;
+        if facts.identity != expected
+            || facts.kind != ObjectKind::Directory
+            || facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !security.owner_current
+            || !security.exact_protected_dacl
+            || !security.semantic_medium_label
+        {
+            return Err(WindowsStoreError::Lost);
+        }
+        drop(pinned);
+    }
+    let opened = open_directory_delete_nofollow(&path.path).map_err(|_| WindowsStoreError::Lost)?;
+    let facts = metadata(&opened)?;
+    let security = attest_security(
+        opened.as_handle(),
+        &binding.process,
+        SecurityKind::Directory,
+    )
+    .map_err(map_win)?;
+    if facts.identity != expected
+        || facts.kind != ObjectKind::Directory
+        || facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || !security.owner_current
+        || !security.exact_protected_dacl
+        || !security.semantic_medium_label
+    {
+        return Err(WindowsStoreError::Lost);
+    }
+    match remove_by_handle(opened.as_handle()).map_err(map_win)? {
+        MutationAttempt::Applied => {}
+        MutationAttempt::Conflict => return Err(WindowsStoreError::Lost),
+        MutationAttempt::Unsupported => return Err(WindowsStoreError::Unsupported),
+    }
+    drop(opened);
+    if binding.parent_is_current(path)? {
+        match open_object_nofollow(&path.path) {
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
+                ) =>
+            {
+                Ok(())
+            }
+            Ok(current) if metadata(&current)?.identity != expected => Ok(()),
+            _ => Err(WindowsStoreError::Lost),
+        }
+    } else {
+        Ok(())
     }
 }
 
@@ -821,7 +1057,7 @@ impl WindowsCredentialReadHandle {
             match self.security_locked(&directory_state, file) {
                 Ok(value) => value,
                 Err(error) => {
-                    bytes.fill(0);
+                    zeroize_bytes(bytes.as_mut_slice());
                     return Err(error);
                 }
             };
@@ -829,7 +1065,7 @@ impl WindowsCredentialReadHandle {
             || before_security != after_security
             || before_descriptor != after_descriptor
         {
-            bytes.fill(0);
+            zeroize_bytes(bytes.as_mut_slice());
             return Err(WindowsStoreError::Lost);
         }
         let revision = digest_metadata(
@@ -840,7 +1076,7 @@ impl WindowsCredentialReadHandle {
             &after_descriptor,
             &bytes,
         );
-        bytes.fill(0);
+        zeroize_bytes(bytes.as_mut_slice());
         Ok(CredentialFileAttestation {
             security: after_security,
             revision,
@@ -864,7 +1100,7 @@ impl WindowsCredentialReadHandle {
             match self.security_locked(&directory_state, file) {
                 Ok(value) => value,
                 Err(error) => {
-                    bytes.fill(0);
+                    zeroize_bytes(bytes.as_mut_slice());
                     return Err(error);
                 }
             };
@@ -872,7 +1108,7 @@ impl WindowsCredentialReadHandle {
             || before_security != after_security
             || before_descriptor != after_descriptor
         {
-            bytes.fill(0);
+            zeroize_bytes(bytes.as_mut_slice());
             return Err(WindowsStoreError::Lost);
         }
         Ok(BoundedRead {
@@ -903,14 +1139,14 @@ fn read_up_to_at(file: &File, max_bytes: usize) -> Result<Vec<u8>, WindowsStoreE
         let position = match u64::try_from(offset) {
             Ok(position) => position,
             Err(_) => {
-                bytes.fill(0);
+                zeroize_bytes(bytes.as_mut_slice());
                 return Err(WindowsStoreError::Limit);
             }
         };
         let read = match file.seek_read(&mut bytes[offset..], position) {
             Ok(read) => read,
             Err(_) => {
-                bytes.fill(0);
+                zeroize_bytes(bytes.as_mut_slice());
                 return Err(WindowsStoreError::Io);
             }
         };
@@ -928,7 +1164,7 @@ fn read_exact_at(file: &File, expected: usize) -> Result<Vec<u8>, WindowsStoreEr
     if bytes.len() == expected {
         Ok(bytes)
     } else {
-        bytes.fill(0);
+        zeroize_bytes(bytes.as_mut_slice());
         Err(WindowsStoreError::Lost)
     }
 }
@@ -950,6 +1186,196 @@ fn write_all_at(file: &File, bytes: &[u8], start: u64) -> Result<(), WindowsStor
     Ok(())
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum LegacyCredentialReadResult {
+    Missing,
+    Unsafe,
+    Malformed,
+    Loaded(Vec<u8>),
+    Oversized,
+}
+
+fn legacy_parent_chain_is_stable(
+    path: &NormalizedAbsolutePath,
+    retained: &OpenedDirectoryChain,
+    identities: &[ObjectIdentity],
+    process: &ProcessIdentity,
+) -> Result<bool, WindowsStoreError> {
+    process.verify().map_err(|_| WindowsStoreError::Lost)?;
+    let retained_facts = retained
+        .ancestors
+        .iter()
+        .chain(std::iter::once(&retained.leaf))
+        .map(metadata)
+        .collect::<Result<Vec<_>, _>>()?;
+    if retained_facts.len() != identities.len()
+        || retained_facts.iter().any(|facts| {
+            facts.kind != ObjectKind::Directory
+                || facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        })
+        || !retained_facts
+            .iter()
+            .map(|facts| facts.identity)
+            .eq(identities.iter().copied())
+    {
+        return Ok(false);
+    }
+    // Walk outward from the direct parent. An exact protected current-user directory is a complete
+    // authority anchor, so broader host-managed ancestors above it need only remain pinned by their
+    // retained no-delete handles. Without such an anchor, every named component must pass the
+    // explicit owner/DACL namespace-control predicate. The fixed local NTFS drive root is the
+    // volume anchor and cannot itself be renamed.
+    let named_directories = retained
+        .ancestors
+        .iter()
+        .chain(std::iter::once(&retained.leaf))
+        .skip(1)
+        .collect::<Vec<_>>();
+    for directory in named_directories.into_iter().rev() {
+        let security = attest_security(directory.as_handle(), process, SecurityKind::Directory)
+            .map_err(map_win)?;
+        if security.owner_current && security.exact_protected_dacl && security.semantic_medium_label
+        {
+            break;
+        }
+        if !attest_no_untrusted_namespace_control(directory.as_handle(), process)
+            .map_err(map_win)?
+        {
+            return Ok(false);
+        }
+    }
+
+    let reopened = match path.open_parent() {
+        Ok(reopened) => reopened,
+        Err(WindowsStoreError::Missing | WindowsStoreError::Unsafe | WindowsStoreError::Lost) => {
+            return Ok(false)
+        }
+        Err(error) => return Err(error),
+    };
+    let reopened_facts = reopened
+        .ancestors
+        .iter()
+        .chain(std::iter::once(&reopened.leaf))
+        .map(metadata)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(reopened_facts.len() == identities.len()
+        && reopened_facts.iter().all(|facts| {
+            facts.kind == ObjectKind::Directory
+                && facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        })
+        && reopened_facts
+            .iter()
+            .map(|facts| facts.identity)
+            .eq(identities.iter().copied()))
+}
+
+pub(crate) fn read_allowlisted_legacy_credential(
+    path: &Path,
+    expected_leaf: &OsStr,
+    max_bytes: usize,
+) -> Result<LegacyCredentialReadResult, WindowsStoreError> {
+    if max_bytes >= MAX_ATTESTED_BYTES {
+        return Err(WindowsStoreError::Limit);
+    }
+    if !is_single_entry_name(expected_leaf) {
+        return Err(WindowsStoreError::InvalidInput);
+    }
+    let path = NormalizedAbsolutePath::parse(path)?;
+    if path.path.file_name() != Some(expected_leaf) {
+        return Ok(LegacyCredentialReadResult::Unsafe);
+    }
+    let process = ProcessIdentity::capture().map_err(map_win)?;
+    let parent = match path.open_parent() {
+        Ok(parent) => parent,
+        Err(WindowsStoreError::Missing) => return Ok(LegacyCredentialReadResult::Missing),
+        Err(error) => return Err(error),
+    };
+    let parent_facts = parent
+        .ancestors
+        .iter()
+        .chain(std::iter::once(&parent.leaf))
+        .map(metadata)
+        .collect::<Result<Vec<_>, _>>()?;
+    let parent_identities = parent_facts
+        .iter()
+        .map(|facts| facts.identity)
+        .collect::<Vec<_>>();
+    if !legacy_parent_chain_is_stable(&path, &parent, &parent_identities, &process)? {
+        return Ok(LegacyCredentialReadResult::Unsafe);
+    }
+    let direct_parent = parent_facts
+        .last()
+        .ok_or(WindowsStoreError::InvalidInput)?
+        .identity;
+
+    let file = match open_legacy_file_nofollow(&path.path) {
+        Ok(file) => file,
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
+            ) =>
+        {
+            return Ok(LegacyCredentialReadResult::Missing);
+        }
+        Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
+            return Ok(LegacyCredentialReadResult::Unsafe);
+        }
+        Err(_) => return Err(WindowsStoreError::Io),
+    };
+    let before = metadata(&file)?;
+    let before_security =
+        attest_security(file.as_handle(), &process, SecurityKind::File).map_err(map_win)?;
+    if !before.exact_file()
+        || before.identity.volume != direct_parent.volume
+        || !before_security.owner_current
+        || !before_security.exact_protected_dacl
+        || !before_security.semantic_medium_label
+    {
+        return Ok(LegacyCredentialReadResult::Unsafe);
+    }
+    let rebound = match open_legacy_file_nofollow(&path.path) {
+        Ok(rebound) => rebound,
+        Err(_) => return Ok(LegacyCredentialReadResult::Unsafe),
+    };
+    if metadata(&rebound)?.identity != before.identity {
+        return Ok(LegacyCredentialReadResult::Unsafe);
+    }
+
+    let read_limit = max_bytes.checked_add(1).ok_or(WindowsStoreError::Limit)?;
+    let mut bytes = read_up_to_at(&file, read_limit)?;
+    let post_read = (|| {
+        let after = metadata(&file)?;
+        let after_security =
+            attest_security(file.as_handle(), &process, SecurityKind::File).map_err(map_win)?;
+        let stable = before == after
+            && before_security == after_security
+            && metadata(&rebound)?.identity == before.identity
+            && legacy_parent_chain_is_stable(&path, &parent, &parent_identities, &process)?;
+        Ok((after, stable))
+    })();
+    let (after, stable) = match post_read {
+        Ok(value) => value,
+        Err(error) => {
+            zeroize_bytes(bytes.as_mut_slice());
+            return Err(error);
+        }
+    };
+    if !stable {
+        zeroize_bytes(bytes.as_mut_slice());
+        return Ok(LegacyCredentialReadResult::Unsafe);
+    }
+    let end_of_file = u64::try_from(bytes.len()).ok() == Some(after.size);
+    if bytes.len() > max_bytes || !end_of_file {
+        zeroize_bytes(bytes.as_mut_slice());
+        return Ok(LegacyCredentialReadResult::Oversized);
+    }
+    if bytes.is_empty() {
+        return Ok(LegacyCredentialReadResult::Malformed);
+    }
+    Ok(LegacyCredentialReadResult::Loaded(bytes))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PriorLease {
     Absent,
@@ -964,6 +1390,21 @@ pub(crate) enum LeaseRenewal {
 
 pub(crate) enum SetupLeaseAcquireResult {
     Busy,
+    Acquired {
+        prior: PriorLease,
+        directory: DirectoryDisposition,
+        lease: WindowsSetupLease,
+    },
+}
+
+pub(crate) enum ObservedDirectoryExpectation<'a> {
+    Missing(&'a MissingDirectoryBinding),
+    Present,
+}
+
+pub(crate) enum ObservedSetupLeaseAcquireResult {
+    Busy,
+    PreconditionFailed,
     Acquired {
         prior: PriorLease,
         directory: DirectoryDisposition,
@@ -1091,9 +1532,24 @@ fn exact_setup_lock(
     directory: &WindowsPrivateDirectory,
     file: &File,
 ) -> Result<bool, WindowsStoreError> {
+    let facts = metadata(file)?;
+    if !secure_setup_lock_object(directory, file, facts)? {
+        return Ok(false);
+    }
+    let current_path = directory.core.path.path.join(SETUP_LOCK_ENTRY);
+    Ok(open_file_nofollow(&current_path, true, false, true)
+        .ok()
+        .and_then(|current| metadata(&current).ok())
+        .is_some_and(|current| current.identity == facts.identity && current.exact_file()))
+}
+
+fn secure_setup_lock_object(
+    directory: &WindowsPrivateDirectory,
+    file: &File,
+    facts: MetadataFacts,
+) -> Result<bool, WindowsStoreError> {
     let state = lock_unpoisoned(&directory.core.state)?;
     directory.core.require_secure_locked(&state)?;
-    let facts = metadata(file)?;
     let security = attest_security(
         file.as_handle(),
         &directory.core.process,
@@ -1107,16 +1563,12 @@ fn exact_setup_lock(
     {
         return Ok(false);
     }
-    let current_path = directory.core.path.path.join(SETUP_LOCK_ENTRY);
-    Ok(open_file_nofollow(&current_path, true, false, true)
-        .ok()
-        .and_then(|current| metadata(&current).ok())
-        .is_some_and(|current| current.identity == facts.identity && current.exact_file()))
+    Ok(true)
 }
 
 fn open_or_create_setup_lock(
     directory: &WindowsPrivateDirectory,
-) -> Result<(File, bool), WindowsStoreError> {
+) -> Result<(File, Option<ObjectIdentity>), WindowsStoreError> {
     let state = lock_unpoisoned(&directory.core.state)?;
     directory.core.require_secure_locked(&state)?;
     let path = directory.core.path.path.join(SETUP_LOCK_ENTRY);
@@ -1148,33 +1600,229 @@ fn open_or_create_setup_lock(
         Err(_) => return Err(WindowsStoreError::Unsafe),
     };
     drop(state);
-    if !exact_setup_lock(directory, &file)? {
-        return Err(WindowsStoreError::Unsafe);
-    }
-    Ok((file, created))
+    let created_identity = if created {
+        Some(metadata(&file)?.identity)
+    } else {
+        None
+    };
+    Ok((file, created_identity))
 }
 
-pub(crate) fn acquire_setup_lease(
+struct CreatedDirectoryRollback<'a> {
+    binding: &'a MissingDirectoryBinding,
+    path: NormalizedAbsolutePath,
+    identity: ObjectIdentity,
+}
+
+struct PreparedPrivateDirectory<'a> {
+    ensured: EnsuredPrivateDirectory,
+    rollback: Option<CreatedDirectoryRollback<'a>>,
+}
+
+enum DirectoryPreparation<'a> {
+    PreconditionFailed,
+    Ready(PreparedPrivateDirectory<'a>),
+}
+
+fn prepare_missing_directory<'a>(
     path: &Path,
-    nonce: &str,
-) -> Result<SetupLeaseAcquireResult, WindowsStoreError> {
-    let nonce = ValidatedUuidV4::parse(nonce)?;
-    let ensured = ensure_private_directory(path)?;
-    let directory_disposition = ensured.disposition;
-    let directory = ensured.directory;
-    let (lock, _created) = match open_or_create_setup_lock(&directory) {
+    binding: &'a MissingDirectoryBinding,
+) -> Result<DirectoryPreparation<'a>, WindowsStoreError> {
+    let path = NormalizedAbsolutePath::parse(path)?;
+    if !binding.target_is_missing(&path)? {
+        return Ok(DirectoryPreparation::PreconditionFailed);
+    }
+    match create_private_directory(&path.path, &binding.process).map_err(map_win)? {
+        DirectoryCreateAttempt::Conflict => return Ok(DirectoryPreparation::PreconditionFailed),
+        DirectoryCreateAttempt::Created => {}
+    }
+
+    let created =
+        open_directory_nofollow(&path.path, false).map_err(|_| WindowsStoreError::Lost)?;
+    let facts = metadata(&created)?;
+    let security = attest_security(
+        created.as_handle(),
+        &binding.process,
+        SecurityKind::Directory,
+    )
+    .map_err(map_win)?;
+    if facts.kind != ObjectKind::Directory
+        || facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || !security.owner_current
+        || !security.exact_protected_dacl
+        || !security.semantic_medium_label
+    {
+        remove_exact_created_directory(binding, &path, facts.identity, Some(created))?;
+        return Err(WindowsStoreError::Unsafe);
+    }
+    if !binding.parent_is_current(&path)? {
+        remove_exact_created_directory(binding, &path, facts.identity, Some(created))?;
+        return Ok(DirectoryPreparation::PreconditionFailed);
+    }
+
+    let parent = match path.open_parent() {
+        Ok(parent) => parent,
+        Err(error) => {
+            remove_exact_created_directory(binding, &path, facts.identity, Some(created))?;
+            return Err(error);
+        }
+    };
+    let directory = directory_from_parts(binding.process.clone(), path.clone(), parent, created);
+    let secure = lock_unpoisoned(&directory.core.state)
+        .and_then(|state| directory.core.require_secure_locked(&state));
+    if let Err(error) = secure {
+        drop(directory);
+        remove_exact_created_directory(binding, &path, facts.identity, None)?;
+        return Err(error);
+    }
+    if !binding.parent_is_current(&path)? {
+        drop(directory);
+        remove_exact_created_directory(binding, &path, facts.identity, None)?;
+        return Ok(DirectoryPreparation::PreconditionFailed);
+    }
+    Ok(DirectoryPreparation::Ready(PreparedPrivateDirectory {
+        ensured: EnsuredPrivateDirectory {
+            disposition: DirectoryDisposition::Created,
+            directory,
+        },
+        rollback: Some(CreatedDirectoryRollback {
+            binding,
+            path,
+            identity: facts.identity,
+        }),
+    }))
+}
+
+fn prepare_observed_directory<'a>(
+    path: &Path,
+    expectation: ObservedDirectoryExpectation<'a>,
+) -> Result<DirectoryPreparation<'a>, WindowsStoreError> {
+    match expectation {
+        ObservedDirectoryExpectation::Missing(binding) => prepare_missing_directory(path, binding),
+        ObservedDirectoryExpectation::Present => match open_private_directory(path)? {
+            PrivateDirectoryOpenResult::Missing => Ok(DirectoryPreparation::PreconditionFailed),
+            PrivateDirectoryOpenResult::Opened(directory) => {
+                Ok(DirectoryPreparation::Ready(PreparedPrivateDirectory {
+                    ensured: EnsuredPrivateDirectory {
+                        disposition: DirectoryDisposition::Existing,
+                        directory,
+                    },
+                    rollback: None,
+                }))
+            }
+        },
+    }
+}
+
+fn release_uncommitted_setup_lock(lock: File) -> Result<(), WindowsStoreError> {
+    let unlocked = unlock(lock.as_handle()).map_err(map_win);
+    drop(lock);
+    unlocked
+}
+
+fn cleanup_exact_created_setup_lock(
+    directory: &WindowsPrivateDirectory,
+    lock: File,
+    expected: ObjectIdentity,
+    locked: bool,
+) -> Result<(), WindowsStoreError> {
+    if metadata(&lock)?.identity != expected || !exact_setup_lock(directory, &lock)? {
+        drop(lock);
+        return Err(WindowsStoreError::Lost);
+    }
+    if locked {
+        release_uncommitted_setup_lock(lock)?;
+    } else {
+        drop(lock);
+    }
+
+    let path = directory.core.path.path.join(SETUP_LOCK_ENTRY);
+    let reopened = match open_file_nofollow(&path, true, true, true) {
+        Ok(file) => file,
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(_) => return Err(WindowsStoreError::Lost),
+    };
+    let reopened_facts = metadata(&reopened)?;
+    if reopened_facts.identity != expected
+        || !secure_setup_lock_object(directory, &reopened, reopened_facts)?
+    {
+        return Err(WindowsStoreError::Lost);
+    }
+    match remove_by_handle(reopened.as_handle()).map_err(map_win)? {
+        MutationAttempt::Applied => {}
+        MutationAttempt::Conflict => return Err(WindowsStoreError::Lost),
+        MutationAttempt::Unsupported => return Err(WindowsStoreError::Unsupported),
+    }
+    drop(reopened);
+    // Windows exposes no documented general directory-handle flush. The synchronous by-handle
+    // disposition plus retained-directory and exact path re-attestation is the supported
+    // completed-operation/process-crash barrier; this makes no physical power-loss claim.
+    {
+        let state = lock_unpoisoned(&directory.core.state)?;
+        directory.core.require_secure_locked(&state)?;
+    }
+    match open_object_nofollow(&path) {
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
+            ) =>
+        {
+            Ok(())
+        }
+        _ => Err(WindowsStoreError::Lost),
+    }
+}
+
+fn acquire_prepared_setup_lease<F>(
+    prepared: EnsuredPrivateDirectory,
+    nonce: ValidatedUuidV4,
+    validate: F,
+) -> Result<ObservedSetupLeaseAcquireResult, WindowsStoreError>
+where
+    F: FnOnce(&WindowsPrivateDirectory) -> Result<bool, WindowsStoreError>,
+{
+    let directory_disposition = prepared.disposition;
+    let directory = prepared.directory;
+    let (lock, created_identity) = match open_or_create_setup_lock(&directory) {
         Ok(value) => value,
         Err(WindowsStoreError::Unsafe | WindowsStoreError::Lost) => {
-            return Ok(SetupLeaseAcquireResult::Busy);
+            return Ok(ObservedSetupLeaseAcquireResult::Busy);
         }
         Err(error) => return Err(error),
     };
     match try_lock_exclusive(lock.as_handle()).map_err(map_win)? {
         LockAttempt::Acquired => {}
-        LockAttempt::Busy => return Ok(SetupLeaseAcquireResult::Busy),
+        LockAttempt::Busy => return Ok(ObservedSetupLeaseAcquireResult::Busy),
     }
     if !exact_setup_lock(&directory, &lock)? {
-        return Ok(SetupLeaseAcquireResult::Busy);
+        if let Some(identity) = created_identity {
+            cleanup_exact_created_setup_lock(&directory, lock, identity, true)?;
+            return Err(WindowsStoreError::Lost);
+        }
+        release_uncommitted_setup_lock(lock)?;
+        return Ok(ObservedSetupLeaseAcquireResult::Busy);
+    }
+
+    let validation = validate(&directory);
+    if !matches!(validation, Ok(true)) {
+        let cleanup = match created_identity {
+            Some(identity) => cleanup_exact_created_setup_lock(&directory, lock, identity, true),
+            None => release_uncommitted_setup_lock(lock),
+        };
+        cleanup?;
+        return match validation {
+            Ok(false) => Ok(ObservedSetupLeaseAcquireResult::PreconditionFailed),
+            Ok(true) => unreachable!("true validation returned through mismatch branch"),
+            Err(error) => Err(error),
+        };
     }
 
     let prior = match read_lock_record(&lock) {
@@ -1187,8 +1835,18 @@ pub(crate) fn acquire_setup_lease(
             write_lock_state(&lock, LOCK_STATE_CLEAN)?;
             PriorLease::ProvenAbandoned
         }
-        Err(WindowsStoreError::Unsafe) => return Ok(SetupLeaseAcquireResult::Busy),
-        Err(error) => return Err(error),
+        Err(WindowsStoreError::Unsafe) => {
+            if let Some(identity) = created_identity {
+                cleanup_exact_created_setup_lock(&directory, lock, identity, true)?;
+                return Err(WindowsStoreError::Lost);
+            }
+            release_uncommitted_setup_lock(lock)?;
+            return Ok(ObservedSetupLeaseAcquireResult::Busy);
+        }
+        Err(error) => {
+            let _ = release_uncommitted_setup_lock(lock);
+            return Err(error);
+        }
     };
     write_held_lock_record(&lock, nonce)?;
 
@@ -1206,11 +1864,259 @@ pub(crate) fn acquire_setup_lease(
     if lease.verify_held().is_err() {
         return Err(WindowsStoreError::Lost);
     }
-    Ok(SetupLeaseAcquireResult::Acquired {
+    Ok(ObservedSetupLeaseAcquireResult::Acquired {
         prior,
         directory: directory_disposition,
         lease,
     })
+}
+
+fn cleanup_observed_attempt(
+    directory: &mut WindowsPrivateDirectory,
+    lock: Option<(File, Option<ObjectIdentity>, bool)>,
+    rollback: Option<&CreatedDirectoryRollback<'_>>,
+) -> Result<(), WindowsStoreError> {
+    if let Some((lock, created_identity, locked)) = lock {
+        if let Some(identity) = created_identity {
+            cleanup_exact_created_setup_lock(directory, lock, identity, locked)?;
+        } else if locked {
+            release_uncommitted_setup_lock(lock)?;
+        } else {
+            drop(lock);
+        }
+    }
+    if let Some(rollback) = rollback {
+        let attestation = directory.attest()?;
+        if attestation.identity != rollback.identity || !attestation.is_secure() {
+            return Err(WindowsStoreError::Lost);
+        }
+        directory.close();
+        remove_exact_created_directory(rollback.binding, &rollback.path, rollback.identity, None)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn acquire_observed_setup_lease<F>(
+    path: &Path,
+    nonce: &str,
+    expectation: ObservedDirectoryExpectation<'_>,
+    validate: F,
+) -> Result<ObservedSetupLeaseAcquireResult, WindowsStoreError>
+where
+    F: FnOnce(&WindowsPrivateDirectory) -> Result<bool, WindowsStoreError>,
+{
+    let nonce = ValidatedUuidV4::parse(nonce)?;
+    let prepared = match prepare_observed_directory(path, expectation)? {
+        DirectoryPreparation::PreconditionFailed => {
+            return Ok(ObservedSetupLeaseAcquireResult::PreconditionFailed);
+        }
+        DirectoryPreparation::Ready(prepared) => prepared,
+    };
+    let PreparedPrivateDirectory { ensured, rollback } = prepared;
+    let directory_disposition = ensured.disposition;
+    let mut directory = ensured.directory;
+
+    #[cfg(test)]
+    if take_observed_acquire_fault(TEST_OBSERVED_ACQUIRE_BUSY_AFTER_PREPARE) {
+        cleanup_observed_attempt(&mut directory, None, rollback.as_ref())?;
+        return Ok(ObservedSetupLeaseAcquireResult::Busy);
+    }
+
+    let (lock, created_identity) = match open_or_create_setup_lock(&directory) {
+        Ok(value) => value,
+        Err(WindowsStoreError::Unsafe | WindowsStoreError::Lost) => {
+            cleanup_observed_attempt(&mut directory, None, rollback.as_ref())?;
+            return Ok(ObservedSetupLeaseAcquireResult::Busy);
+        }
+        Err(error) => {
+            cleanup_observed_attempt(&mut directory, None, rollback.as_ref())?;
+            return Err(error);
+        }
+    };
+
+    match try_lock_exclusive(lock.as_handle()).map_err(map_win) {
+        Ok(LockAttempt::Acquired) => {}
+        Ok(LockAttempt::Busy) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                Some((lock, created_identity, false)),
+                rollback.as_ref(),
+            )?;
+            return Ok(ObservedSetupLeaseAcquireResult::Busy);
+        }
+        Err(error) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                Some((lock, created_identity, false)),
+                rollback.as_ref(),
+            )?;
+            return Err(error);
+        }
+    }
+    match exact_setup_lock(&directory, &lock) {
+        Ok(true) => {}
+        Ok(false) | Err(WindowsStoreError::Unsafe | WindowsStoreError::Lost) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                Some((lock, created_identity, true)),
+                rollback.as_ref(),
+            )?;
+            return Ok(ObservedSetupLeaseAcquireResult::Busy);
+        }
+        Err(error) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                Some((lock, created_identity, true)),
+                rollback.as_ref(),
+            )?;
+            return Err(error);
+        }
+    }
+
+    match validate(&directory) {
+        Ok(true) => {}
+        Ok(false) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                Some((lock, created_identity, true)),
+                rollback.as_ref(),
+            )?;
+            return Ok(ObservedSetupLeaseAcquireResult::PreconditionFailed);
+        }
+        Err(error) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                Some((lock, created_identity, true)),
+                rollback.as_ref(),
+            )?;
+            return Err(error);
+        }
+    }
+
+    let prior = match read_lock_record(&lock) {
+        Ok(LockRecordState::Uninitialized) => {
+            if let Err(error) = initialize_clean_lock_record(&lock) {
+                cleanup_observed_attempt(
+                    &mut directory,
+                    Some((lock, created_identity, true)),
+                    rollback.as_ref(),
+                )?;
+                return Err(error);
+            }
+            PriorLease::Absent
+        }
+        Ok(LockRecordState::Clean) => PriorLease::Absent,
+        Ok(LockRecordState::Held(_)) => {
+            if let Err(error) = write_lock_state(&lock, LOCK_STATE_CLEAN) {
+                cleanup_observed_attempt(
+                    &mut directory,
+                    Some((lock, created_identity, true)),
+                    rollback.as_ref(),
+                )?;
+                return Err(error);
+            }
+            PriorLease::ProvenAbandoned
+        }
+        Err(WindowsStoreError::Unsafe) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                Some((lock, created_identity, true)),
+                rollback.as_ref(),
+            )?;
+            return Ok(ObservedSetupLeaseAcquireResult::Busy);
+        }
+        Err(error) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                Some((lock, created_identity, true)),
+                rollback.as_ref(),
+            )?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = write_held_lock_record(&lock, nonce) {
+        cleanup_observed_attempt(
+            &mut directory,
+            Some((lock, created_identity, true)),
+            rollback.as_ref(),
+        )?;
+        return Err(error);
+    }
+    match exact_setup_lock(&directory, &lock) {
+        Ok(true) => {}
+        Ok(false) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                Some((lock, created_identity, true)),
+                rollback.as_ref(),
+            )?;
+            return Err(WindowsStoreError::Lost);
+        }
+        Err(error) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                Some((lock, created_identity, true)),
+                rollback.as_ref(),
+            )?;
+            return Err(error);
+        }
+    }
+    match read_lock_record(&lock) {
+        Ok(LockRecordState::Held(value)) if value == nonce => {}
+        Ok(_) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                Some((lock, created_identity, true)),
+                rollback.as_ref(),
+            )?;
+            return Err(WindowsStoreError::Lost);
+        }
+        Err(error) => {
+            cleanup_observed_attempt(
+                &mut directory,
+                Some((lock, created_identity, true)),
+                rollback.as_ref(),
+            )?;
+            return Err(error);
+        }
+    }
+
+    let lease = WindowsSetupLease {
+        core: Arc::new(LeaseCore {
+            nonce,
+            runtime: Mutex::new(LeaseRuntime {
+                status: LeaseStatus::Held,
+                generation: 0,
+                directory: Some(directory),
+                lock: Some(lock),
+            }),
+        }),
+    };
+    Ok(ObservedSetupLeaseAcquireResult::Acquired {
+        prior,
+        directory: directory_disposition,
+        lease,
+    })
+}
+
+pub(crate) fn acquire_setup_lease(
+    path: &Path,
+    nonce: &str,
+) -> Result<SetupLeaseAcquireResult, WindowsStoreError> {
+    let nonce = ValidatedUuidV4::parse(nonce)?;
+    match acquire_prepared_setup_lease(ensure_private_directory(path)?, nonce, |_| Ok(true))? {
+        ObservedSetupLeaseAcquireResult::Busy => Ok(SetupLeaseAcquireResult::Busy),
+        ObservedSetupLeaseAcquireResult::PreconditionFailed => Err(WindowsStoreError::Lost),
+        ObservedSetupLeaseAcquireResult::Acquired {
+            prior,
+            directory,
+            lease,
+        } => Ok(SetupLeaseAcquireResult::Acquired {
+            prior,
+            directory,
+            lease,
+        }),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2987,6 +3893,195 @@ mod tests {
         assert_eq!(lease.renew(), LeaseRenewal::Held);
         lease.release().expect("lease must release cleanly");
         fs::remove_file(unrelated).expect("known unrelated-write fixture must be removable");
+    }
+
+    #[test]
+    fn observed_lease_validates_under_exclusion_and_cleans_a_new_lock_on_mismatch() {
+        let test = TestRoot::new();
+        let binding = observe_missing_private_directory(&test.store)
+            .expect("missing observation must complete")
+            .expect("store must initially be absent");
+        let validation_ran = std::cell::Cell::new(false);
+        let acquired = acquire_observed_setup_lease(
+            &test.store,
+            NONCE_1,
+            ObservedDirectoryExpectation::Missing(&binding),
+            |directory| {
+                validation_ran.set(true);
+                let lock = directory.core.path.path.join(SETUP_LOCK_ENTRY);
+                assert_eq!(
+                    fs::metadata(lock)
+                        .expect("native exclusion file must exist during validation")
+                        .len(),
+                    0,
+                    "validation must run before any lock-record initialization"
+                );
+                assert!(matches!(
+                    directory
+                        .observe_managed_entry(ManagedEntry::credential())
+                        .expect("credential observation must complete"),
+                    PrivateManagedEntryObservation::Missing
+                ));
+                assert!(directory
+                    .list_managed_temporary_entries()
+                    .expect("temporary enumeration must complete")
+                    .is_empty());
+                Ok(false)
+            },
+        )
+        .expect("observed acquisition must complete");
+        assert!(validation_ran.get());
+        assert!(matches!(
+            acquired,
+            ObservedSetupLeaseAcquireResult::PreconditionFailed
+        ));
+        assert!(
+            path_is_missing(&test.store.join(SETUP_LOCK_ENTRY)),
+            "a newly-created uninitialized lock must be removed after mismatch"
+        );
+        assert!(matches!(
+            open_private_directory(&test.store),
+            Ok(PrivateDirectoryOpenResult::Missing)
+        ));
+    }
+
+    #[test]
+    fn observed_lease_distinguishes_stale_missing_and_busy_without_validation() {
+        let test = TestRoot::new();
+        let binding = observe_missing_private_directory(&test.store)
+            .expect("missing observation must complete")
+            .expect("store must initially be absent");
+        drop(ensure_private_directory(&test.store).expect("store creation must complete"));
+        let stale_validation = std::cell::Cell::new(false);
+        assert!(matches!(
+            acquire_observed_setup_lease(
+                &test.store,
+                NONCE_1,
+                ObservedDirectoryExpectation::Missing(&binding),
+                |_| {
+                    stale_validation.set(true);
+                    Ok(true)
+                },
+            ),
+            Ok(ObservedSetupLeaseAcquireResult::PreconditionFailed)
+        ));
+        assert!(!stale_validation.get());
+        assert!(
+            test.store.is_dir(),
+            "a stale missing observation must not remove the independently-created directory"
+        );
+        assert!(path_is_missing(&test.store.join(SETUP_LOCK_ENTRY)));
+
+        let (_, _, mut held) = acquired_lease(&test.store, NONCE_1);
+        let busy_validation = std::cell::Cell::new(false);
+        assert!(matches!(
+            acquire_observed_setup_lease(
+                &test.store,
+                NONCE_2,
+                ObservedDirectoryExpectation::Present,
+                |_| {
+                    busy_validation.set(true);
+                    Ok(true)
+                },
+            ),
+            Ok(ObservedSetupLeaseAcquireResult::Busy)
+        ));
+        assert!(!busy_validation.get());
+        held.release().expect("held lease must release");
+    }
+
+    #[test]
+    fn observed_missing_busy_and_validation_error_leave_no_created_directory() {
+        let test = TestRoot::new();
+        let busy_binding = observe_missing_private_directory(&test.store)
+            .expect("busy-path missing observation must complete")
+            .expect("store must initially be absent");
+        inject_observed_acquire_fault(TEST_OBSERVED_ACQUIRE_BUSY_AFTER_PREPARE);
+        assert!(matches!(
+            acquire_observed_setup_lease(
+                &test.store,
+                NONCE_1,
+                ObservedDirectoryExpectation::Missing(&busy_binding),
+                |_| panic!("forced busy path must not validate"),
+            ),
+            Ok(ObservedSetupLeaseAcquireResult::Busy)
+        ));
+        assert!(
+            path_is_missing(&test.store),
+            "forced busy after final-directory creation must roll back the exact directory"
+        );
+
+        let error_binding = observe_missing_private_directory(&test.store)
+            .expect("error-path missing observation must complete")
+            .expect("store must remain absent after busy rollback");
+        assert_eq!(
+            acquire_observed_setup_lease(
+                &test.store,
+                NONCE_2,
+                ObservedDirectoryExpectation::Missing(&error_binding),
+                |_| Err(WindowsStoreError::Io),
+            )
+            .err(),
+            Some(WindowsStoreError::Io)
+        );
+        assert!(
+            path_is_missing(&test.store),
+            "validation error must remove both the new lock and exact new directory"
+        );
+    }
+
+    #[test]
+    fn legacy_reader_is_read_only_bounded_and_rejects_broad_parent_authority() {
+        let test = TestRoot::new();
+        let parent = test.root.join("legacy");
+        drop(ensure_private_directory(&parent).expect("legacy parent must be secured"));
+        let legacy = parent.join("plurum.json");
+        let empty = parent.join("empty.json");
+        write_private_test_file(&legacy, b"secret");
+        write_private_test_file(&empty, b"");
+
+        assert_eq!(
+            read_allowlisted_legacy_credential(&legacy, OsStr::new("plurum.json"), 6)
+                .expect("legacy read must complete"),
+            LegacyCredentialReadResult::Loaded(b"secret".to_vec())
+        );
+        assert_eq!(
+            read_allowlisted_legacy_credential(&empty, OsStr::new("empty.json"), 6)
+                .expect("empty legacy classification must complete"),
+            LegacyCredentialReadResult::Malformed
+        );
+        assert_eq!(
+            read_allowlisted_legacy_credential(&legacy, OsStr::new("plurum.json"), 5)
+                .expect("oversize classification must complete"),
+            LegacyCredentialReadResult::Oversized
+        );
+        assert_eq!(
+            read_allowlisted_legacy_credential(&legacy, OsStr::new("other.json"), 6)
+                .expect("leaf mismatch must fail closed"),
+            LegacyCredentialReadResult::Unsafe
+        );
+        assert_eq!(
+            read_allowlisted_legacy_credential(
+                &parent.join("missing.json"),
+                OsStr::new("missing.json"),
+                6,
+            )
+            .expect("missing classification must complete"),
+            LegacyCredentialReadResult::Missing
+        );
+
+        plurum_windows_syscall::set_broad_dacl_for_tests(&parent, SecurityKind::Directory)
+            .expect("broad parent DACL must be installed");
+        assert_eq!(
+            read_allowlisted_legacy_credential(&legacy, OsStr::new("plurum.json"), 6)
+                .expect("broad parent classification must complete"),
+            LegacyCredentialReadResult::Unsafe
+        );
+        plurum_windows_syscall::set_private_current_user_dacl_for_tests(
+            &parent,
+            SecurityKind::Directory,
+        )
+        .expect("legacy parent security must be restored");
     }
 
     #[test]
