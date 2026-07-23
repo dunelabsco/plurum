@@ -1190,6 +1190,13 @@ mod tests {
             Err(WindowsStoreError::Limit)
         );
         lease.release().expect("lease releases");
+        for index in 0..=MAX_TEMPORARY_ENTRIES {
+            let name = format!(
+                "{CREDENTIAL_CANDIDATE_PREFIX}00000000-0000-4000-8000-{index:012x}{TEMPORARY_SUFFIX}"
+            );
+            std::fs::remove_file(test.store.join(name))
+                .expect("known temporary enumeration fixture must be removed");
+        }
     }
 
     #[test]
@@ -1212,6 +1219,12 @@ mod tests {
             Err(WindowsStoreError::Limit)
         );
         lease.release().expect("lease releases");
+        for index in 0..MAX_DIRECTORY_ENTRIES - 1 {
+            std::fs::remove_file(test.store.join(format!("noise-{index:04x}")))
+                .expect("known directory-scan fixture must be removed");
+        }
+        std::fs::remove_file(test.store.join("noise-overflow"))
+            .expect("known directory-scan overflow fixture must be removed");
     }
 
     #[test]

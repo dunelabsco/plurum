@@ -1,19 +1,27 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  closeSync,
   constants as fsConstants,
-  copyFileSync,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
-  readFileSync,
+  openSync,
+  readSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
+  writeSync,
   writeFileSync,
 } from "node:fs";
 import {
+  basename,
   delimiter,
   dirname,
   isAbsolute,
@@ -28,6 +36,16 @@ const scriptPath = fileURLToPath(import.meta.url);
 const crateRoot = dirname(dirname(scriptPath));
 const packageRoot = resolve(crateRoot, "../..");
 const isolationMarker = "plurum-native-isolation-v1\n";
+const MAX_CLEANUP_DEPTH = 16;
+const MAX_CLEANUP_ENTRIES = 512;
+const MAX_CLEANUP_FILE_BYTES = 96 * 1024 * 1024;
+const MAX_CLEANUP_TOTAL_BYTES = 128 * 1024 * 1024;
+const MAX_SENTINEL_BYTES = 256;
+const parentFaultPoints = new Set([
+  "after-lifecycle-authority",
+  "after-outside-authority",
+  "after-outside-snapshot",
+]);
 const expectedExportKeys = Object.freeze([
   "abiVersion",
   "createAdapters",
@@ -55,28 +73,66 @@ const runtimeTargets = new Set([
 function requiredEnvironment(name) {
   const value = process.env[name];
   assert.ok(value, `${name} must be set`);
+  assert.equal(/[\r\n\0]/u.test(value), false, `${name} must be one safe line`);
   return value;
+}
+
+class InjectedParentFault extends Error {
+  constructor(point) {
+    super(`native ABI injected fault: ${point}`);
+    this.name = "InjectedParentFault";
+    this.point = point;
+  }
+}
+
+function injectParentFault(point, requested) {
+  if (requested === undefined) {
+    return;
+  }
+  assert.equal(
+    parentFaultPoints.has(requested),
+    true,
+    "native ABI fault point is invalid",
+  );
+  if (requested === point) {
+    throw new InjectedParentFault(point);
+  }
 }
 
 function verifiedIsolationRoot() {
   const configured = requiredEnvironment("PLURUM_NATIVE_ISOLATION_ROOT");
-  const metadata = lstatSync(configured);
-  assert.equal(metadata.isSymbolicLink(), false);
-  assert.equal(metadata.isDirectory(), true);
+  assert.equal(isAbsolute(configured), true, "isolation root must be absolute");
+  exactObjectIdentity(configured, "directory", "native isolation root");
   const root = realpathSync(configured);
+  const markerPath = join(root, ".plurum-native-isolation");
+  const marker = readBoundedDigest(
+    markerPath,
+    MAX_SENTINEL_BYTES,
+    "native isolation marker",
+  );
+  const expectedMarker = Buffer.from(isolationMarker, "utf8");
   assert.equal(
-    readFileSync(join(root, ".plurum-native-isolation"), "utf8"),
-    isolationMarker,
+    marker.size === expectedMarker.byteLength &&
+      marker.digest === sha256(expectedMarker),
+    true,
+    "native isolation marker content changed",
+  );
+  exactObjectIdentity(
+    join(root, "tmp"),
+    "directory",
+    "native isolation temporary directory",
   );
   return root;
 }
 
 function isolatedDirectory(root, environmentName, childName) {
   const configured = requiredEnvironment(environmentName);
-  const metadata = lstatSync(configured);
-  assert.equal(metadata.isSymbolicLink(), false);
-  assert.equal(metadata.isDirectory(), true);
-  assert.equal(realpathSync(configured), realpathSync(join(root, childName)));
+  exactObjectIdentity(
+    configured,
+    "directory",
+    `${environmentName} isolated directory`,
+  );
+  assert.equal(realpathSync(configured), resolve(join(root, childName)));
   return realpathSync(configured);
 }
 
@@ -87,7 +143,7 @@ function regularFileFromEnvironment(name) {
 
 function regularFileFromPath(path, label) {
   assert.equal(isAbsolute(path), true, `${label} must be absolute`);
-  const metadata = lstatSync(path);
+  const metadata = lstatSync(path, { bigint: true });
   assert.equal(
     metadata.isSymbolicLink(),
     false,
@@ -97,13 +153,661 @@ function regularFileFromPath(path, label) {
   return realpathSync(path);
 }
 
+function pathExists(path) {
+  try {
+    lstatSync(path, { bigint: true });
+    return true;
+  } catch (error) {
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function isStrictDescendant(parent, candidate) {
+  const difference = relative(parent, candidate);
+  return (
+    difference !== "" &&
+    difference !== ".." &&
+    !difference.startsWith(`..${sep}`) &&
+    !isAbsolute(difference)
+  );
+}
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function objectIdentity(metadata) {
+  return Object.freeze({
+    device: metadata.dev,
+    inode: metadata.ino,
+  });
+}
+
+function privateMode(kind) {
+  return kind === "directory" ? 0o700n : 0o600n;
+}
+
+function securityEvidence(metadata) {
+  return Object.freeze({
+    mode: metadata.mode,
+    owner: metadata.uid,
+    group: metadata.gid,
+    deviceType: metadata.rdev,
+  });
+}
+
+function stableObjectEvidence(metadata) {
+  return Object.freeze({
+    ...objectIdentity(metadata),
+    ...securityEvidence(metadata),
+    links: metadata.nlink,
+    size: metadata.size,
+    blockSize: metadata.blksize,
+    blocks: metadata.blocks,
+    modified: metadata.mtimeNs,
+    changed: metadata.ctimeNs,
+    created: metadata.birthtimeNs,
+  });
+}
+
+function exactObjectIdentity(path, kind, label) {
+  const metadata = lstatSync(path, { bigint: true });
+  assert.equal(metadata.isSymbolicLink(), false, `${label} must not be a link`);
+  assert.equal(
+    kind === "directory" ? metadata.isDirectory() : metadata.isFile(),
+    true,
+    `${label} must be a ${kind}`,
+  );
+  if (kind === "file") {
+    assert.equal(metadata.nlink, 1n, `${label} must have one link`);
+  }
+  if (process.platform !== "win32") {
+    assert.equal(
+      metadata.uid,
+      BigInt(process.getuid?.()),
+      `${label} must be user-owned`,
+    );
+    assert.equal(
+      metadata.mode & 0o7777n,
+      privateMode(kind),
+      `${label} must have its exact private mode without special bits`,
+    );
+  }
+  assert.equal(
+    realpathSync(path),
+    resolve(path),
+    `${label} must not traverse a link or reparse-like object`,
+  );
+  return Object.freeze({ identity: objectIdentity(metadata), metadata });
+}
+
+function assertOriginalIdentity(path, kind, expected, label) {
+  const { identity, metadata } = exactObjectIdentity(path, kind, label);
+  assert.deepEqual(identity, expected, `${label} identity changed`);
+  return metadata;
+}
+
+function assertOriginalSecurity(metadata, expected, label) {
+  assert.deepEqual(
+    securityEvidence(metadata),
+    expected,
+    `${label} security metadata changed`,
+  );
+}
+
+function pathDescriptorEvidence(evidence) {
+  return Object.freeze({
+    device: evidence.device,
+    inode: evidence.inode,
+    owner: evidence.owner,
+    mode: evidence.mode,
+    links: evidence.links,
+    size: evidence.size,
+    modified: evidence.modified,
+    changed: evidence.changed,
+  });
+}
+
+function assertPathAndDescriptorIdentity(pathIdentity, descriptorIdentity, label) {
+  const comparablePath = pathDescriptorEvidence(pathIdentity);
+  const comparableDescriptor = pathDescriptorEvidence(descriptorIdentity);
+  if (process.platform === "win32") {
+    const { device: _pathDevice, ...pathWithoutDevice } = comparablePath;
+    const {
+      device: _descriptorDevice,
+      ...descriptorWithoutDevice
+    } = comparableDescriptor;
+    assert.deepEqual(
+      pathWithoutDevice,
+      descriptorWithoutDevice,
+      `${label} path and descriptor identities differ`,
+    );
+    return;
+  }
+  assert.deepEqual(
+    comparablePath,
+    comparableDescriptor,
+    `${label} path and descriptor identities differ`,
+  );
+}
+
+function readBoundedDigest(path, maximumBytes, label) {
+  const before = exactObjectIdentity(path, "file", label).metadata;
+  assert.equal(
+    before.size <= BigInt(maximumBytes),
+    true,
+    `${label} exceeded its byte limit`,
+  );
+  const beforeIdentity = stableObjectEvidence(before);
+  const descriptor = openSync(
+    path,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const openedBefore = fstatSync(descriptor, { bigint: true });
+    assert.equal(openedBefore.isFile(), true, `${label} must stay a file`);
+    assert.equal(openedBefore.nlink, 1n, `${label} must retain one link`);
+    if (process.platform !== "win32") {
+      assert.equal(
+        openedBefore.uid,
+        BigInt(process.getuid?.()),
+        `${label} must stay user-owned`,
+      );
+      assert.equal(
+        openedBefore.mode & 0o7777n,
+        0o600n,
+        `${label} must retain exact 0600 mode without special bits`,
+      );
+    }
+    assert.equal(
+      openedBefore.size <= BigInt(maximumBytes),
+      true,
+      `${label} exceeded its byte limit after opening`,
+    );
+    const openedBeforeIdentity = stableObjectEvidence(openedBefore);
+    assertPathAndDescriptorIdentity(beforeIdentity, openedBeforeIdentity, label);
+
+    const bytes = Buffer.alloc(Number(openedBefore.size));
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const count = readSync(
+        descriptor,
+        bytes,
+        offset,
+        bytes.byteLength - offset,
+        null,
+      );
+      assert.equal(count > 0, true, `${label} changed while reading`);
+      offset += count;
+    }
+    assert.equal(
+      readSync(descriptor, Buffer.alloc(1), 0, 1, null),
+      0,
+      `${label} grew while reading`,
+    );
+    assert.deepEqual(
+      stableObjectEvidence(fstatSync(descriptor, { bigint: true })),
+      openedBeforeIdentity,
+      `${label} descriptor changed while reading`,
+    );
+    const after = exactObjectIdentity(path, "file", label).metadata;
+    assertPathAndDescriptorIdentity(
+      stableObjectEvidence(after),
+      openedBeforeIdentity,
+      label,
+    );
+    return Object.freeze({
+      identity: objectIdentity(after),
+      evidence: stableObjectEvidence(after),
+      size: bytes.byteLength,
+      digest: sha256(bytes),
+    });
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function boundedDigestTree(root) {
+  const entries = [];
+  let totalBytes = 0;
+
+  const visit = (path, displayPath, depth) => {
+    assert.equal(
+      depth <= MAX_CLEANUP_DEPTH,
+      true,
+      "cleanup tree exceeded its depth limit",
+    );
+    assert.equal(
+      entries.length < MAX_CLEANUP_ENTRIES,
+      true,
+      "cleanup tree exceeded its entry limit",
+    );
+    const before = lstatSync(path, { bigint: true });
+    assert.equal(
+      before.isSymbolicLink(),
+      false,
+      "cleanup refuses symbolic links and junctions",
+    );
+    if (process.platform !== "win32") {
+      assert.equal(
+        before.uid,
+        BigInt(process.getuid?.()),
+        "cleanup entry must be user-owned",
+      );
+      assert.equal(
+        before.mode & 0o7777n,
+        before.isDirectory() ? 0o700n : 0o600n,
+        "cleanup entry must have its exact private mode without special bits",
+      );
+    }
+    assert.equal(
+      realpathSync(path),
+      resolve(path),
+      "cleanup refuses link or reparse-like traversal",
+    );
+
+    if (before.isDirectory()) {
+      const names = readdirSync(path).sort();
+      entries.push(
+        Object.freeze({
+          path: displayPath,
+          kind: "directory",
+          identity: objectIdentity(before),
+          evidence: stableObjectEvidence(before),
+        }),
+      );
+      for (const name of names) {
+        visit(join(path, name), `${displayPath}/${name}`, depth + 1);
+      }
+      const after = lstatSync(path, { bigint: true });
+      assert.equal(after.isDirectory(), true, "cleanup directory changed kind");
+      assert.equal(after.isSymbolicLink(), false, "cleanup directory became a link");
+      assert.deepEqual(
+        stableObjectEvidence(after),
+        stableObjectEvidence(before),
+        "cleanup directory evidence changed during inspection",
+      );
+      assert.deepEqual(
+        readdirSync(path).sort(),
+        names,
+        "cleanup directory entries changed during inspection",
+      );
+      return;
+    }
+
+    assert.equal(
+      before.isFile(),
+      true,
+      "cleanup refuses sockets, devices, and other special objects",
+    );
+    assert.equal(before.nlink, 1n, "cleanup refuses multiply-linked files");
+    const digested = readBoundedDigest(
+      path,
+      MAX_CLEANUP_FILE_BYTES,
+      "cleanup file",
+    );
+    totalBytes += digested.size;
+    assert.equal(
+      totalBytes <= MAX_CLEANUP_TOTAL_BYTES,
+      true,
+      "cleanup tree exceeded its total byte limit",
+    );
+    entries.push(
+      Object.freeze({
+        path: displayPath,
+        kind: "file",
+        identity: digested.identity,
+        evidence: digested.evidence,
+        size: digested.size,
+        digest: digested.digest,
+      }),
+    );
+  };
+
+  visit(root, ".", 0);
+  return Object.freeze(entries);
+}
+
+function assertExactBoundedFile(
+  path,
+  authority,
+  expectedContent,
+  label,
+) {
+  const metadata = assertOriginalIdentity(
+    path,
+    "file",
+    authority.identity,
+    label,
+  );
+  assert.equal(
+    metadata.size <= BigInt(MAX_SENTINEL_BYTES),
+    true,
+    `${label} exceeded its byte limit`,
+  );
+  const expectedBytes = Buffer.from(expectedContent, "utf8");
+  const actual = readBoundedDigest(path, MAX_SENTINEL_BYTES, label);
+  assert.deepEqual(
+    actual.evidence,
+    authority.evidence,
+    `${label} stable evidence changed`,
+  );
+  assert.equal(
+    actual.size === expectedBytes.byteLength &&
+      actual.digest === sha256(expectedBytes),
+    true,
+    `${label} content changed`,
+  );
+}
+
+function assertExactStagedAddon(path, authority, label) {
+  const metadata = assertOriginalIdentity(
+    path,
+    "file",
+    authority.identity,
+    label,
+  );
+  assertOriginalSecurity(metadata, authority.security, label);
+  const actual = readBoundedDigest(path, MAX_CLEANUP_FILE_BYTES, label);
+  assert.deepEqual(
+    actual.evidence,
+    authority.evidence,
+    `${label} stable evidence changed`,
+  );
+  assert.equal(actual.size, authority.size, `${label} size changed`);
+  assert.equal(actual.digest, authority.digest, `${label} content changed`);
+}
+
+function assertTreeReboundAfterSameParentRename(before, after, label) {
+  const normalizedBefore = before.map((entry) => {
+    if (entry.path !== "." || entry.kind !== "directory") {
+      return entry;
+    }
+    const {
+      evidence: { changed: _changed, ...stableEvidence },
+      ...stableEntry
+    } = entry;
+    return Object.freeze({
+      ...stableEntry,
+      evidence: Object.freeze(stableEvidence),
+    });
+  });
+  const normalizedAfter = after.map((entry) => {
+    if (entry.path !== "." || entry.kind !== "directory") {
+      return entry;
+    }
+    const {
+      evidence: { changed: _changed, ...stableEvidence },
+      ...stableEntry
+    } = entry;
+    return Object.freeze({
+      ...stableEntry,
+      evidence: Object.freeze(stableEvidence),
+    });
+  });
+  assert.deepEqual(
+    normalizedAfter,
+    normalizedBefore,
+    `${label} tree failed to rebind after quarantine`,
+  );
+}
+
+function safeRemoveOwnedRoot({
+  root,
+  rootAuthority,
+  sentinelPath,
+  sentinelAuthority,
+  sentinelContent,
+  trustedTemporaryBase,
+  prefix,
+  label,
+  expectedTree,
+}) {
+  assert.equal(
+    isStrictDescendant(trustedTemporaryBase, root),
+    true,
+    `${label} must stay beneath the isolated temporary directory`,
+  );
+  assert.equal(
+    dirname(root),
+    trustedTemporaryBase,
+    `${label} must be a direct child of the isolated temporary directory`,
+  );
+  assert.equal(
+    root.startsWith(join(trustedTemporaryBase, prefix)),
+    true,
+    `${label} must retain its fixed prefix`,
+  );
+  const currentRoot = assertOriginalIdentity(
+    root,
+    "directory",
+    rootAuthority.identity,
+    label,
+  );
+  assertOriginalSecurity(currentRoot, rootAuthority.security, label);
+  assert.equal(dirname(sentinelPath), root, `${label} sentinel must stay direct`);
+  assertExactBoundedFile(
+    sentinelPath,
+    sentinelAuthority,
+    sentinelContent,
+    `${label} sentinel`,
+  );
+  const inspected = boundedDigestTree(root);
+  if (expectedTree !== undefined) {
+    assert.deepEqual(inspected, expectedTree, `${label} tree changed`);
+  }
+  const checkedRoot = assertOriginalIdentity(
+    root,
+    "directory",
+    rootAuthority.identity,
+    label,
+  );
+  assertOriginalSecurity(checkedRoot, rootAuthority.security, label);
+  assertExactBoundedFile(
+    sentinelPath,
+    sentinelAuthority,
+    sentinelContent,
+    `${label} sentinel`,
+  );
+  assert.deepEqual(
+    boundedDigestTree(root),
+    inspected,
+    `${label} changed between cleanup checks`,
+  );
+
+  /*
+   * Node cannot bind recursive deletion to a directory descriptor. First move
+   * the fully attested tree to a fresh, unpredictable same-parent quarantine,
+   * then rebind every identity/security/content fact there. The parent is
+   * private and this test treats another process running as the same OS user
+   * as already trusted. On Windows this is deliberately only same-runner,
+   * Node-visible hygiene: owner/DACL/integrity proof and authority-bound
+   * deletion remain a separate native gate.
+   */
+  if (process.platform === "win32") {
+    assert.equal(
+      process.env.CI,
+      "true",
+      "Windows Node-visible cleanup is restricted to the isolated CI runner",
+    );
+    assert.equal(
+      process.env.GITHUB_ACTIONS,
+      "true",
+      "Windows native cleanup authority remains pending outside CI",
+    );
+  }
+  const quarantine = join(
+    trustedTemporaryBase,
+    `.plurum-native-abi-quarantine-${randomUUID()}`,
+  );
+  assert.equal(pathExists(quarantine), false, `${label} quarantine must be fresh`);
+  renameSync(root, quarantine);
+  assert.equal(pathExists(root), false, `${label} quarantine did not detach`);
+
+  const quarantinedSentinel = join(quarantine, basename(sentinelPath));
+  const reboundRoot = assertOriginalIdentity(
+    quarantine,
+    "directory",
+    rootAuthority.identity,
+    `${label} quarantine`,
+  );
+  assertOriginalSecurity(
+    reboundRoot,
+    rootAuthority.security,
+    `${label} quarantine`,
+  );
+  assertExactBoundedFile(
+    quarantinedSentinel,
+    sentinelAuthority,
+    sentinelContent,
+    `${label} quarantined sentinel`,
+  );
+  const reboundTree = boundedDigestTree(quarantine);
+  assertTreeReboundAfterSameParentRename(inspected, reboundTree, label);
+  assertTreeReboundAfterSameParentRename(
+    reboundTree,
+    boundedDigestTree(quarantine),
+    label,
+  );
+
+  if (process.platform === "win32") {
+    /*
+     * Holding a Node directory descriptor can deny recursive removal on
+     * Windows. The unpredictable quarantine under the isolated runner's
+     * private parent is the strongest non-native binding claimed here.
+     */
+    rmSync(quarantine, { recursive: true, force: false });
+    assert.equal(
+      pathExists(quarantine),
+      false,
+      `${label} quarantine cleanup did not complete`,
+    );
+    assert.equal(pathExists(root), false, `${label} cleanup did not complete`);
+    return;
+  }
+
+  /*
+   * The descriptor below detects identity changes while removal is in
+   * progress, but Node's recursive rm remains path-based. The safety boundary
+   * is the unpredictable quarantine under the private parent and the
+   * same-OS-user runner assumption, not descriptor-bound deletion.
+   */
+  const descriptor = openSync(
+    quarantine,
+    fsConstants.O_RDONLY |
+      (fsConstants.O_DIRECTORY ?? 0) |
+      (fsConstants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const opened = fstatSync(descriptor, { bigint: true });
+    assert.equal(opened.isDirectory(), true, `${label} quarantine must stay open`);
+    assertPathAndDescriptorIdentity(
+      stableObjectEvidence(
+        exactObjectIdentity(
+          quarantine,
+          "directory",
+          `${label} final quarantine`,
+        ).metadata,
+      ),
+      stableObjectEvidence(opened),
+      `${label} final quarantine`,
+    );
+    assertTreeReboundAfterSameParentRename(
+      reboundTree,
+      boundedDigestTree(quarantine),
+      label,
+    );
+    rmSync(quarantine, { recursive: true, force: false });
+    assert.equal(
+      pathExists(quarantine),
+      false,
+      `${label} quarantine cleanup did not complete`,
+    );
+    assert.deepEqual(
+      objectIdentity(fstatSync(descriptor, { bigint: true })),
+      rootAuthority.identity,
+      `${label} retained descriptor changed during cleanup`,
+    );
+  } finally {
+    closeSync(descriptor);
+  }
+  assert.equal(pathExists(root), false, `${label} cleanup did not complete`);
+}
+
+function randomSecret(prefix) {
+  return `${prefix}${randomUUID().replaceAll("-", "")}`;
+}
+
+function secretFragments(secret) {
+  assert.equal(secret.length >= 8, true);
+  const fragments = new Set([secret]);
+  for (let index = 0; index <= secret.length - 8; index += 1) {
+    fragments.add(secret.slice(index, index + 8));
+  }
+  return Object.freeze([...fragments]);
+}
+
+function assertChildOutputExcludesSecrets(result, secrets) {
+  const output = [
+    typeof result.stdout === "string" ? result.stdout : "",
+    typeof result.stderr === "string" ? result.stderr : "",
+    result.error instanceof Error ? result.error.message : "",
+  ].join("\n");
+  for (const secret of secrets) {
+    for (const fragment of secretFragments(secret)) {
+      assert.equal(
+        output.includes(fragment),
+        false,
+        "ABI child output exposed a secret fragment",
+      );
+    }
+  }
+}
+
 function optionalSystemEnvironment() {
   return Object.fromEntries(
-    ["SystemRoot", "WINDIR", "CI", "GITHUB_ACTIONS", "RUNNER_TEMP"].flatMap(
-      (name) =>
-        process.env[name] === undefined ? [] : [[name, process.env[name]]],
+    ["SystemRoot", "WINDIR", "CI", "GITHUB_ACTIONS"].flatMap((name) =>
+      process.env[name] === undefined ? [] : [[name, process.env[name]]],
     ),
   );
+}
+
+function lifecyclePathEnvironment(root) {
+  const home = join(root, "home");
+  const config = join(root, "config");
+  return Object.freeze({
+    HOME: home,
+    USERPROFILE: home,
+    XDG_CONFIG_HOME: config,
+    XDG_STATE_HOME: join(root, "state"),
+    XDG_CACHE_HOME: join(root, "cache"),
+    APPDATA: join(config, "appdata"),
+    LOCALAPPDATA: join(config, "localappdata"),
+    PLURUM_HOME: join(config, "plurum"),
+    CODEX_HOME: join(config, "codex"),
+    CLAUDE_CONFIG_DIR: join(config, "claude"),
+    TMPDIR: join(root, "tmp"),
+    TEMP: join(root, "tmp"),
+    TMP: join(root, "tmp"),
+  });
+}
+
+function createPrivateLifecyclePaths(environment) {
+  for (const path of new Set(Object.values(environment))) {
+    mkdirSync(path, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") {
+      chmodSync(path, 0o700);
+    }
+    exactObjectIdentity(path, "directory", "native ABI lifecycle directory");
+  }
 }
 
 function commandEnvironment(root, overrides = {}) {
@@ -115,8 +819,11 @@ function commandEnvironment(root, overrides = {}) {
     "cargo-target",
   );
   const rustupHome = isolatedDirectory(root, "RUSTUP_HOME", "rustup-home");
-  const config = join(root, "config");
-  const home = join(root, "home");
+  assert.equal(
+    isStrictDescendant(rustupHome, rustcPath),
+    true,
+    "isolated rustc must stay beneath the isolated Rustup home",
+  );
   const systemPath =
     process.platform === "win32"
       ? [
@@ -129,23 +836,12 @@ function commandEnvironment(root, overrides = {}) {
   return {
     ...optionalSystemEnvironment(),
     PATH: systemPath.join(delimiter),
-    HOME: home,
-    USERPROFILE: home,
-    XDG_CONFIG_HOME: config,
-    APPDATA: join(config, "appdata"),
-    LOCALAPPDATA: join(config, "localappdata"),
-    PLURUM_HOME: join(config, "plurum"),
-    CODEX_HOME: join(config, "codex"),
-    CLAUDE_CONFIG_DIR: join(config, "claude"),
     CARGO_HOME: cargoHome,
     CARGO_TARGET_DIR: cargoTarget,
     RUSTUP_HOME: rustupHome,
     RUSTUP_TOOLCHAIN: requiredEnvironment("RUSTUP_TOOLCHAIN"),
     PLURUM_NATIVE_ISOLATION_ROOT: root,
     PLURUM_NATIVE_RUSTC: rustcPath,
-    TMPDIR: join(root, "tmp"),
-    TEMP: join(root, "tmp"),
-    TMP: join(root, "tmp"),
     NO_COLOR: "1",
     ...overrides,
   };
@@ -162,10 +858,19 @@ function assertRuntimeMatchesTarget(target) {
   assert.equal(architecture, process.arch);
 }
 
-function readRustHost(isolationRoot) {
+function readRustHost(isolationRoot, lifecycleRoot) {
   const rustcPath = regularFileFromEnvironment("PLURUM_NATIVE_RUSTC");
+  const rustEnvironment = commandEnvironment(
+    isolationRoot,
+    lifecyclePathEnvironment(lifecycleRoot),
+  );
+  assert.equal(
+    Object.hasOwn(rustEnvironment, "PLURUM_NATIVE_ABI_CREDENTIAL_SECRET"),
+    false,
+    "rustc must not inherit the ABI credential secret",
+  );
   const result = spawnSync(rustcPath, ["-vV"], {
-    env: commandEnvironment(isolationRoot),
+    env: rustEnvironment,
     encoding: "utf8",
     maxBuffer: 1024 * 1024,
     shell: false,
@@ -182,7 +887,370 @@ function readRustHost(isolationRoot) {
   return host;
 }
 
+function digestOpenDescriptor(descriptor, size, label) {
+  assert.equal(
+    size > 0n && size <= BigInt(MAX_CLEANUP_FILE_BYTES),
+    true,
+    `${label} has an invalid size`,
+  );
+  const bytes = Buffer.alloc(Number(size));
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const count = readSync(
+      descriptor,
+      bytes,
+      offset,
+      bytes.byteLength - offset,
+      offset,
+    );
+    assert.equal(count > 0, true, `${label} changed while reading`);
+    offset += count;
+  }
+  assert.equal(
+    readSync(descriptor, Buffer.alloc(1), 0, 1, bytes.byteLength),
+    0,
+    `${label} grew while reading`,
+  );
+  return sha256(bytes);
+}
+
+function assertDirectOwnedBuildDirectory(path, label) {
+  const metadata = lstatSync(path, { bigint: true });
+  assert.equal(metadata.isSymbolicLink(), false, `${label} must not be a link`);
+  assert.equal(metadata.isDirectory(), true, `${label} must be a directory`);
+  assert.equal(
+    realpathSync(path),
+    resolve(path),
+    `${label} must stay direct`,
+  );
+  if (process.platform !== "win32") {
+    assert.equal(
+      metadata.uid,
+      BigInt(process.getuid?.()),
+      `${label} must be user-owned`,
+    );
+  }
+  return metadata;
+}
+
+function assertDirectOwnedBuildFile(path, label) {
+  const metadata = lstatSync(path, { bigint: true });
+  assert.equal(metadata.isSymbolicLink(), false, `${label} must not be a link`);
+  assert.equal(metadata.isFile(), true, `${label} must be a regular file`);
+  assert.equal(
+    metadata.size > 0n &&
+      metadata.size <= BigInt(MAX_CLEANUP_FILE_BYTES),
+    true,
+    `${label} has an invalid size`,
+  );
+  assert.equal(
+    realpathSync(path),
+    resolve(path),
+    `${label} must stay direct`,
+  );
+  if (process.platform !== "win32") {
+    assert.equal(
+      metadata.uid,
+      BigInt(process.getuid?.()),
+      `${label} must be user-owned`,
+    );
+    assert.equal(
+      metadata.mode & 0o022n,
+      0n,
+      `${label} must not be writable by another principal`,
+    );
+  }
+  return metadata;
+}
+
+function assertControlledCargoArtifact(source, cargoTarget, binary, label) {
+  const releaseDirectory = join(cargoTarget, "release");
+  assert.equal(
+    source,
+    join(releaseDirectory, binary),
+    `${label} must use the fixed Cargo release path`,
+  );
+  assertDirectOwnedBuildDirectory(
+    releaseDirectory,
+    "isolated Cargo release directory",
+  );
+  const metadata = assertDirectOwnedBuildFile(source, label);
+  if (metadata.nlink === 1n) {
+    return Object.freeze({
+      identity: objectIdentity(metadata),
+      evidence: stableObjectEvidence(metadata),
+    });
+  }
+
+  assert.equal(
+    process.platform === "linux" || process.platform === "win32",
+    true,
+    `${label} may only use Cargo's second release link on Linux or Windows`,
+  );
+  assert.equal(metadata.nlink, 2n, `${label} must have one or two links`);
+  const dependenciesDirectory = join(releaseDirectory, "deps");
+  assertDirectOwnedBuildDirectory(
+    dependenciesDirectory,
+    "isolated Cargo release dependencies directory",
+  );
+  const dependencyArtifact = join(dependenciesDirectory, binary);
+  const dependencyMetadata = assertDirectOwnedBuildFile(
+    dependencyArtifact,
+    "Cargo dependency artifact",
+  );
+  assert.equal(
+    dependencyMetadata.nlink,
+    2n,
+    "Cargo dependency artifact must account for the second release link",
+  );
+  assert.deepEqual(
+    stableObjectEvidence(dependencyMetadata),
+    stableObjectEvidence(metadata),
+    "Cargo release links must identify the same full stable artifact",
+  );
+  return Object.freeze({
+    identity: objectIdentity(metadata),
+    evidence: stableObjectEvidence(metadata),
+  });
+}
+
+function copyPrivateRegularFile(
+  source,
+  destination,
+  sourceAuthority,
+  label,
+) {
+  const sourceBefore = lstatSync(source, { bigint: true });
+  assert.equal(sourceBefore.isSymbolicLink(), false, `${label} source is linked`);
+  assert.equal(sourceBefore.isFile(), true, `${label} source must be a file`);
+  assert.deepEqual(
+    objectIdentity(sourceBefore),
+    sourceAuthority.identity,
+    `${label} source identity changed`,
+  );
+  assert.deepEqual(
+    stableObjectEvidence(sourceBefore),
+    sourceAuthority.evidence,
+    `${label} source evidence changed`,
+  );
+  assert.equal(
+    sourceBefore.size > 0n &&
+      sourceBefore.size <= BigInt(MAX_CLEANUP_FILE_BYTES),
+    true,
+    `${label} source has an invalid size`,
+  );
+  assert.equal(
+    realpathSync(source),
+    resolve(source),
+    `${label} source must stay direct`,
+  );
+  if (process.platform !== "win32") {
+    assert.equal(
+      sourceBefore.uid,
+      BigInt(process.getuid?.()),
+      `${label} source must be user-owned`,
+    );
+    assert.equal(
+      sourceBefore.mode & 0o022n,
+      0n,
+      `${label} source must not be writable by another principal`,
+    );
+  }
+
+  const sourceDescriptor = openSync(
+    source,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+  );
+  let destinationDescriptor;
+  try {
+    const openedSource = fstatSync(sourceDescriptor, { bigint: true });
+    assertPathAndDescriptorIdentity(
+      stableObjectEvidence(sourceBefore),
+      stableObjectEvidence(openedSource),
+      `${label} source`,
+    );
+    destinationDescriptor = openSync(
+      destination,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_EXCL |
+        (fsConstants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    if (process.platform !== "win32") {
+      fchmodSync(destinationDescriptor, 0o600);
+    }
+
+    const sourceDigest = createHash("sha256");
+    const buffer = Buffer.alloc(1024 * 1024);
+    let sourceOffset = 0;
+    while (sourceOffset < Number(openedSource.size)) {
+      const count = readSync(
+        sourceDescriptor,
+        buffer,
+        0,
+        Math.min(buffer.byteLength, Number(openedSource.size) - sourceOffset),
+        sourceOffset,
+      );
+      assert.equal(count > 0, true, `${label} source changed while copying`);
+      sourceDigest.update(buffer.subarray(0, count));
+      let written = 0;
+      while (written < count) {
+        const writeCount = writeSync(
+          destinationDescriptor,
+          buffer,
+          written,
+          count - written,
+          null,
+        );
+        assert.equal(writeCount > 0, true, `${label} destination write stalled`);
+        written += writeCount;
+      }
+      sourceOffset += count;
+    }
+    assert.equal(
+      readSync(
+        sourceDescriptor,
+        buffer,
+        0,
+        1,
+        Number(openedSource.size),
+      ),
+      0,
+      `${label} source grew while copying`,
+    );
+    fsyncSync(destinationDescriptor);
+    assert.deepEqual(
+      stableObjectEvidence(fstatSync(sourceDescriptor, { bigint: true })),
+      stableObjectEvidence(openedSource),
+      `${label} source changed while copying`,
+    );
+    assertPathAndDescriptorIdentity(
+      stableObjectEvidence(lstatSync(source, { bigint: true })),
+      stableObjectEvidence(openedSource),
+      `${label} source`,
+    );
+    closeSync(destinationDescriptor);
+    destinationDescriptor = undefined;
+
+    const destinationDigest = readBoundedDigest(
+      destination,
+      MAX_CLEANUP_FILE_BYTES,
+      `${label} destination`,
+    );
+    assert.equal(
+      destinationDigest.size,
+      Number(openedSource.size),
+      `${label} destination size changed`,
+    );
+    assert.equal(
+      destinationDigest.digest,
+      sourceDigest.digest("hex"),
+      `${label} destination content changed`,
+    );
+    const destinationMetadata = exactObjectIdentity(
+      destination,
+      "file",
+      `${label} destination`,
+    ).metadata;
+    assert.deepEqual(
+      stableObjectEvidence(destinationMetadata),
+      destinationDigest.evidence,
+      `${label} destination evidence changed after verification`,
+    );
+    return Object.freeze({
+      identity: destinationDigest.identity,
+      security: securityEvidence(destinationMetadata),
+      evidence: destinationDigest.evidence,
+      size: destinationDigest.size,
+      digest: destinationDigest.digest,
+    });
+  } finally {
+    if (destinationDescriptor !== undefined) {
+      closeSync(destinationDescriptor);
+    }
+    closeSync(sourceDescriptor);
+  }
+}
+
+function loadStableNativeAddon(path, label) {
+  const pathBefore = exactObjectIdentity(path, "file", label).metadata;
+  assert.equal(
+    pathBefore.size > 0n &&
+      pathBefore.size <= BigInt(MAX_CLEANUP_FILE_BYTES),
+    true,
+    `${label} has an invalid size`,
+  );
+  const descriptor = openSync(
+    path,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const openedBefore = fstatSync(descriptor, { bigint: true });
+    assert.equal(openedBefore.isFile(), true, `${label} must stay a file`);
+    assertPathAndDescriptorIdentity(
+      stableObjectEvidence(pathBefore),
+      stableObjectEvidence(openedBefore),
+      label,
+    );
+    const digestBefore = digestOpenDescriptor(
+      descriptor,
+      openedBefore.size,
+      label,
+    );
+    assert.deepEqual(
+      stableObjectEvidence(fstatSync(descriptor, { bigint: true })),
+      stableObjectEvidence(openedBefore),
+      `${label} changed before loading`,
+    );
+    assertPathAndDescriptorIdentity(
+      stableObjectEvidence(
+        exactObjectIdentity(path, "file", label).metadata,
+      ),
+      stableObjectEvidence(openedBefore),
+      label,
+    );
+
+    const nativeModule = { exports: {} };
+    process.dlopen(nativeModule, path);
+
+    const openedAfter = fstatSync(descriptor, { bigint: true });
+    assert.deepEqual(
+      stableObjectEvidence(openedAfter),
+      stableObjectEvidence(openedBefore),
+      `${label} descriptor changed while loading`,
+    );
+    const pathAfter = exactObjectIdentity(path, "file", label).metadata;
+    assertPathAndDescriptorIdentity(
+      stableObjectEvidence(pathAfter),
+      stableObjectEvidence(openedAfter),
+      label,
+    );
+    assert.equal(
+      digestOpenDescriptor(descriptor, openedAfter.size, label),
+      digestBefore,
+      `${label} content changed while loading`,
+    );
+    assert.deepEqual(
+      stableObjectEvidence(fstatSync(descriptor, { bigint: true })),
+      stableObjectEvidence(openedAfter),
+      `${label} changed during post-load verification`,
+    );
+    assertPathAndDescriptorIdentity(
+      stableObjectEvidence(
+        exactObjectIdentity(path, "file", label).metadata,
+      ),
+      stableObjectEvidence(openedAfter),
+      label,
+    );
+    return nativeModule.exports;
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 async function runChild() {
+  assertSupportedWindowsRunner();
   const isolationRoot = verifiedIsolationRoot();
   const expectedTarget = requiredEnvironment("PLURUM_NATIVE_EXPECTED_TARGET");
   const expectedNode = requiredEnvironment("PLURUM_NATIVE_EXPECTED_NODE");
@@ -191,29 +1259,34 @@ async function runChild() {
   const runRoot = realpathSync(process.cwd());
   assert.equal(realpathSync(dirname(runRoot)), realpathSync(join(isolationRoot, "tmp")));
   assert.equal(realpathSync(stagedPath), realpathSync(join(runRoot, "credential-store.node")));
+  const childSentinel = readBoundedDigest(
+    join(runRoot, ".plurum-native-abi-root"),
+    MAX_SENTINEL_BYTES,
+    "native ABI child sentinel",
+  );
+  const expectedSentinel = Buffer.from(runId, "utf8");
   assert.equal(
-    readFileSync(join(runRoot, ".plurum-native-abi-root"), "utf8"),
-    runId,
+    childSentinel.size === expectedSentinel.byteLength &&
+      childSentinel.digest === sha256(expectedSentinel),
+    true,
+    "native ABI child sentinel changed",
   );
 
   assert.equal(process.versions.node, expectedNode);
   assert.ok(Number.parseInt(process.versions.napi, 10) >= 8);
   assertRuntimeMatchesTarget(expectedTarget);
 
-  const rustHost = readRustHost(isolationRoot);
+  const rustHost = readRustHost(isolationRoot, runRoot);
   assert.equal(
     rustHostTargets[rustHost],
     expectedTarget,
     `Rust host ${rustHost} must map to ${expectedTarget}`,
   );
 
-  const stagedMetadata = lstatSync(stagedPath);
-  assert.equal(stagedMetadata.isSymbolicLink(), false);
-  assert.equal(stagedMetadata.isFile(), true);
-
-  const nativeModule = { exports: {} };
-  process.dlopen(nativeModule, stagedPath);
-  const addon = nativeModule.exports;
+  const addon = loadStableNativeAddon(
+    stagedPath,
+    "staged native credential addon",
+  );
   assert.ok(addon !== null && typeof addon === "object");
 
   const ownKeys = Reflect.ownKeys(addon);
@@ -303,7 +1376,14 @@ async function runChild() {
   assert.equal(Object.isFrozen(provider), true);
 
   const credentialDirectory = join(runRoot, "credential-store");
-  const credentialKey = "plrm_live_native_abi_test_key_0000000001";
+  const credentialKey = requiredEnvironment(
+    "PLURUM_NATIVE_ABI_CREDENTIAL_SECRET",
+  );
+  assert.equal(
+    /^plrm_live_native_abi_[0-9a-f]{32}$/u.test(credentialKey),
+    true,
+    "ABI credential secret must have the fixed test-only shape",
+  );
   const timestamp = "2026-07-19T12:00:00.000Z";
   const clock = Object.freeze({
     now() {
@@ -402,7 +1482,31 @@ function isOutside(parent, candidate) {
   );
 }
 
-function runParent() {
+function assertSupportedWindowsRunner() {
+  if (process.platform !== "win32") {
+    return;
+  }
+  assert.equal(
+    process.env.CI,
+    "true",
+    "Windows native ABI lifecycle verification requires CI=true",
+  );
+  assert.equal(
+    process.env.GITHUB_ACTIONS,
+    "true",
+    "Windows native ABI lifecycle verification requires GITHUB_ACTIONS=true",
+  );
+}
+
+function runParent(requestedFault) {
+  assertSupportedWindowsRunner();
+  if (requestedFault !== undefined) {
+    assert.equal(
+      parentFaultPoints.has(requestedFault),
+      true,
+      "native ABI fault point is invalid",
+    );
+  }
   const isolationRoot = verifiedIsolationRoot();
   const expectedTarget = requiredEnvironment("PLURUM_NATIVE_EXPECTED_TARGET");
   const expectedNode = requiredEnvironment("PLURUM_NATIVE_EXPECTED_NODE");
@@ -420,34 +1524,133 @@ function runParent() {
     "native builds must stay outside the npm package",
   );
 
-  const binaryPath = realpathSync(join(realCargoTarget, "release", binaryName()));
-  const binaryMetadata = lstatSync(binaryPath);
-  assert.equal(binaryMetadata.isSymbolicLink(), false);
-  assert.equal(binaryMetadata.isFile(), true);
+  const binary = binaryName();
+  const binaryPath = join(realCargoTarget, "release", binary);
+  const binaryAuthority = assertControlledCargoArtifact(
+    binaryPath,
+    realCargoTarget,
+    binary,
+    "Cargo native artifact",
+  );
 
   const trustedTemporaryBase = realpathSync(join(isolationRoot, "tmp"));
-  const temporaryRoot = realpathSync(
-    mkdtempSync(join(trustedTemporaryBase, "plurum-native-abi-")),
-  );
   const runId = randomUUID();
-  const sentinelPath = join(temporaryRoot, ".plurum-native-abi-root");
-  const stagedPath = join(temporaryRoot, "credential-store.node");
-
-  if (process.platform !== "win32") {
-    chmodSync(temporaryRoot, 0o700);
-  }
-  writeFileSync(sentinelPath, runId, {
-    encoding: "utf8",
-    flag: "wx",
-    mode: 0o600,
-  });
-  copyFileSync(binaryPath, stagedPath, fsConstants.COPYFILE_EXCL);
-  if (process.platform !== "win32") {
-    chmodSync(sentinelPath, 0o600);
-    chmodSync(stagedPath, 0o600);
-  }
+  const credentialSecret = randomSecret("plrm_live_native_abi_");
+  const outsideCanarySecret = randomSecret("plurum_native_outside_canary_");
+  let lifecycleRoot;
+  let outsideCanaryRoot;
+  let sentinelPath;
+  let outsideCanaryPath;
+  let stagedPath;
+  let stagedAddonAuthority;
+  let lifecycleCleanupAuthority;
+  let outsideCanaryCleanupAuthority;
+  let outsideCanaryTree;
+  let primaryError;
+  const cleanupErrors = [];
 
   try {
+    /*
+     * No cleanup claim exists until the root sentinel and immutable authority
+     * below are complete. An unexpected earlier failure deliberately retains
+     * the disposable root for fail-closed inspection.
+     */
+    lifecycleRoot = mkdtempSync(
+      join(trustedTemporaryBase, "plurum-native-abi-"),
+    );
+    assert.equal(
+      realpathSync(lifecycleRoot),
+      resolve(lifecycleRoot),
+      "native ABI lifecycle root must stay direct",
+    );
+    sentinelPath = join(lifecycleRoot, ".plurum-native-abi-root");
+    stagedPath = join(lifecycleRoot, "credential-store.node");
+    if (process.platform !== "win32") {
+      chmodSync(lifecycleRoot, 0o700);
+    }
+    const lifecycleRootMetadata = exactObjectIdentity(
+      lifecycleRoot,
+      "directory",
+      "native ABI lifecycle root",
+    );
+    writeFileSync(sentinelPath, runId, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    if (process.platform !== "win32") {
+      chmodSync(sentinelPath, 0o600);
+    }
+    const lifecycleSentinelAuthority = readBoundedDigest(
+      sentinelPath,
+      MAX_SENTINEL_BYTES,
+      "native ABI lifecycle sentinel",
+    );
+    lifecycleCleanupAuthority = Object.freeze({
+      root: Object.freeze({
+        identity: lifecycleRootMetadata.identity,
+        security: securityEvidence(lifecycleRootMetadata.metadata),
+      }),
+      sentinel: lifecycleSentinelAuthority,
+    });
+    injectParentFault("after-lifecycle-authority", requestedFault);
+
+    outsideCanaryRoot = mkdtempSync(
+      join(trustedTemporaryBase, "plurum-native-abi-canary-"),
+    );
+    assert.equal(
+      realpathSync(outsideCanaryRoot),
+      resolve(outsideCanaryRoot),
+      "native ABI outside canary root must stay direct",
+    );
+    outsideCanaryPath = join(
+      outsideCanaryRoot,
+      ".plurum-native-abi-outside-canary",
+    );
+    if (process.platform !== "win32") {
+      chmodSync(outsideCanaryRoot, 0o700);
+    }
+    const outsideCanaryRootMetadata = exactObjectIdentity(
+      outsideCanaryRoot,
+      "directory",
+      "native ABI outside canary root",
+    );
+    writeFileSync(outsideCanaryPath, outsideCanarySecret, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    if (process.platform !== "win32") {
+      chmodSync(outsideCanaryPath, 0o600);
+    }
+    const outsideCanarySentinelAuthority = readBoundedDigest(
+      outsideCanaryPath,
+      MAX_SENTINEL_BYTES,
+      "native ABI outside canary",
+    );
+    outsideCanaryCleanupAuthority = Object.freeze({
+      root: Object.freeze({
+        identity: outsideCanaryRootMetadata.identity,
+        security: securityEvidence(outsideCanaryRootMetadata.metadata),
+      }),
+      sentinel: outsideCanarySentinelAuthority,
+    });
+    injectParentFault("after-outside-authority", requestedFault);
+
+    assert.equal(dirname(lifecycleRoot), trustedTemporaryBase);
+    assert.equal(dirname(outsideCanaryRoot), trustedTemporaryBase);
+    assert.equal(lifecycleRoot === outsideCanaryRoot, false);
+    stagedAddonAuthority = copyPrivateRegularFile(
+      binaryPath,
+      stagedPath,
+      binaryAuthority,
+      "staged native credential addon",
+    );
+    const lifecycleEnvironment = lifecyclePathEnvironment(lifecycleRoot);
+    createPrivateLifecyclePaths(lifecycleEnvironment);
+    outsideCanaryTree = boundedDigestTree(outsideCanaryRoot);
+    injectParentFault("after-outside-snapshot", requestedFault);
+
     const windowsLauncher =
       process.platform === "win32"
         ? regularFileFromPath(
@@ -456,25 +1659,25 @@ function runParent() {
           )
         : undefined;
     const childEnvironment = commandEnvironment(isolationRoot, {
+      ...lifecycleEnvironment,
       PLURUM_NATIVE_EXPECTED_TARGET: expectedTarget,
       PLURUM_NATIVE_EXPECTED_NODE: expectedNode,
       PLURUM_NATIVE_STAGED_PATH: stagedPath,
       PLURUM_NATIVE_TEST_RUN_ID: runId,
-      TMPDIR: temporaryRoot,
-      TEMP: temporaryRoot,
-      TMP: temporaryRoot,
+      PLURUM_NATIVE_ABI_CREDENTIAL_SECRET: credentialSecret,
       ...(windowsLauncher === undefined
         ? {}
         : {
             PLURUM_NATIVE_ABI_NODE: realpathSync(process.execPath),
-            PLURUM_NATIVE_ABI_RUN_ROOT: temporaryRoot,
+            PLURUM_NATIVE_ABI_RUN_ROOT: lifecycleRoot,
+            RUNNER_TEMP: requiredEnvironment("RUNNER_TEMP"),
           }),
     });
     const result = spawnSync(
       windowsLauncher ?? process.execPath,
       windowsLauncher === undefined ? [scriptPath, "--child"] : [],
       {
-        cwd: temporaryRoot,
+        cwd: lifecycleRoot,
         env: childEnvironment,
         encoding: "utf8",
         maxBuffer: 4 * 1024 * 1024,
@@ -482,25 +1685,193 @@ function runParent() {
         timeout: 60_000,
       },
     );
-    assert.equal(result.error, undefined, "ABI child must start successfully");
-    assert.equal(
-      result.status,
-      0,
-      `native ABI child failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    let childOutcomeError;
+    try {
+      assertChildOutputExcludesSecrets(result, [
+        credentialSecret,
+        outsideCanarySecret,
+      ]);
+      assert.equal(result.error, undefined, "ABI child must start successfully");
+      assert.equal(
+        result.status,
+        0,
+        `native ABI child failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+      );
+    } catch (error) {
+      childOutcomeError = error;
+    }
+    let stagedRevalidationError;
+    try {
+      assertExactStagedAddon(
+        stagedPath,
+        stagedAddonAuthority,
+        "staged native credential addon after child exit",
+      );
+    } catch (error) {
+      stagedRevalidationError = error;
+    }
+    if (childOutcomeError !== undefined) {
+      if (stagedRevalidationError !== undefined) {
+        throw new AggregateError(
+          [childOutcomeError, stagedRevalidationError],
+          "native ABI child and staged-addon revalidation failed",
+        );
+      }
+      throw childOutcomeError;
+    }
+    if (stagedRevalidationError !== undefined) {
+      throw stagedRevalidationError;
+    }
+    const lifecycleRootAfterChild = assertOriginalIdentity(
+      lifecycleRoot,
+      "directory",
+      lifecycleCleanupAuthority.root.identity,
+      "native ABI lifecycle root",
     );
+    assertOriginalSecurity(
+      lifecycleRootAfterChild,
+      lifecycleCleanupAuthority.root.security,
+      "native ABI lifecycle root",
+    );
+    assertExactBoundedFile(
+      sentinelPath,
+      lifecycleCleanupAuthority.sentinel,
+      runId,
+      "native ABI lifecycle sentinel",
+    );
+    const outsideCanaryRootAfterChild = assertOriginalIdentity(
+      outsideCanaryRoot,
+      "directory",
+      outsideCanaryCleanupAuthority.root.identity,
+      "native ABI outside canary root",
+    );
+    assertOriginalSecurity(
+      outsideCanaryRootAfterChild,
+      outsideCanaryCleanupAuthority.root.security,
+      "native ABI outside canary root",
+    );
+    assertExactBoundedFile(
+      outsideCanaryPath,
+      outsideCanaryCleanupAuthority.sentinel,
+      outsideCanarySecret,
+      "native ABI outside canary",
+    );
+    assert.deepEqual(
+      boundedDigestTree(outsideCanaryRoot),
+      outsideCanaryTree,
+      "native ABI child changed the outside canary tree",
+    );
+  } catch (error) {
+    primaryError = error;
   } finally {
-    assert.equal(realpathSync(dirname(sentinelPath)), temporaryRoot);
-    assert.equal(readFileSync(sentinelPath, "utf8"), runId);
-    rmSync(temporaryRoot, { recursive: true, force: false });
+    if (
+      lifecycleRoot !== undefined &&
+      sentinelPath !== undefined &&
+      lifecycleCleanupAuthority !== undefined
+    ) {
+      try {
+        safeRemoveOwnedRoot({
+          root: lifecycleRoot,
+          rootAuthority: lifecycleCleanupAuthority.root,
+          sentinelPath,
+          sentinelAuthority: lifecycleCleanupAuthority.sentinel,
+          sentinelContent: runId,
+          trustedTemporaryBase,
+          prefix: "plurum-native-abi-",
+          label: "native ABI lifecycle root",
+        });
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    } else if (lifecycleRoot !== undefined) {
+      cleanupErrors.push(
+        new Error(
+          "native ABI lifecycle root retained: cleanup authority was incomplete",
+        ),
+      );
+    }
+    if (
+      outsideCanaryRoot !== undefined &&
+      outsideCanaryPath !== undefined &&
+      outsideCanaryCleanupAuthority !== undefined
+    ) {
+      try {
+        safeRemoveOwnedRoot({
+          root: outsideCanaryRoot,
+          rootAuthority: outsideCanaryCleanupAuthority.root,
+          sentinelPath: outsideCanaryPath,
+          sentinelAuthority: outsideCanaryCleanupAuthority.sentinel,
+          sentinelContent: outsideCanarySecret,
+          trustedTemporaryBase,
+          prefix: "plurum-native-abi-canary-",
+          label: "native ABI outside canary root",
+          expectedTree: outsideCanaryTree,
+        });
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    } else if (outsideCanaryRoot !== undefined) {
+      cleanupErrors.push(
+        new Error(
+          "native ABI outside canary root retained: cleanup authority was incomplete",
+        ),
+      );
+    }
+    if (cleanupErrors.length === 0) {
+      try {
+        if (lifecycleRoot !== undefined) {
+          assert.equal(
+            pathExists(lifecycleRoot),
+            false,
+            "native ABI lifecycle root left cleanup residue",
+          );
+        }
+        if (outsideCanaryRoot !== undefined) {
+          assert.equal(
+            pathExists(outsideCanaryRoot),
+            false,
+            "native ABI outside canary root left cleanup residue",
+          );
+        }
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
   }
 
+  if (primaryError !== undefined) {
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [primaryError, ...cleanupErrors],
+        "native ABI verification and cleanup failed",
+      );
+    }
+    throw primaryError;
+  }
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(cleanupErrors, "native ABI cleanup failed");
+  }
   console.log(
     `native credential ABI conforms for ${expectedTarget} on Node ${expectedNode}`,
   );
 }
 
+function runParentMatrix() {
+  assertSupportedWindowsRunner();
+  runParent();
+  for (const point of parentFaultPoints) {
+    assert.throws(
+      () => runParent(point),
+      (error) =>
+        error instanceof InjectedParentFault && error.point === point,
+      `native ABI cleanup fault ${point} must preserve its primary failure`,
+    );
+  }
+  console.log("native credential ABI cleanup fault matrix conforms");
+}
+
 if (process.argv[2] === "--child") {
   await runChild();
 } else {
-  runParent();
+  runParentMatrix();
 }

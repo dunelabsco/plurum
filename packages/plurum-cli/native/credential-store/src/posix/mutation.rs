@@ -1275,6 +1275,11 @@ mod tests {
             "outside-canary\n"
         );
         lease.release().expect("listing lease must release");
+        fs::remove_file(test.store.join(linked.file_name()))
+            .expect("managed symlink fixture must be removed");
+        fs::remove_file(test.store.join(hard_linked.file_name()))
+            .expect("managed hard-link fixture must be removed");
+        fs::remove_file(&hard_link_source).expect("hard-link source fixture must be removed");
     }
 
     #[test]
@@ -1321,6 +1326,8 @@ mod tests {
         lease
             .release()
             .expect("exclusive-create lease must release");
+        fs::remove_file(test.store.join(symlink_entry.file_name()))
+            .expect("candidate symlink fixture must be removed");
     }
 
     #[test]
@@ -1711,6 +1718,8 @@ mod tests {
         );
         assert!(!test.store.join(CREDENTIAL_ENTRY).exists());
         lease.release().expect("unsafe-source lease must release");
+        fs::remove_file(test.store.join(source.file_name()))
+            .expect("unsafe source symlink fixture must be removed");
     }
 
     #[test]

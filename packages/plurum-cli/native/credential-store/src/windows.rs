@@ -1363,9 +1363,11 @@ impl Drop for WindowsSetupLease {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::env;
     use std::fs;
     use std::io::Write;
+    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::{symlink_dir, symlink_file};
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1381,14 +1383,146 @@ mod tests {
     const TEST_MARKER: &str = "plurum-windows-native-test-v1\n";
     const CHILD_DIRECTORY_ENV: &str = "PLURUM_WINDOWS_LEASE_CHILD_DIRECTORY";
     const CHILD_READY_ENV: &str = "PLURUM_WINDOWS_LEASE_CHILD_READY";
+    const MAX_TEST_CLEANUP_ENTRIES: usize = 8_192;
+    const MAX_TEST_CLEANUP_DEPTH: usize = 16;
+    const MAX_TEST_CLEANUP_BYTES: u64 = 64 * 1_024 * 1_024;
     static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(1);
+    static NEXT_QUARANTINE: AtomicU64 = AtomicU64::new(1);
     static TEST_PROCESS_MEDIUM: OnceLock<()> = OnceLock::new();
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct CleanupObjectEvidence {
+        identity: ObjectIdentity,
+        kind: ObjectKind,
+        attributes: u32,
+        links: u64,
+        size: Option<u64>,
+        security: plurum_windows_syscall::SecurityAttestation,
+    }
+
+    impl CleanupObjectEvidence {
+        fn capture(
+            file: &File,
+            process: &ProcessIdentity,
+            kind: ObjectKind,
+        ) -> Result<Self, CleanupRefusal> {
+            let facts = metadata(file).map_err(|_| CleanupRefusal::Unsafe)?;
+            let security = attest_security(
+                file.as_handle(),
+                process,
+                match kind {
+                    ObjectKind::Directory => SecurityKind::Directory,
+                    ObjectKind::RegularFile => SecurityKind::File,
+                    ObjectKind::Other => return Err(CleanupRefusal::Unsafe),
+                },
+            )
+            .map_err(|_| CleanupRefusal::Unsafe)?;
+            if facts.kind != kind
+                || facts.links == 0
+                || (kind == ObjectKind::RegularFile && facts.links != 1)
+                || facts.delete_pending
+                || facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                || !security.owner_current
+                || !security.exact_protected_dacl
+                || !security.semantic_medium_label
+            {
+                return Err(CleanupRefusal::Unsafe);
+            }
+            Ok(Self {
+                identity: facts.identity,
+                kind: facts.kind,
+                attributes: facts.attributes,
+                links: facts.links,
+                size: (kind == ObjectKind::RegularFile).then_some(facts.size),
+                security,
+            })
+        }
+
+        fn matches(&self, file: &File, process: &ProcessIdentity) -> Result<bool, CleanupRefusal> {
+            let current = Self::capture(file, process, self.kind)?;
+            Ok(current == *self)
+        }
+    }
+
+    struct CleanupEvidence {
+        process: ProcessIdentity,
+        drive_root: [u16; 4],
+        temporary: CleanupObjectEvidence,
+        temporary_volume: plurum_windows_syscall::VolumeAttestation,
+        root: CleanupObjectEvidence,
+        marker: CleanupObjectEvidence,
+    }
+
+    #[derive(Clone, Copy)]
+    struct CleanupLimits {
+        entries: usize,
+        depth: usize,
+        bytes: u64,
+    }
+
+    impl CleanupLimits {
+        const STANDARD: Self = Self {
+            entries: MAX_TEST_CLEANUP_ENTRIES,
+            depth: MAX_TEST_CLEANUP_DEPTH,
+            bytes: MAX_TEST_CLEANUP_BYTES,
+        };
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CleanupRefusal {
+        Unsafe,
+        Limit,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct CleanupNode {
+        name: OsString,
+        object: CleanupObjectEvidence,
+        children: Vec<CleanupNode>,
+    }
+
+    struct CleanupTraversal {
+        limits: CleanupLimits,
+        entries: usize,
+        bytes: u64,
+        root_volume: u64,
+        identities: HashSet<(u64, [u8; 16])>,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct CleanupPlan {
+        root: CleanupNode,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CleanupFault {
+        None,
+        AfterQuarantine,
+        AfterFirstChildRemoval,
+        AfterRootRemoval,
+    }
+
+    struct CleanupFaultState {
+        fault: CleanupFault,
+        removed_children: usize,
+    }
 
     pub(super) struct TestRoot {
         pub(super) root: PathBuf,
         pub(super) temporary: PathBuf,
         pub(super) store: PathBuf,
         pub(super) marker: PathBuf,
+        cleanup: CleanupEvidence,
+        cleaned: bool,
+    }
+
+    fn open_test_security_directory(path: &Path) -> std::io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .access_mode(GENERIC_READ | READ_CONTROL | WRITE_DAC | WRITE_OWNER)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
     }
 
     pub(super) fn verified_test_isolation() -> PathBuf {
@@ -1396,62 +1530,215 @@ mod tests {
             env::var("PLURUM_NATIVE_ISOLATION_ROOT")
                 .expect("native tests require the isolated runner root"),
         );
-        NormalizedAbsolutePath::parse(&configured)
+        let configured_path = NormalizedAbsolutePath::parse(&configured)
             .expect("isolation root must be a canonical local drive path");
         assert_eq!(
             configured.file_name(),
             Some(OsStr::new("plurum-native-isolation")),
             "isolation root must use the exact sentinel directory name"
         );
-        let configured_metadata =
-            fs::symlink_metadata(&configured).expect("isolation root must exist");
-        assert!(configured_metadata.is_dir());
+        let configured_chain = configured_path
+            .open_complete()
+            .expect("isolation root must open through one retained no-follow chain");
+        let configured_facts =
+            metadata(&configured_chain.leaf).expect("isolation root metadata must attest");
+        assert_eq!(configured_facts.kind, ObjectKind::Directory);
         assert_eq!(
-            configured_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT,
+            configured_facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT,
             0,
             "isolation root must not be a reparse point"
         );
+
         let marker = configured.join(".plurum-native-isolation");
-        let marker_metadata = fs::symlink_metadata(&marker).expect("isolation marker must exist");
-        assert!(marker_metadata.is_file());
+        let marker_handle = open_file_nofollow(&marker, false, false, true)
+            .expect("isolation marker must open without following reparses");
+        let marker_facts = metadata(&marker_handle).expect("isolation marker metadata must attest");
+        assert_eq!(marker_facts.kind, ObjectKind::RegularFile);
+        assert_eq!(marker_facts.links, 1);
+        assert_eq!(marker_facts.size, ISOLATION_MARKER.len() as u64);
+        assert_eq!(marker_facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT, 0);
         assert_eq!(
-            marker_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT,
-            0
+            read_exact_at(&marker_handle, ISOLATION_MARKER.len())
+                .expect("isolation marker must be readable"),
+            ISOLATION_MARKER.as_bytes()
         );
-        assert_eq!(
-            fs::read_to_string(marker).expect("isolation marker must be readable"),
-            ISOLATION_MARKER
-        );
+
         let temporary = configured.join("tmp");
-        let temporary_metadata =
-            fs::symlink_metadata(&temporary).expect("isolated temporary root must exist");
-        assert!(temporary_metadata.is_dir());
+        let temporary_path = NormalizedAbsolutePath::parse(&temporary)
+            .expect("isolated temporary root must be canonical");
+        let temporary_chain = temporary_path
+            .open_complete()
+            .expect("isolated temporary root must open through one retained no-follow chain");
+        let temporary_facts =
+            metadata(&temporary_chain.leaf).expect("temporary root metadata must attest");
+        assert_eq!(temporary_facts.kind, ObjectKind::Directory);
+        assert_eq!(temporary_facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT, 0);
         assert_eq!(
-            temporary_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT,
-            0
+            temporary_facts.identity.volume, configured_facts.identity.volume,
+            "isolation and temporary roots must share one native volume"
         );
+
+        let configured_security = open_test_security_directory(&configured)
+            .expect("isolation root security handle must open");
+        let temporary_security = open_test_security_directory(&temporary)
+            .expect("temporary root security handle must open");
+        assert_eq!(
+            metadata(&configured_security)
+                .expect("isolation security handle must attest")
+                .identity,
+            configured_facts.identity
+        );
+        assert_eq!(
+            metadata(&temporary_security)
+                .expect("temporary security handle must attest")
+                .identity,
+            temporary_facts.identity
+        );
+
         TEST_PROCESS_MEDIUM.get_or_init(|| {
-            plurum_windows_syscall::prepare_medium_integrity_test_directory(&configured)
-                .expect("isolated Windows test root must have medium integrity");
-            plurum_windows_syscall::prepare_medium_integrity_test_directory(&temporary)
-                .expect("isolated Windows temporary root must have medium integrity");
             plurum_windows_syscall::lower_process_integrity_to_medium_for_tests()
                 .expect("isolated Windows tests must run at exact medium integrity");
+            let process =
+                ProcessIdentity::capture().expect("test process identity must be unimpersonated");
+            assert!(
+                attest_security(
+                    configured_security.as_handle(),
+                    &process,
+                    SecurityKind::Directory,
+                )
+                .expect("isolation root owner must attest")
+                .owner_current,
+                "isolation root must be owned by the current test user"
+            );
+            assert!(
+                attest_security(
+                    temporary_security.as_handle(),
+                    &process,
+                    SecurityKind::Directory,
+                )
+                .expect("temporary root owner must attest")
+                .owner_current,
+                "temporary root must be owned by the current test user"
+            );
+            assert!(
+                attest_security(marker_handle.as_handle(), &process, SecurityKind::File)
+                    .expect("isolation marker owner must attest")
+                    .owner_current,
+                "isolation marker must be owned by the current test user"
+            );
+            plurum_windows_syscall::prepare_medium_integrity_test_directory_handle(
+                configured_security.as_handle(),
+            )
+            .expect("isolated Windows test root must have medium integrity");
+            plurum_windows_syscall::prepare_medium_integrity_test_directory_handle(
+                temporary_security.as_handle(),
+            )
+            .expect("isolated Windows temporary root must have medium integrity");
+            plurum_windows_syscall::set_private_current_user_dacl_for_tests_handle(
+                temporary_security.as_handle(),
+                SecurityKind::Directory,
+            )
+            .expect("isolated Windows temporary root must have an exact private DACL");
         });
+        let process =
+            ProcessIdentity::capture().expect("test process identity must remain unimpersonated");
+        let configured_security_state = attest_security(
+            configured_security.as_handle(),
+            &process,
+            SecurityKind::Directory,
+        )
+        .expect("isolation root security must re-attest");
+        assert!(
+            configured_security_state.owner_current
+                && configured_security_state.semantic_medium_label,
+            "isolation root must remain current-user owned at medium integrity"
+        );
+        let temporary_security_state = attest_security(
+            temporary_security.as_handle(),
+            &process,
+            SecurityKind::Directory,
+        )
+        .expect("temporary root security must re-attest");
+        assert!(
+            temporary_security_state.owner_current
+                && temporary_security_state.exact_protected_dacl
+                && temporary_security_state.semantic_medium_label,
+            "temporary root must retain its exact protected user-only security"
+        );
+        assert!(
+            attest_security(marker_handle.as_handle(), &process, SecurityKind::File)
+                .expect("isolation marker security must re-attest")
+                .owner_current,
+            "isolation marker must remain owned by the current test user"
+        );
+        assert_eq!(
+            metadata(&configured_chain.leaf)
+                .expect("isolation root must remain bound")
+                .identity,
+            configured_facts.identity
+        );
+        assert_eq!(
+            metadata(&temporary_chain.leaf)
+                .expect("temporary root must remain bound")
+                .identity,
+            temporary_facts.identity
+        );
+        assert_eq!(
+            read_exact_at(&marker_handle, ISOLATION_MARKER.len())
+                .expect("isolation marker must remain readable"),
+            ISOLATION_MARKER.as_bytes()
+        );
+        assert_eq!(
+            metadata(&marker_handle).expect("isolation marker must remain stable"),
+            marker_facts
+        );
         temporary
     }
 
     impl TestRoot {
         pub(super) fn new() -> Self {
             let temporary = verified_test_isolation();
+            let process = ProcessIdentity::capture().expect("test process identity must be safe");
+            let normalized_temporary = NormalizedAbsolutePath::parse(&temporary)
+                .expect("isolated temporary root must be canonical");
+            let temporary_chain = normalized_temporary
+                .open_complete()
+                .expect("isolated temporary root chain must open without following reparses");
+            let temporary_handle = &temporary_chain.leaf;
+            let temporary_evidence =
+                CleanupObjectEvidence::capture(temporary_handle, &process, ObjectKind::Directory)
+                    .expect("isolated temporary root must have exact cleanup security");
+            let drive_root = [
+                u16::from(normalized_temporary.drive),
+                b':' as u16,
+                b'\\' as u16,
+                0,
+            ];
+            let temporary_volume = attest_local_ntfs(temporary_handle.as_handle(), &drive_root)
+                .expect("isolated temporary root volume must attest");
+            assert!(
+                temporary_volume.fixed_drive
+                    && temporary_volume.ntfs
+                    && temporary_volume.persistent_acls
+                    && temporary_volume.direct_volume_mapping,
+                "isolated temporary root must be on a local fixed NTFS volume"
+            );
+
             let sequence = NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed);
             let root = temporary.join(format!("plurum-windows-{}-{sequence}", std::process::id()));
             let ensured = ensure_private_directory(&root).expect("test root must be secured");
             assert_eq!(ensured.disposition, DirectoryDisposition::Created);
-            drop(ensured);
+            let ensured_attestation = ensured
+                .directory
+                .attest()
+                .expect("new test root must remain bound and secure");
+            assert_eq!(
+                ensured_attestation.identity.volume, temporary_evidence.identity.volume,
+                "test root and isolated temporary root must share one native volume"
+            );
+
             let marker = root.join(".plurum-windows-native-test");
-            let process = ProcessIdentity::capture().expect("test process identity must be safe");
-            let mut file = match create_private_file(
+            let mut marker_origin = match create_private_file(
                 &marker,
                 &process,
                 GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
@@ -1462,32 +1749,671 @@ mod tests {
                 FileCreateAttempt::Created(file) => file,
                 FileCreateAttempt::Conflict => panic!("test marker unexpectedly exists"),
             };
-            file.write_all(TEST_MARKER.as_bytes())
+            marker_origin
+                .write_all(TEST_MARKER.as_bytes())
                 .expect("test marker must be written");
-            flush_file(file.as_handle()).expect("test marker must be flushed");
-            drop(file);
+            flush_file(marker_origin.as_handle()).expect("test marker must be flushed");
+            let marker_evidence =
+                CleanupObjectEvidence::capture(&marker_origin, &process, ObjectKind::RegularFile)
+                    .expect("original test marker cleanup evidence must be safe");
+            assert_eq!(marker_evidence.size, Some(TEST_MARKER.len() as u64));
+            assert_eq!(
+                read_exact_at(&marker_origin, TEST_MARKER.len())
+                    .expect("original test marker must be readable"),
+                TEST_MARKER.as_bytes()
+            );
+
+            let root_handle = open_directory_nofollow(&root, false)
+                .expect("test root must open without following reparses");
+            let root_evidence =
+                CleanupObjectEvidence::capture(&root_handle, &process, ObjectKind::Directory)
+                    .expect("test root cleanup evidence must be safe");
+            assert_eq!(
+                root_evidence.identity, ensured_attestation.identity,
+                "reopened test root must match the retained created root"
+            );
+            let marker_handle = open_file_nofollow(&marker, false, false, true)
+                .expect("test marker must open without following reparses");
+            assert!(
+                marker_evidence
+                    .matches(&marker_handle, &process)
+                    .expect("reopened marker evidence must be comparable"),
+                "reopened marker must match the retained created marker"
+            );
+            assert_eq!(
+                read_exact_at(&marker_handle, TEST_MARKER.len())
+                    .expect("test marker evidence must be readable"),
+                TEST_MARKER.as_bytes()
+            );
+            assert_eq!(
+                metadata(&marker_handle)
+                    .expect("test marker evidence must remain stable")
+                    .size,
+                TEST_MARKER.len() as u64
+            );
             let store = root.join("Plurum");
             Self {
                 root,
                 temporary,
                 store,
                 marker,
+                cleanup: CleanupEvidence {
+                    process,
+                    drive_root,
+                    temporary: temporary_evidence,
+                    temporary_volume,
+                    root: root_evidence,
+                    marker: marker_evidence,
+                },
+                cleaned: false,
             }
+        }
+
+        fn cleanup_plan(&self, limits: CleanupLimits) -> Result<CleanupPlan, CleanupRefusal> {
+            if self.root.parent() != Some(self.temporary.as_path())
+                || self.marker != self.root.join(".plurum-windows-native-test")
+                || self.store != self.root.join("Plurum")
+            {
+                return Err(CleanupRefusal::Unsafe);
+            }
+            let temporary_chain = NormalizedAbsolutePath::parse(&self.temporary)
+                .and_then(|path| path.open_complete())
+                .map_err(|_| CleanupRefusal::Unsafe)?;
+            let root_parent_chain = NormalizedAbsolutePath::parse(&self.root)
+                .and_then(|path| path.open_parent())
+                .map_err(|_| CleanupRefusal::Unsafe)?;
+
+            let temporary_handle = &temporary_chain.leaf;
+            if !self
+                .cleanup
+                .temporary
+                .matches(temporary_handle, &self.cleanup.process)?
+                || !self
+                    .cleanup
+                    .temporary
+                    .matches(&root_parent_chain.leaf, &self.cleanup.process)?
+                || attest_local_ntfs(temporary_handle.as_handle(), &self.cleanup.drive_root)
+                    .map_err(|_| CleanupRefusal::Unsafe)?
+                    != self.cleanup.temporary_volume
+            {
+                return Err(CleanupRefusal::Unsafe);
+            }
+
+            let root_handle =
+                open_cleanup_directory(&self.root).map_err(|_| CleanupRefusal::Unsafe)?;
+            if !self
+                .cleanup
+                .root
+                .matches(&root_handle, &self.cleanup.process)?
+            {
+                return Err(CleanupRefusal::Unsafe);
+            }
+            let marker_handle = open_file_nofollow(&self.marker, false, false, true)
+                .map_err(|_| CleanupRefusal::Unsafe)?;
+            if !self
+                .cleanup
+                .marker
+                .matches(&marker_handle, &self.cleanup.process)?
+                || metadata(&marker_handle)
+                    .map_err(|_| CleanupRefusal::Unsafe)?
+                    .size
+                    != TEST_MARKER.len() as u64
+                || read_exact_at(&marker_handle, TEST_MARKER.len())
+                    .map_err(|_| CleanupRefusal::Unsafe)?
+                    != TEST_MARKER.as_bytes()
+            {
+                return Err(CleanupRefusal::Unsafe);
+            }
+            drop(marker_handle);
+
+            let root_facts = metadata(&root_handle).map_err(|_| CleanupRefusal::Unsafe)?;
+            if root_facts.identity.volume != self.cleanup.temporary.identity.volume {
+                return Err(CleanupRefusal::Unsafe);
+            }
+            let mut first_traversal = CleanupTraversal {
+                limits,
+                entries: 1,
+                bytes: 0,
+                root_volume: root_facts.identity.volume,
+                identities: HashSet::from([(
+                    root_facts.identity.volume,
+                    root_facts.identity.file_id,
+                )]),
+            };
+            if first_traversal.entries > limits.entries {
+                return Err(CleanupRefusal::Limit);
+            }
+            let first = capture_cleanup_node(
+                &self.root,
+                &root_handle,
+                0,
+                &self.cleanup.process,
+                &mut first_traversal,
+            )?;
+            require_original_marker(&first, &self.cleanup.marker)?;
+
+            let mut second_traversal = CleanupTraversal {
+                limits,
+                entries: 1,
+                bytes: 0,
+                root_volume: root_facts.identity.volume,
+                identities: HashSet::from([(
+                    root_facts.identity.volume,
+                    root_facts.identity.file_id,
+                )]),
+            };
+            let second = capture_cleanup_node(
+                &self.root,
+                &root_handle,
+                0,
+                &self.cleanup.process,
+                &mut second_traversal,
+            )?;
+            let marker_handle = open_file_nofollow(&self.marker, false, false, true)
+                .map_err(|_| CleanupRefusal::Unsafe)?;
+            if first != second
+                || !self
+                    .cleanup
+                    .root
+                    .matches(&root_handle, &self.cleanup.process)?
+                || !self
+                    .cleanup
+                    .marker
+                    .matches(&marker_handle, &self.cleanup.process)?
+                || read_exact_at(&marker_handle, TEST_MARKER.len())
+                    .map_err(|_| CleanupRefusal::Unsafe)?
+                    != TEST_MARKER.as_bytes()
+            {
+                return Err(CleanupRefusal::Unsafe);
+            }
+            Ok(CleanupPlan { root: second })
+        }
+
+        fn cleanup_check(&self, limits: CleanupLimits) -> Result<(), CleanupRefusal> {
+            self.cleanup_plan(limits).map(|_| ())
+        }
+
+        fn cleanup_now(&mut self) -> Result<(), CleanupRefusal> {
+            let plan = self.cleanup_plan(CleanupLimits::STANDARD)?;
+            execute_cleanup_plan(self, &plan)?;
+            self.cleaned = true;
+            Ok(())
         }
     }
 
     impl Drop for TestRoot {
         fn drop(&mut self) {
-            let safe = self.root.starts_with(&self.temporary)
-                && fs::symlink_metadata(&self.root).is_ok_and(|metadata| {
-                    metadata.is_dir()
-                        && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
-                })
-                && fs::read_to_string(&self.marker).is_ok_and(|value| value == TEST_MARKER);
-            if safe {
-                let _ = fs::remove_dir_all(&self.root);
+            if self.cleaned {
+                return;
+            }
+            if self.cleanup_now().is_err() {
+                if std::thread::panicking() {
+                    eprintln!("plurum native test cleanup refused");
+                } else {
+                    panic!("plurum native test cleanup refused");
+                }
             }
         }
+    }
+
+    fn open_cleanup_directory(path: &Path) -> std::io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .access_mode(GENERIC_READ | READ_CONTROL | DELETE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+    }
+
+    fn open_cleanup_file(path: &Path) -> std::io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .access_mode(GENERIC_READ | READ_CONTROL | DELETE)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    }
+
+    fn capture_cleanup_node(
+        directory_path: &Path,
+        opened: &File,
+        depth: usize,
+        process: &ProcessIdentity,
+        traversal: &mut CleanupTraversal,
+    ) -> Result<CleanupNode, CleanupRefusal> {
+        let object = CleanupObjectEvidence::capture(opened, process, ObjectKind::Directory)?;
+        if object.identity.volume != traversal.root_volume {
+            return Err(CleanupRefusal::Unsafe);
+        }
+        if depth >= traversal.limits.depth {
+            return Err(CleanupRefusal::Limit);
+        }
+        let remaining = traversal.limits.entries.saturating_sub(traversal.entries);
+        let mut entries = bounded_cleanup_entries(directory_path, remaining)?;
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut children = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if !valid_component(&entry.file_name()) {
+                return Err(CleanupRefusal::Unsafe);
+            }
+            traversal.entries = traversal
+                .entries
+                .checked_add(1)
+                .ok_or(CleanupRefusal::Limit)?;
+            if traversal.entries > traversal.limits.entries {
+                return Err(CleanupRefusal::Limit);
+            }
+
+            let path = entry.path();
+            if path.parent() != Some(directory_path) {
+                return Err(CleanupRefusal::Unsafe);
+            }
+            let path_metadata = fs::symlink_metadata(&path).map_err(|_| CleanupRefusal::Unsafe)?;
+            if path_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(CleanupRefusal::Unsafe);
+            }
+            let (file, kind) = if path_metadata.is_dir() {
+                (
+                    open_cleanup_directory(&path).map_err(|_| CleanupRefusal::Unsafe)?,
+                    ObjectKind::Directory,
+                )
+            } else if path_metadata.is_file() {
+                (
+                    open_cleanup_file(&path).map_err(|_| CleanupRefusal::Unsafe)?,
+                    ObjectKind::RegularFile,
+                )
+            } else {
+                return Err(CleanupRefusal::Unsafe);
+            };
+            let object = CleanupObjectEvidence::capture(&file, process, kind)?;
+            if object.identity.volume != traversal.root_volume
+                || !traversal
+                    .identities
+                    .insert((object.identity.volume, object.identity.file_id))
+            {
+                return Err(CleanupRefusal::Unsafe);
+            }
+
+            let child = if kind == ObjectKind::RegularFile {
+                let size = object.size.ok_or(CleanupRefusal::Unsafe)?;
+                traversal.bytes = traversal
+                    .bytes
+                    .checked_add(size)
+                    .ok_or(CleanupRefusal::Limit)?;
+                if traversal.bytes > traversal.limits.bytes {
+                    return Err(CleanupRefusal::Limit);
+                }
+                CleanupNode {
+                    name: entry.file_name(),
+                    object,
+                    children: Vec::new(),
+                }
+            } else {
+                capture_cleanup_node(&path, &file, depth + 1, process, traversal)?
+            };
+            children.push(child);
+        }
+        Ok(CleanupNode {
+            name: directory_path
+                .file_name()
+                .ok_or(CleanupRefusal::Unsafe)?
+                .to_os_string(),
+            object,
+            children,
+        })
+    }
+
+    fn bounded_cleanup_entries(
+        directory: &Path,
+        maximum: usize,
+    ) -> Result<Vec<fs::DirEntry>, CleanupRefusal> {
+        let mut entries = Vec::with_capacity(maximum.min(256));
+        let stream = fs::read_dir(directory).map_err(|_| CleanupRefusal::Unsafe)?;
+        for entry in stream {
+            if entries.len() == maximum {
+                return Err(CleanupRefusal::Limit);
+            }
+            entries.push(entry.map_err(|_| CleanupRefusal::Unsafe)?);
+        }
+        Ok(entries)
+    }
+
+    fn require_original_marker(
+        root: &CleanupNode,
+        expected: &CleanupObjectEvidence,
+    ) -> Result<(), CleanupRefusal> {
+        let marker = root
+            .children
+            .iter()
+            .find(|child| child.name == OsStr::new(".plurum-windows-native-test"))
+            .ok_or(CleanupRefusal::Unsafe)?;
+        if marker.object != *expected || !marker.children.is_empty() {
+            return Err(CleanupRefusal::Unsafe);
+        }
+        Ok(())
+    }
+
+    fn quarantine_name(root: &CleanupObjectEvidence) -> OsString {
+        let sequence = NEXT_QUARANTINE.fetch_add(1, Ordering::Relaxed);
+        let file_id = root
+            .identity
+            .file_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        OsString::from(format!(
+            ".plurum-cleanup-{}-{sequence}-{file_id}",
+            std::process::id()
+        ))
+    }
+
+    fn execute_cleanup_plan(test: &TestRoot, plan: &CleanupPlan) -> Result<(), CleanupRefusal> {
+        let quarantine_name = quarantine_name(&test.cleanup.root);
+        execute_cleanup_plan_named(test, plan, &quarantine_name, CleanupFault::None)
+    }
+
+    fn execute_cleanup_plan_named(
+        test: &TestRoot,
+        plan: &CleanupPlan,
+        quarantine_name: &OsStr,
+        fault: CleanupFault,
+    ) -> Result<(), CleanupRefusal> {
+        let temporary_chain = NormalizedAbsolutePath::parse(&test.temporary)
+            .and_then(|path| path.open_complete())
+            .map_err(|_| CleanupRefusal::Unsafe)?;
+        let root_parent_chain = NormalizedAbsolutePath::parse(&test.root)
+            .and_then(|path| path.open_parent())
+            .map_err(|_| CleanupRefusal::Unsafe)?;
+        let temporary = &temporary_chain.leaf;
+        if !test
+            .cleanup
+            .temporary
+            .matches(temporary, &test.cleanup.process)?
+            || !test
+                .cleanup
+                .temporary
+                .matches(&root_parent_chain.leaf, &test.cleanup.process)?
+            || attest_local_ntfs(temporary.as_handle(), &test.cleanup.drive_root)
+                .map_err(|_| CleanupRefusal::Unsafe)?
+                != test.cleanup.temporary_volume
+        {
+            return Err(CleanupRefusal::Unsafe);
+        }
+
+        let root = open_cleanup_directory(&test.root).map_err(|_| CleanupRefusal::Unsafe)?;
+        if !test.cleanup.root.matches(&root, &test.cleanup.process)?
+            || plan.root.object != test.cleanup.root
+        {
+            return Err(CleanupRefusal::Unsafe);
+        }
+        let root_facts = metadata(&root).map_err(|_| CleanupRefusal::Unsafe)?;
+        if root_facts.identity.volume != test.cleanup.temporary.identity.volume {
+            return Err(CleanupRefusal::Unsafe);
+        }
+        let mut traversal = CleanupTraversal {
+            limits: CleanupLimits::STANDARD,
+            entries: 1,
+            bytes: 0,
+            root_volume: root_facts.identity.volume,
+            identities: HashSet::from([(root_facts.identity.volume, root_facts.identity.file_id)]),
+        };
+        if capture_cleanup_node(&test.root, &root, 0, &test.cleanup.process, &mut traversal)?
+            != plan.root
+        {
+            return Err(CleanupRefusal::Unsafe);
+        }
+
+        if !valid_component(quarantine_name) {
+            return Err(CleanupRefusal::Unsafe);
+        }
+        let quarantine = test.temporary.join(quarantine_name);
+        match fs::symlink_metadata(&quarantine) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(CleanupRefusal::Unsafe),
+        }
+        let quarantine_wide = quarantine_name.encode_wide().collect::<Vec<_>>();
+        match plurum_windows_syscall::rename_by_handle(
+            root.as_handle(),
+            temporary.as_handle(),
+            &quarantine_wide,
+            false,
+        )
+        .map_err(|_| CleanupRefusal::Unsafe)?
+        {
+            plurum_windows_syscall::MutationAttempt::Applied => {}
+            plurum_windows_syscall::MutationAttempt::Conflict
+            | plurum_windows_syscall::MutationAttempt::Unsupported => {
+                return Err(CleanupRefusal::Unsafe);
+            }
+        }
+        if !path_is_missing(&test.root) {
+            return Err(CleanupRefusal::Unsafe);
+        }
+        // `root` retains DELETE access while pinning the renamed object. The
+        // verification handle must therefore share deletion without requesting
+        // it itself, or Windows correctly rejects the second open.
+        let rebound =
+            open_directory_nofollow(&quarantine, true).map_err(|_| CleanupRefusal::Unsafe)?;
+        if !plan.root.object.matches(&rebound, &test.cleanup.process)? {
+            return Err(CleanupRefusal::Unsafe);
+        }
+        drop(rebound);
+        if fault == CleanupFault::AfterQuarantine {
+            return Err(CleanupRefusal::Unsafe);
+        }
+
+        let mut fault_state = CleanupFaultState {
+            fault,
+            removed_children: 0,
+        };
+        remove_expected_children(
+            &quarantine,
+            &plan.root,
+            &test.cleanup.process,
+            test.cleanup.marker.identity,
+            &mut fault_state,
+        )?;
+        if !plan.root.object.matches(&root, &test.cleanup.process)? {
+            return Err(CleanupRefusal::Unsafe);
+        }
+        require_empty_directory(&quarantine)?;
+        match plurum_windows_syscall::remove_by_handle(root.as_handle())
+            .map_err(|_| CleanupRefusal::Unsafe)?
+        {
+            plurum_windows_syscall::MutationAttempt::Applied => {}
+            plurum_windows_syscall::MutationAttempt::Conflict
+            | plurum_windows_syscall::MutationAttempt::Unsupported => {
+                return Err(CleanupRefusal::Unsafe);
+            }
+        }
+        drop(root);
+        if fault == CleanupFault::AfterRootRemoval {
+            return Err(CleanupRefusal::Unsafe);
+        }
+        if !path_is_missing(&test.root) || !path_is_missing(&quarantine) {
+            return Err(CleanupRefusal::Unsafe);
+        }
+        Ok(())
+    }
+
+    fn remove_expected_children(
+        directory: &Path,
+        expected: &CleanupNode,
+        process: &ProcessIdentity,
+        marker_identity: ObjectIdentity,
+        fault: &mut CleanupFaultState,
+    ) -> Result<(), CleanupRefusal> {
+        let actual_names = cleanup_names(directory, expected.children.len())?;
+        let mut expected_names = expected
+            .children
+            .iter()
+            .map(|child| child.name.clone())
+            .collect::<Vec<_>>();
+        expected_names.sort();
+        if actual_names != expected_names {
+            return Err(CleanupRefusal::Unsafe);
+        }
+
+        let mut children = expected.children.iter().collect::<Vec<_>>();
+        children.sort_by_key(|child| child.object.identity == marker_identity);
+        for child in children {
+            let path = directory.join(&child.name);
+            if child.object.kind == ObjectKind::Directory {
+                let opened = open_cleanup_directory(&path).map_err(|_| CleanupRefusal::Unsafe)?;
+                if !child.object.matches(&opened, process)? {
+                    return Err(CleanupRefusal::Unsafe);
+                }
+                remove_expected_children(&path, child, process, marker_identity, fault)?;
+                if !child.object.matches(&opened, process)? {
+                    return Err(CleanupRefusal::Unsafe);
+                }
+                require_empty_directory(&path)?;
+                match plurum_windows_syscall::remove_by_handle(opened.as_handle())
+                    .map_err(|_| CleanupRefusal::Unsafe)?
+                {
+                    plurum_windows_syscall::MutationAttempt::Applied => {}
+                    plurum_windows_syscall::MutationAttempt::Conflict
+                    | plurum_windows_syscall::MutationAttempt::Unsupported => {
+                        return Err(CleanupRefusal::Unsafe);
+                    }
+                }
+                drop(opened);
+            } else {
+                let opened = open_cleanup_file(&path).map_err(|_| CleanupRefusal::Unsafe)?;
+                if !child.object.matches(&opened, process)? {
+                    return Err(CleanupRefusal::Unsafe);
+                }
+                if child.object.identity == marker_identity
+                    && (child.name != OsStr::new(".plurum-windows-native-test")
+                        || child.object.size != Some(TEST_MARKER.len() as u64)
+                        || read_exact_at(&opened, TEST_MARKER.len())
+                            .map_err(|_| CleanupRefusal::Unsafe)?
+                            != TEST_MARKER.as_bytes())
+                {
+                    return Err(CleanupRefusal::Unsafe);
+                }
+                match plurum_windows_syscall::remove_by_handle(opened.as_handle())
+                    .map_err(|_| CleanupRefusal::Unsafe)?
+                {
+                    plurum_windows_syscall::MutationAttempt::Applied => {}
+                    plurum_windows_syscall::MutationAttempt::Conflict
+                    | plurum_windows_syscall::MutationAttempt::Unsupported => {
+                        return Err(CleanupRefusal::Unsafe);
+                    }
+                }
+                drop(opened);
+            }
+            if !path_is_missing(&path) {
+                return Err(CleanupRefusal::Unsafe);
+            }
+            fault.removed_children = fault
+                .removed_children
+                .checked_add(1)
+                .ok_or(CleanupRefusal::Limit)?;
+            if fault.fault == CleanupFault::AfterFirstChildRemoval && fault.removed_children == 1 {
+                return Err(CleanupRefusal::Unsafe);
+            }
+        }
+        require_empty_directory(directory)
+    }
+
+    fn restore_quarantined_root(
+        test: &TestRoot,
+        quarantine_name: &OsStr,
+    ) -> Result<(), CleanupRefusal> {
+        if !valid_component(quarantine_name) || !path_is_missing(&test.root) {
+            return Err(CleanupRefusal::Unsafe);
+        }
+        let temporary_chain = NormalizedAbsolutePath::parse(&test.temporary)
+            .and_then(|path| path.open_complete())
+            .map_err(|_| CleanupRefusal::Unsafe)?;
+        let root_parent_chain = NormalizedAbsolutePath::parse(&test.root)
+            .and_then(|path| path.open_parent())
+            .map_err(|_| CleanupRefusal::Unsafe)?;
+        let temporary = &temporary_chain.leaf;
+        if !test
+            .cleanup
+            .temporary
+            .matches(temporary, &test.cleanup.process)?
+            || !test
+                .cleanup
+                .temporary
+                .matches(&root_parent_chain.leaf, &test.cleanup.process)?
+            || attest_local_ntfs(temporary.as_handle(), &test.cleanup.drive_root)
+                .map_err(|_| CleanupRefusal::Unsafe)?
+                != test.cleanup.temporary_volume
+        {
+            return Err(CleanupRefusal::Unsafe);
+        }
+        let quarantine = test.temporary.join(quarantine_name);
+        let root = open_cleanup_directory(&quarantine).map_err(|_| CleanupRefusal::Unsafe)?;
+        if !test.cleanup.root.matches(&root, &test.cleanup.process)? {
+            return Err(CleanupRefusal::Unsafe);
+        }
+        let original_name = test
+            .root
+            .file_name()
+            .ok_or(CleanupRefusal::Unsafe)?
+            .encode_wide()
+            .collect::<Vec<_>>();
+        match plurum_windows_syscall::rename_by_handle(
+            root.as_handle(),
+            temporary.as_handle(),
+            &original_name,
+            false,
+        )
+        .map_err(|_| CleanupRefusal::Unsafe)?
+        {
+            plurum_windows_syscall::MutationAttempt::Applied => {}
+            plurum_windows_syscall::MutationAttempt::Conflict
+            | plurum_windows_syscall::MutationAttempt::Unsupported => {
+                return Err(CleanupRefusal::Unsafe);
+            }
+        }
+        if !path_is_missing(&quarantine) {
+            return Err(CleanupRefusal::Unsafe);
+        }
+        // `root` still carries DELETE access across the handle-relative rename.
+        let rebound =
+            open_directory_nofollow(&test.root, true).map_err(|_| CleanupRefusal::Unsafe)?;
+        if test.cleanup.root.matches(&rebound, &test.cleanup.process)? {
+            Ok(())
+        } else {
+            Err(CleanupRefusal::Unsafe)
+        }
+    }
+
+    fn cleanup_names(directory: &Path, maximum: usize) -> Result<Vec<OsString>, CleanupRefusal> {
+        let mut names = Vec::with_capacity(maximum.min(256));
+        let stream = fs::read_dir(directory).map_err(|_| CleanupRefusal::Unsafe)?;
+        for entry in stream {
+            if names.len() == maximum {
+                return Err(CleanupRefusal::Unsafe);
+            }
+            let name = entry.map_err(|_| CleanupRefusal::Unsafe)?.file_name();
+            if !valid_component(&name) {
+                return Err(CleanupRefusal::Unsafe);
+            }
+            names.push(name);
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    fn require_empty_directory(directory: &Path) -> Result<(), CleanupRefusal> {
+        let mut entries = fs::read_dir(directory).map_err(|_| CleanupRefusal::Unsafe)?;
+        match entries.next() {
+            None => Ok(()),
+            Some(Ok(_)) => Err(CleanupRefusal::Unsafe),
+            Some(Err(_)) => Err(CleanupRefusal::Unsafe),
+        }
+    }
+
+    fn path_is_missing(path: &Path) -> bool {
+        matches!(
+            fs::symlink_metadata(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
     }
 
     pub(super) fn acquired_lease(
@@ -1531,6 +2457,323 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_guard_requires_original_root_and_marker_identities() {
+        let test = TestRoot::new();
+        assert_eq!(
+            test.cleanup_check(CleanupLimits::STANDARD),
+            Ok(()),
+            "fresh disposable tree must pass cleanup validation"
+        );
+
+        let parked_marker = test.root.join(".parked-native-test-marker");
+        fs::rename(&test.marker, &parked_marker).expect("original marker must be parkable");
+        let process = ProcessIdentity::capture().expect("test process identity must be safe");
+        let mut replacement = match create_private_file(
+            &test.marker,
+            &process,
+            GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+            FILE_SHARE_READ,
+        )
+        .expect("replacement marker create must complete")
+        {
+            FileCreateAttempt::Created(file) => file,
+            FileCreateAttempt::Conflict => panic!("replacement marker unexpectedly exists"),
+        };
+        replacement
+            .write_all(TEST_MARKER.as_bytes())
+            .expect("replacement marker bytes must be written");
+        flush_file(replacement.as_handle()).expect("replacement marker must be flushed");
+        drop(replacement);
+        assert_eq!(
+            test.cleanup_check(CleanupLimits::STANDARD),
+            Err(CleanupRefusal::Unsafe),
+            "identical marker bytes must not substitute for the original file identity"
+        );
+        assert!(
+            test.root.is_dir(),
+            "refused cleanup must not mutate the tree"
+        );
+        fs::remove_file(&test.marker).expect("replacement marker must be removable");
+        fs::rename(&parked_marker, &test.marker).expect("original marker must be restorable");
+
+        let parked_root = test.temporary.join(format!(
+            ".parked-{}",
+            test.root.file_name().unwrap().to_string_lossy()
+        ));
+        fs::rename(&test.root, &parked_root).expect("original root must be parkable");
+        let replacement_root =
+            ensure_private_directory(&test.root).expect("replacement root must be securable");
+        assert_eq!(replacement_root.disposition, DirectoryDisposition::Created);
+        drop(replacement_root);
+        let mut replacement_marker = match create_private_file(
+            &test.marker,
+            &process,
+            GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+            FILE_SHARE_READ,
+        )
+        .expect("replacement root marker create must complete")
+        {
+            FileCreateAttempt::Created(file) => file,
+            FileCreateAttempt::Conflict => panic!("replacement root marker unexpectedly exists"),
+        };
+        replacement_marker
+            .write_all(TEST_MARKER.as_bytes())
+            .expect("replacement root marker bytes must be written");
+        flush_file(replacement_marker.as_handle())
+            .expect("replacement root marker must be flushed");
+        drop(replacement_marker);
+        assert_eq!(
+            test.cleanup_check(CleanupLimits::STANDARD),
+            Err(CleanupRefusal::Unsafe),
+            "a new private root at the same path must not replace the captured root identity"
+        );
+        assert!(
+            test.root.is_dir(),
+            "refused cleanup must retain replacement root"
+        );
+        fs::remove_file(&test.marker).expect("known replacement marker must be removable");
+        fs::remove_dir(&test.root).expect("known empty replacement root must be removable");
+        fs::rename(&parked_root, &test.root).expect("original root must be restorable");
+        assert_eq!(test.cleanup_check(CleanupLimits::STANDARD), Ok(()));
+    }
+
+    #[test]
+    fn cleanup_guard_refuses_reparse_points_hard_links_and_exhausted_bounds() {
+        let test = TestRoot::new();
+
+        let alias = test.root.join("marker-hard-link");
+        fs::hard_link(&test.marker, &alias).expect("marker hard-link fixture must be created");
+        assert_eq!(
+            test.cleanup_check(CleanupLimits::STANDARD),
+            Err(CleanupRefusal::Unsafe)
+        );
+        assert!(
+            alias.is_file(),
+            "refused cleanup must retain hard-link fixture"
+        );
+        fs::remove_file(&alias).expect("hard-link fixture must be removable");
+
+        let target = test.root.join("junction-target");
+        drop(
+            ensure_private_directory(&target)
+                .expect("junction target must be created with exact private security"),
+        );
+        let junction = test.root.join("cleanup-junction");
+        fs::create_dir(&junction).expect("junction placeholder must be created");
+        let junction_created =
+            plurum_windows_syscall::try_create_junction_for_tests(&junction, &target)
+                .expect("junction creation attempt must complete");
+        if env::var("CI").as_deref() == Ok("true") {
+            assert!(
+                junction_created,
+                "Windows CI must execute cleanup junction refusal"
+            );
+        }
+        if junction_created {
+            assert_eq!(
+                test.cleanup_check(CleanupLimits::STANDARD),
+                Err(CleanupRefusal::Unsafe)
+            );
+            assert!(target.is_dir(), "refused cleanup must not follow junction");
+        }
+        fs::remove_dir(&junction).expect("junction fixture must be removable");
+
+        assert_eq!(
+            test.cleanup_check(CleanupLimits {
+                entries: 1,
+                ..CleanupLimits::STANDARD
+            }),
+            Err(CleanupRefusal::Limit)
+        );
+        assert_eq!(
+            test.cleanup_check(CleanupLimits {
+                depth: 0,
+                ..CleanupLimits::STANDARD
+            }),
+            Err(CleanupRefusal::Limit)
+        );
+        assert_eq!(
+            test.cleanup_check(CleanupLimits {
+                bytes: 0,
+                ..CleanupLimits::STANDARD
+            }),
+            Err(CleanupRefusal::Limit)
+        );
+        assert_eq!(test.cleanup_check(CleanupLimits::STANDARD), Ok(()));
+    }
+
+    #[test]
+    fn cleanup_guard_removes_only_a_fully_revalidated_disposable_tree() {
+        let test = TestRoot::new();
+        let root = test.root.clone();
+        assert_eq!(test.cleanup_check(CleanupLimits::STANDARD), Ok(()));
+        drop(test);
+        assert!(
+            fs::symlink_metadata(root).is_err(),
+            "validated disposable tree must be removed"
+        );
+    }
+
+    #[test]
+    fn cleanup_guard_requires_exact_descendant_security_and_stable_contents() {
+        let mut test = TestRoot::new();
+        let broad = test.root.join("broad-descendant");
+        drop(
+            ensure_private_directory(&broad)
+                .expect("broad descendant must begin with private security"),
+        );
+        plurum_windows_syscall::set_broad_dacl_for_tests(&broad, SecurityKind::Directory)
+            .expect("broad descendant DACL must be installed");
+        assert_eq!(
+            test.cleanup_check(CleanupLimits::STANDARD),
+            Err(CleanupRefusal::Unsafe)
+        );
+        plurum_windows_syscall::set_private_current_user_dacl_for_tests(
+            &broad,
+            SecurityKind::Directory,
+        )
+        .expect("broad descendant must be restored to exact private security");
+
+        let inherited = test.root.join("inherited-descendant");
+        write_private_test_file(&inherited, b"private");
+        plurum_windows_syscall::set_inherited_current_user_dacl_for_tests(
+            &inherited,
+            SecurityKind::File,
+        )
+        .expect("inherited descendant DACL must be installed");
+        assert_eq!(
+            test.cleanup_check(CleanupLimits::STANDARD),
+            Err(CleanupRefusal::Unsafe)
+        );
+        plurum_windows_syscall::set_private_current_user_dacl_for_tests(
+            &inherited,
+            SecurityKind::File,
+        )
+        .expect("inherited descendant must be restored to exact private security");
+
+        let plan = test
+            .cleanup_plan(CleanupLimits::STANDARD)
+            .expect("stable private tree must produce a cleanup plan");
+        let unexpected = test.root.join("unexpected-after-plan");
+        write_private_test_file(&unexpected, b"unexpected");
+        assert_eq!(
+            execute_cleanup_plan(&test, &plan),
+            Err(CleanupRefusal::Unsafe),
+            "an unexpected nonempty entry must prevent quarantine and deletion"
+        );
+        assert!(test.root.is_dir());
+        fs::remove_file(unexpected).expect("known unexpected fixture must be removable");
+
+        let sharing_conflict = test.root.join("sharing-conflict");
+        let holder = write_private_test_file_retained(&sharing_conflict, b"held");
+        assert_eq!(
+            test.cleanup_now(),
+            Err(CleanupRefusal::Unsafe),
+            "a handle denying delete sharing must prevent cleanup"
+        );
+        assert!(test.root.is_dir());
+        drop(holder);
+        assert_eq!(test.cleanup_check(CleanupLimits::STANDARD), Ok(()));
+    }
+
+    #[test]
+    fn cleanup_guard_handles_a_bounded_nested_tree_by_exact_native_identity() {
+        let test = TestRoot::new();
+        let first = test.root.join("first");
+        let second = first.join("second");
+        drop(ensure_private_directory(&first).expect("first private directory must be created"));
+        drop(ensure_private_directory(&second).expect("second private directory must be created"));
+        for index in 0..32 {
+            write_private_test_file(
+                &second.join(format!("entry-{index:02}")),
+                format!("payload-{index:02}").as_bytes(),
+            );
+        }
+        assert_eq!(test.cleanup_check(CleanupLimits::STANDARD), Ok(()));
+    }
+
+    #[test]
+    fn cleanup_fault_boundaries_never_fall_back_to_path_recursive_deletion() {
+        let mut test = TestRoot::new();
+        write_private_test_file(&test.root.join("fault-child"), b"fault");
+
+        let plan = test
+            .cleanup_plan(CleanupLimits::STANDARD)
+            .expect("fault test tree must produce a cleanup plan");
+        let after_quarantine = quarantine_name(&test.cleanup.root);
+        assert_eq!(
+            execute_cleanup_plan_named(
+                &test,
+                &plan,
+                &after_quarantine,
+                CleanupFault::AfterQuarantine,
+            ),
+            Err(CleanupRefusal::Unsafe)
+        );
+        assert!(path_is_missing(&test.root));
+        assert!(test.temporary.join(&after_quarantine).is_dir());
+        restore_quarantined_root(&test, &after_quarantine)
+            .expect("untouched quarantine must restore by exact handle");
+
+        let plan = test
+            .cleanup_plan(CleanupLimits::STANDARD)
+            .expect("restored fault tree must produce a cleanup plan");
+        let after_child = quarantine_name(&test.cleanup.root);
+        assert_eq!(
+            execute_cleanup_plan_named(
+                &test,
+                &plan,
+                &after_child,
+                CleanupFault::AfterFirstChildRemoval,
+            ),
+            Err(CleanupRefusal::Unsafe)
+        );
+        assert!(path_is_missing(&test.root));
+        assert!(test.temporary.join(&after_child).is_dir());
+        restore_quarantined_root(&test, &after_child)
+            .expect("partially reduced quarantine must restore by exact handle");
+        assert!(
+            test.marker.is_file(),
+            "the original marker must be retained until the final child removal"
+        );
+
+        let plan = test
+            .cleanup_plan(CleanupLimits::STANDARD)
+            .expect("reduced fault tree must produce a cleanup plan");
+        let after_root = quarantine_name(&test.cleanup.root);
+        assert_eq!(
+            execute_cleanup_plan_named(&test, &plan, &after_root, CleanupFault::AfterRootRemoval,),
+            Err(CleanupRefusal::Unsafe)
+        );
+        assert!(path_is_missing(&test.root));
+        assert!(path_is_missing(&test.temporary.join(after_root)));
+        test.cleaned = true;
+    }
+
+    fn write_private_test_file(path: &Path, bytes: &[u8]) {
+        drop(write_private_test_file_retained(path, bytes));
+    }
+
+    fn write_private_test_file_retained(path: &Path, bytes: &[u8]) -> File {
+        let process = ProcessIdentity::capture().expect("test process identity must be safe");
+        let mut file = match create_private_file(
+            path,
+            &process,
+            GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+            FILE_SHARE_READ,
+        )
+        .expect("private test file create must complete")
+        {
+            FileCreateAttempt::Created(file) => file,
+            FileCreateAttempt::Conflict => panic!("private test file unexpectedly exists"),
+        };
+        file.write_all(bytes)
+            .expect("private test file bytes must be written");
+        flush_file(file.as_handle()).expect("private test file must be flushed");
+        file
+    }
+
+    #[test]
     fn exact_user_acl_bounded_reads_and_terminal_handles() {
         let test = TestRoot::new();
         let (_, _, mut lease) = acquired_lease(&test.store, NONCE_1);
@@ -1567,7 +2810,10 @@ mod tests {
     fn final_and_intermediate_directory_reparse_points_are_never_followed() {
         let test = TestRoot::new();
         let outside = test.root.join("outside");
-        fs::create_dir(&outside).expect("outside directory must exist");
+        drop(
+            ensure_private_directory(&outside)
+                .expect("outside directory must exist with exact private security"),
+        );
         symlink_dir(&outside, &test.store).expect("directory symlink must be created");
         assert!(matches!(
             ensure_private_directory(&test.store),
@@ -1623,6 +2869,7 @@ mod tests {
             open_private_directory(&broad),
             Err(WindowsStoreError::Unsafe)
         ));
+        fs::remove_dir(&broad).expect("broad-DACL fixture must be removed after assertion");
 
         let inherited = test.root.join("Inherited");
         drop(
@@ -1637,6 +2884,7 @@ mod tests {
             open_private_directory(&inherited),
             Err(WindowsStoreError::Unsafe)
         ));
+        fs::remove_dir(&inherited).expect("inherited-DACL fixture must be removed after assertion");
 
         let wrong_owner = test.root.join("WrongOwner");
         drop(
@@ -1660,6 +2908,7 @@ mod tests {
                 Err(WindowsStoreError::Unsafe)
             ));
         }
+        fs::remove_dir(&wrong_owner).expect("wrong-owner fixture must be removed after assertion");
     }
 
     #[test]
@@ -1688,6 +2937,9 @@ mod tests {
             fs::read(&target).expect("reparse target must remain readable"),
             b"outside"
         );
+        fs::remove_file(&credential)
+            .expect("credential reparse fixture must be removed after assertion");
+        fs::remove_file(&target).expect("reparse target fixture must be removed after assertion");
     }
 
     #[test]
@@ -1721,7 +2973,8 @@ mod tests {
         fs::remove_file(&lock_path).expect("malformed lock must be removable");
 
         let (_, _, mut lease) = acquired_lease(&test.store, NONCE_1);
-        fs::write(test.root.join("unrelated-write"), b"ok")
+        let unrelated = test.root.join("unrelated-write");
+        fs::write(&unrelated, b"ok")
             .expect("retained ancestor handles must allow unrelated writes");
         assert!(
             fs::rename(&lock_path, test.store.join("replacement.lock")).is_err(),
@@ -1733,6 +2986,7 @@ mod tests {
         );
         assert_eq!(lease.renew(), LeaseRenewal::Held);
         lease.release().expect("lease must release cleanly");
+        fs::remove_file(unrelated).expect("known unrelated-write fixture must be removable");
     }
 
     #[test]
@@ -1775,6 +3029,7 @@ mod tests {
         let (prior, _, mut recovered) = acquired_lease(&test.store, NONCE_2);
         assert_eq!(prior, PriorLease::ProvenAbandoned);
         recovered.release().expect("recovered lease must release");
+        fs::remove_file(&ready).expect("child readiness fixture must be removable");
     }
 
     #[test]

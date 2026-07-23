@@ -1061,8 +1061,16 @@ pub fn prepare_medium_integrity_test_directory(path: &Path) -> Result<()> {
         return Err(WinError::last(ErrorKind::Other));
     }
     let handle = OwnedHandle(handle);
+    prepare_medium_integrity_test_directory_handle(
+        // SAFETY: handle remains live for the duration of the borrowed call.
+        unsafe { BorrowedHandle::borrow_raw(handle.0.cast()) },
+    )
+}
+
+#[cfg(feature = "test-support")]
+pub fn prepare_medium_integrity_test_directory_handle(handle: BorrowedHandle<'_>) -> Result<()> {
     set_and_attest_medium_label(
-        handle.0,
+        raw(handle),
         SE_FILE_OBJECT,
         OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
         SecurityKind::Directory,
@@ -1166,18 +1174,50 @@ fn attest_handle_medium_label(
 
 #[cfg(feature = "test-support")]
 pub fn set_broad_dacl_for_tests(path: &Path, kind: SecurityKind) -> Result<()> {
-    set_test_dacl(path, kind, true)
+    set_test_dacl(path, kind, true, true)
 }
 
 #[cfg(feature = "test-support")]
 pub fn set_inherited_current_user_dacl_for_tests(path: &Path, kind: SecurityKind) -> Result<()> {
-    set_test_dacl(path, kind, false)
+    set_test_dacl(path, kind, false, false)
 }
 
 #[cfg(feature = "test-support")]
-fn set_test_dacl(path: &Path, kind: SecurityKind, broad: bool) -> Result<()> {
+pub fn set_private_current_user_dacl_for_tests(path: &Path, kind: SecurityKind) -> Result<()> {
+    set_test_dacl(path, kind, false, true)
+}
+
+#[cfg(feature = "test-support")]
+pub fn set_private_current_user_dacl_for_tests_handle(
+    handle: BorrowedHandle<'_>,
+    kind: SecurityKind,
+) -> Result<()> {
+    let process = ProcessIdentity::capture()?;
+    set_test_dacl_handle(handle, kind, false, true, &process)
+}
+
+#[cfg(feature = "test-support")]
+fn set_test_dacl(path: &Path, kind: SecurityKind, broad: bool, protected: bool) -> Result<()> {
     let process = ProcessIdentity::capture()?;
     let handle = open_test_object(path, kind, READ_CONTROL | WRITE_DAC)?;
+    set_test_dacl_handle(
+        // SAFETY: handle remains live for the duration of the borrowed call.
+        unsafe { BorrowedHandle::borrow_raw(handle.0.cast()) },
+        kind,
+        broad,
+        protected,
+        &process,
+    )
+}
+
+#[cfg(feature = "test-support")]
+fn set_test_dacl_handle(
+    handle: BorrowedHandle<'_>,
+    kind: SecurityKind,
+    broad: bool,
+    protected: bool,
+    process: &ProcessIdentity,
+) -> Result<()> {
     let mut sid_storage =
         vec![0_usize; (SECURITY_MAX_SID_SIZE as usize).div_ceil(size_of::<usize>())];
     let sid = if broad {
@@ -1224,10 +1264,10 @@ fn set_test_dacl(path: &Path, kind: SecurityKind, broad: bool) -> Result<()> {
     // SAFETY: handle has WRITE_DAC and acl is initialized and live for the call.
     let status = unsafe {
         SetSecurityInfo(
-            handle.0,
+            raw(handle),
             SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION
-                | if broad {
+                | if protected {
                     PROTECTED_DACL_SECURITY_INFORMATION
                 } else {
                     UNPROTECTED_DACL_SECURITY_INFORMATION
@@ -1241,13 +1281,11 @@ fn set_test_dacl(path: &Path, kind: SecurityKind, broad: bool) -> Result<()> {
     if status != 0 {
         return Err(WinError::code(ErrorKind::Other, status));
     }
-    let security = attest_security(
-        // SAFETY: handle remains live and is not mutably aliased by BorrowedHandle.
-        unsafe { BorrowedHandle::borrow_raw(handle.0.cast()) },
-        &process,
-        kind,
-    )?;
-    if security.owner_current && !security.exact_protected_dacl && security.semantic_medium_label {
+    let security = attest_security(handle, process, kind)?;
+    if security.owner_current
+        && security.exact_protected_dacl == (!broad && protected)
+        && security.semantic_medium_label
+    {
         Ok(())
     } else {
         Err(WinError::code(ErrorKind::Unsafe, 5))

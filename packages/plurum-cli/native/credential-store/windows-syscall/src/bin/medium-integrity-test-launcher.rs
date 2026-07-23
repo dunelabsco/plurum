@@ -200,6 +200,7 @@ fn run() -> Result<i32, &'static str> {
         .current_dir(&context.run_root)
         .env_remove("PLURUM_NATIVE_ABI_NODE")
         .env_remove("PLURUM_NATIVE_ABI_RUN_ROOT")
+        .env_remove("RUNNER_TEMP")
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
