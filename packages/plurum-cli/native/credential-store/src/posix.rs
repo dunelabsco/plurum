@@ -1262,41 +1262,20 @@ fn classify_legacy_initial_error(
     }
 }
 
-fn read_allowlisted_legacy_credential_with_hook<F>(
-    path: &Path,
+fn read_allowlisted_legacy_credential_from_parent_with_hook<F, C>(
+    parent: &File,
+    process: ProcessIdentity,
     expected_leaf: &OsStr,
     max_bytes: usize,
+    read_limit: usize,
     before_read: F,
+    parent_is_current: C,
 ) -> Result<LegacyCredentialReadResult, PosixStoreError>
 where
     F: FnOnce(),
+    C: FnOnce() -> Result<bool, PosixStoreError>,
 {
-    if !is_single_entry_name(expected_leaf) {
-        return Err(PosixStoreError::InvalidInput);
-    }
-    let read_limit = max_bytes.checked_add(1).ok_or(PosixStoreError::Limit)?;
-    if read_limit > MAX_ATTESTED_BYTES {
-        return Err(PosixStoreError::Limit);
-    }
-    let process = ProcessIdentity::capture()?;
-    let path = NormalizedAbsolutePath::parse(path)?;
-    if path.final_name() != expected_leaf {
-        return Err(PosixStoreError::InvalidInput);
-    }
-    let chain = match open_legacy_parent_chain(&path, process) {
-        Ok(chain) => chain,
-        Err(error) => return classify_legacy_initial_error(error),
-    };
-    if !legacy_parent_chain_is_current(&chain, &path, process)? {
-        return Ok(LegacyCredentialReadResult::Unsafe);
-    }
-
-    let file = match secure_openat(
-        chain.parent(),
-        expected_leaf,
-        read_open_flags(),
-        Mode::empty(),
-    ) {
+    let file = match secure_openat(parent, expected_leaf, read_open_flags(), Mode::empty()) {
         Ok(file) => File::from(file),
         Err(error) if error == Errno::NOENT => return Ok(LegacyCredentialReadResult::Missing),
         Err(error) if error == Errno::LOOP || error == Errno::NOTDIR => {
@@ -1308,12 +1287,7 @@ where
     if !legacy_file_is_safe(before, process, &file)? {
         return Ok(LegacyCredentialReadResult::Unsafe);
     }
-    let rebound = match secure_openat(
-        chain.parent(),
-        expected_leaf,
-        read_open_flags(),
-        Mode::empty(),
-    ) {
+    let rebound = match secure_openat(parent, expected_leaf, read_open_flags(), Mode::empty()) {
         Ok(file) => File::from(file),
         Err(error) if error == Errno::NOENT => {
             return Ok(LegacyCredentialReadResult::Unsafe);
@@ -1335,18 +1309,11 @@ where
         }
     };
     let path_is_current = (|| {
-        if before != after
-            || !legacy_file_is_safe(after, process, &file)?
-            || !legacy_parent_chain_is_current(&chain, &path, process)?
+        if before != after || !legacy_file_is_safe(after, process, &file)? || !parent_is_current()?
         {
             return Ok(false);
         }
-        let current = match secure_openat(
-            chain.parent(),
-            expected_leaf,
-            read_open_flags(),
-            Mode::empty(),
-        ) {
+        let current = match secure_openat(parent, expected_leaf, read_open_flags(), Mode::empty()) {
             Ok(file) => File::from(file),
             Err(_) => return Ok(false),
         };
@@ -1377,6 +1344,46 @@ where
         return Ok(LegacyCredentialReadResult::Malformed);
     }
     Ok(LegacyCredentialReadResult::Loaded(bytes))
+}
+
+fn read_allowlisted_legacy_credential_with_hook<F>(
+    path: &Path,
+    expected_leaf: &OsStr,
+    max_bytes: usize,
+    before_read: F,
+) -> Result<LegacyCredentialReadResult, PosixStoreError>
+where
+    F: FnOnce(),
+{
+    if !is_single_entry_name(expected_leaf) {
+        return Err(PosixStoreError::InvalidInput);
+    }
+    let read_limit = max_bytes.checked_add(1).ok_or(PosixStoreError::Limit)?;
+    if read_limit > MAX_ATTESTED_BYTES {
+        return Err(PosixStoreError::Limit);
+    }
+    let process = ProcessIdentity::capture()?;
+    let path = NormalizedAbsolutePath::parse(path)?;
+    if path.final_name() != expected_leaf {
+        return Err(PosixStoreError::InvalidInput);
+    }
+    let chain = match open_legacy_parent_chain(&path, process) {
+        Ok(chain) => chain,
+        Err(error) => return classify_legacy_initial_error(error),
+    };
+    if !legacy_parent_chain_is_current(&chain, &path, process)? {
+        return Ok(LegacyCredentialReadResult::Unsafe);
+    }
+
+    read_allowlisted_legacy_credential_from_parent_with_hook(
+        chain.parent(),
+        process,
+        expected_leaf,
+        max_bytes,
+        read_limit,
+        before_read,
+        || legacy_parent_chain_is_current(&chain, &path, process),
+    )
 }
 
 pub(crate) fn read_allowlisted_legacy_credential(
@@ -3061,6 +3068,62 @@ mod tests {
             .expect("private test file replacement must sync");
     }
 
+    fn retained_legacy_test_parent_is_current(test: &TestRoot) -> Result<bool, PosixStoreError> {
+        test.process.verify()?;
+        let current = metadata(&test.root_directory)?;
+        Ok(same_legacy_directory_binding(current, test.root_origin)
+            && legacy_directory_is_safe(current, test.process, true)
+            && platform::access_is_private(&test.root_directory)?)
+    }
+
+    fn read_allowlisted_legacy_credential_beneath_test_root_with_hook<F>(
+        test: &TestRoot,
+        expected_leaf: &OsStr,
+        max_bytes: usize,
+        before_read: F,
+    ) -> Result<LegacyCredentialReadResult, PosixStoreError>
+    where
+        F: FnOnce(),
+    {
+        if !is_single_entry_name(expected_leaf) {
+            return Err(PosixStoreError::InvalidInput);
+        }
+        let read_limit = max_bytes.checked_add(1).ok_or(PosixStoreError::Limit)?;
+        if read_limit > MAX_ATTESTED_BYTES {
+            return Err(PosixStoreError::Limit);
+        }
+        let process = ProcessIdentity::capture()?;
+        if process != test.process {
+            return Err(PosixStoreError::InvalidInput);
+        }
+        if !retained_legacy_test_parent_is_current(test)? {
+            return Ok(LegacyCredentialReadResult::Unsafe);
+        }
+
+        read_allowlisted_legacy_credential_from_parent_with_hook(
+            &test.root_directory,
+            process,
+            expected_leaf,
+            max_bytes,
+            read_limit,
+            before_read,
+            || retained_legacy_test_parent_is_current(test),
+        )
+    }
+
+    fn read_allowlisted_legacy_credential_beneath_test_root(
+        test: &TestRoot,
+        expected_leaf: &OsStr,
+        max_bytes: usize,
+    ) -> Result<LegacyCredentialReadResult, PosixStoreError> {
+        read_allowlisted_legacy_credential_beneath_test_root_with_hook(
+            test,
+            expected_leaf,
+            max_bytes,
+            || {},
+        )
+    }
+
     fn opened_directory(path: &Path) -> PosixPrivateDirectory {
         match open_private_directory(path).expect("directory open must complete") {
             PrivateDirectoryOpenResult::Missing => panic!("test directory unexpectedly missing"),
@@ -3195,13 +3258,39 @@ mod tests {
         let loaded = TestRoot::new();
         let loaded_path = loaded.root.join("legacy.json");
         create_private_file(&loaded_path, br#"{"apiKey":"secret"}"#);
-        match read_allowlisted_legacy_credential(&loaded_path, OsStr::new("legacy.json"), 128)
-            .expect("legacy read must complete")
+        match read_allowlisted_legacy_credential_beneath_test_root(
+            &loaded,
+            OsStr::new("legacy.json"),
+            128,
+        )
+        .expect("legacy read must complete")
         {
             LegacyCredentialReadResult::Loaded(bytes) => {
                 assert_eq!(bytes, br#"{"apiKey":"secret"}"#);
             }
             _ => panic!("safe legacy source must load"),
+        }
+        let ambient_process =
+            ProcessIdentity::capture().expect("ambient process identity must capture");
+        let ambient_path =
+            NormalizedAbsolutePath::parse(&loaded_path).expect("ambient path must normalize");
+        let ambient_parent_is_safe = match open_legacy_parent_chain(&ambient_path, ambient_process)
+        {
+            Ok(chain) => legacy_parent_chain_is_current(&chain, &ambient_path, ambient_process)
+                .expect("ambient parent chain must revalidate"),
+            Err(PosixStoreError::Unsafe | PosixStoreError::Lost) => false,
+            Err(error) => panic!("ambient parent traversal failed unexpectedly: {error:?}"),
+        };
+        match (
+            ambient_parent_is_safe,
+            read_allowlisted_legacy_credential(&loaded_path, OsStr::new("legacy.json"), 128)
+                .expect("ambient legacy traversal must fail closed"),
+        ) {
+            (true, LegacyCredentialReadResult::Loaded(bytes)) => {
+                assert_eq!(bytes, br#"{"apiKey":"secret"}"#);
+            }
+            (false, LegacyCredentialReadResult::Unsafe) => {}
+            _ => panic!("ambient traversal must agree with its independently retained chain"),
         }
         assert!(matches!(
             read_allowlisted_legacy_credential(&loaded_path, OsStr::new("wrong.json"), 128),
@@ -3212,7 +3301,11 @@ mod tests {
         let empty_path = empty.root.join("legacy.json");
         create_private_file(&empty_path, b"");
         assert!(matches!(
-            read_allowlisted_legacy_credential(&empty_path, OsStr::new("legacy.json"), 128),
+            read_allowlisted_legacy_credential_beneath_test_root(
+                &empty,
+                OsStr::new("legacy.json"),
+                128
+            ),
             Ok(LegacyCredentialReadResult::Malformed)
         ));
 
@@ -3220,14 +3313,18 @@ mod tests {
         let oversized_path = oversized.root.join("legacy.json");
         create_private_file(&oversized_path, b"123456789");
         assert!(matches!(
-            read_allowlisted_legacy_credential(&oversized_path, OsStr::new("legacy.json"), 8),
+            read_allowlisted_legacy_credential_beneath_test_root(
+                &oversized,
+                OsStr::new("legacy.json"),
+                8
+            ),
             Ok(LegacyCredentialReadResult::Oversized)
         ));
 
         let missing = TestRoot::new();
         assert!(matches!(
-            read_allowlisted_legacy_credential(
-                &missing.root.join("legacy.json"),
+            read_allowlisted_legacy_credential_beneath_test_root(
+                &missing,
                 OsStr::new("legacy.json"),
                 128
             ),
@@ -3240,7 +3337,11 @@ mod tests {
         fs::set_permissions(&broad_path, fs::Permissions::from_mode(0o644))
             .expect("unsafe legacy mode must be set");
         assert!(matches!(
-            read_allowlisted_legacy_credential(&broad_path, OsStr::new("legacy.json"), 128),
+            read_allowlisted_legacy_credential_beneath_test_root(
+                &broad,
+                OsStr::new("legacy.json"),
+                128
+            ),
             Ok(LegacyCredentialReadResult::Unsafe)
         ));
         fs::set_permissions(&broad_path, fs::Permissions::from_mode(PRIVATE_FILE_MODE))
@@ -3250,7 +3351,11 @@ mod tests {
         let linked_path = linked.root.join("legacy.json");
         symlink(&linked.outside, &linked_path).expect("legacy symlink fixture must be created");
         assert!(matches!(
-            read_allowlisted_legacy_credential(&linked_path, OsStr::new("legacy.json"), 128),
+            read_allowlisted_legacy_credential_beneath_test_root(
+                &linked,
+                OsStr::new("legacy.json"),
+                128
+            ),
             Ok(LegacyCredentialReadResult::Unsafe)
         ));
         assert_eq!(
@@ -3265,11 +3370,53 @@ mod tests {
         create_private_file(&source, b"do-not-read");
         fs::hard_link(&source, &alias).expect("legacy hard-link fixture must be created");
         assert!(matches!(
-            read_allowlisted_legacy_credential(&alias, OsStr::new("legacy.json"), 128),
+            read_allowlisted_legacy_credential_beneath_test_root(
+                &hard_linked,
+                OsStr::new("legacy.json"),
+                128
+            ),
             Ok(LegacyCredentialReadResult::Unsafe)
         ));
         fs::remove_file(&alias).expect("legacy hard-link alias must be removed");
         fs::remove_file(&source).expect("legacy hard-link source must be removed");
+    }
+
+    #[test]
+    fn allowlisted_legacy_production_traversal_rejects_unsafe_ancestors() {
+        let test = TestRoot::new();
+        let broad_ancestor = test.root.join("broad-ancestor");
+        let direct_parent = broad_ancestor.join("direct-parent");
+        create_private_directory(&broad_ancestor);
+        create_private_directory(&direct_parent);
+        let path = direct_parent.join("legacy.json");
+        create_private_file(&path, b"do-not-read");
+
+        fs::set_permissions(
+            &broad_ancestor,
+            fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE | 0o022),
+        )
+        .expect("broad ancestor mode must be set");
+        assert!(matches!(
+            read_allowlisted_legacy_credential(&path, OsStr::new("legacy.json"), 128),
+            Ok(LegacyCredentialReadResult::Unsafe)
+        ));
+        fs::set_permissions(
+            &broad_ancestor,
+            fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE),
+        )
+        .expect("private ancestor mode must be restored");
+
+        let safe = test.root_origin;
+        assert!(legacy_directory_is_safe(safe, test.process, true));
+        let mut broad = safe;
+        broad.mode |= 0o022;
+        assert!(!legacy_directory_is_safe(broad, test.process, true));
+        let mut wrong_owner = safe;
+        wrong_owner.uid = test.process.uid.saturating_add(1);
+        assert!(!legacy_directory_is_safe(wrong_owner, test.process, true));
+        let mut wrong_kind = safe;
+        wrong_kind.kind = ObjectKind::RegularFile;
+        assert!(!legacy_directory_is_safe(wrong_kind, test.process, true));
     }
 
     #[test]
@@ -3278,8 +3425,8 @@ mod tests {
         let path = test.root.join("legacy.json");
         let retained = test.root.join("retained-original");
         create_private_file(&path, b"original-secret");
-        let result = read_allowlisted_legacy_credential_with_hook(
-            &path,
+        let result = read_allowlisted_legacy_credential_beneath_test_root_with_hook(
+            &test,
             OsStr::new("legacy.json"),
             128,
             || {

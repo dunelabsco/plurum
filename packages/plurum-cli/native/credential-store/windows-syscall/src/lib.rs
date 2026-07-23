@@ -158,9 +158,13 @@ impl Eq for ProcessIdentity {}
 
 impl ProcessIdentity {
     pub fn capture() -> Result<Self> {
+        Self::capture_with_integrity_requirement(true)
+    }
+
+    fn capture_with_integrity_requirement(require_exact_medium: bool) -> Result<Self> {
         ensure_no_impersonation()?;
         let token = OwnedHandle::current_process_token()?;
-        if !token_integrity_is_exact_medium(token.0)? {
+        if require_exact_medium && !token_integrity_is_exact_medium(token.0)? {
             return Err(WinError::code(ErrorKind::Unsafe, 5));
         }
         let (token_user, token_user_length) = token_information_storage(token.0, TokenUser)?;
@@ -208,7 +212,11 @@ impl ProcessIdentity {
     }
 
     pub fn verify(&self) -> Result<()> {
-        let current = Self::capture()?;
+        self.verify_with_integrity_requirement(true)
+    }
+
+    fn verify_with_integrity_requirement(&self, require_exact_medium: bool) -> Result<()> {
+        let current = Self::capture_with_integrity_requirement(require_exact_medium)?;
         if current == *self {
             Ok(())
         } else {
@@ -1198,12 +1206,56 @@ pub fn prepare_medium_integrity_test_directory(path: &Path) -> Result<()> {
 
 #[cfg(feature = "test-support")]
 pub fn prepare_medium_integrity_test_directory_handle(handle: BorrowedHandle<'_>) -> Result<()> {
+    let process = ProcessIdentity::capture_with_integrity_requirement(false)?;
+    if !test_handle_owner_matches(handle, &process)? {
+        return Err(WinError::code(ErrorKind::Unsafe, 5));
+    }
     set_and_attest_medium_label(
         raw(handle),
         SE_FILE_OBJECT,
         OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
         SecurityKind::Directory,
-    )
+    )?;
+    process.verify_with_integrity_requirement(false)?;
+    if test_handle_owner_matches(handle, &process)? {
+        Ok(())
+    } else {
+        Err(WinError::code(ErrorKind::Unsafe, 5))
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn test_handle_owner_matches(
+    handle: BorrowedHandle<'_>,
+    process: &ProcessIdentity,
+) -> Result<bool> {
+    let mut owner: PSID = null_mut();
+    let mut descriptor = null_mut();
+    // SAFETY: output pointers are valid and descriptor is released by DescriptorGuard.
+    let status = unsafe {
+        GetSecurityInfo(
+            raw(handle),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(WinError::code(ErrorKind::Other, status));
+    }
+    let descriptor = DescriptorGuard(descriptor);
+    if descriptor.0.is_null() {
+        return Err(WinError::code(ErrorKind::Other, ERROR_INVALID_PARAMETER));
+    }
+    // SAFETY: a non-null owner belongs to the live descriptor.
+    Ok(!owner.is_null()
+        && unsafe { IsValidSid(owner) } != 0
+        // SAFETY: owner and the captured process SID are both valid.
+        && unsafe { EqualSid(owner, process.sid()) } != 0)
 }
 
 #[cfg(feature = "test-support")]

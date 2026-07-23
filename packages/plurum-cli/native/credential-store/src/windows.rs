@@ -2513,6 +2513,14 @@ mod tests {
         );
 
         TEST_PROCESS_MEDIUM.get_or_init(|| {
+            plurum_windows_syscall::prepare_medium_integrity_test_directory_handle(
+                configured_security.as_handle(),
+            )
+            .expect("isolated Windows test root must have medium integrity");
+            plurum_windows_syscall::prepare_medium_integrity_test_directory_handle(
+                temporary_security.as_handle(),
+            )
+            .expect("isolated Windows temporary root must have medium integrity");
             plurum_windows_syscall::lower_process_integrity_to_medium_for_tests()
                 .expect("isolated Windows tests must run at exact medium integrity");
             let process =
@@ -2543,14 +2551,6 @@ mod tests {
                     .owner_current,
                 "isolation marker must be owned by the current test user"
             );
-            plurum_windows_syscall::prepare_medium_integrity_test_directory_handle(
-                configured_security.as_handle(),
-            )
-            .expect("isolated Windows test root must have medium integrity");
-            plurum_windows_syscall::prepare_medium_integrity_test_directory_handle(
-                temporary_security.as_handle(),
-            )
-            .expect("isolated Windows temporary root must have medium integrity");
             plurum_windows_syscall::set_private_current_user_dacl_for_tests_handle(
                 temporary_security.as_handle(),
                 SecurityKind::Directory,
