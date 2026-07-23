@@ -1206,10 +1206,8 @@ pub fn prepare_medium_integrity_test_directory(path: &Path) -> Result<()> {
 
 #[cfg(feature = "test-support")]
 pub fn prepare_medium_integrity_test_directory_handle(handle: BorrowedHandle<'_>) -> Result<()> {
+    prepare_current_user_test_owner_handle(handle)?;
     let process = ProcessIdentity::capture_with_integrity_requirement(false)?;
-    if !test_handle_owner_matches(handle, &process)? {
-        return Err(WinError::code(ErrorKind::Unsafe, 5));
-    }
     set_and_attest_medium_label(
         raw(handle),
         SE_FILE_OBJECT,
@@ -1217,7 +1215,7 @@ pub fn prepare_medium_integrity_test_directory_handle(handle: BorrowedHandle<'_>
         SecurityKind::Directory,
     )?;
     process.verify_with_integrity_requirement(false)?;
-    if test_handle_owner_matches(handle, &process)? {
+    if test_handle_owner_state(handle, &process)? == TestHandleOwner::Current {
         Ok(())
     } else {
         Err(WinError::code(ErrorKind::Unsafe, 5))
@@ -1225,10 +1223,50 @@ pub fn prepare_medium_integrity_test_directory_handle(handle: BorrowedHandle<'_>
 }
 
 #[cfg(feature = "test-support")]
-fn test_handle_owner_matches(
+pub fn prepare_current_user_test_owner_handle(handle: BorrowedHandle<'_>) -> Result<()> {
+    let process = ProcessIdentity::capture_with_integrity_requirement(false)?;
+    match test_handle_owner_state(handle, &process)? {
+        TestHandleOwner::Current => {}
+        TestHandleOwner::Trusted => {
+            // SAFETY: handle has WRITE_OWNER and process.sid is the live current token user SID.
+            let status = unsafe {
+                SetSecurityInfo(
+                    raw(handle),
+                    SE_FILE_OBJECT,
+                    OWNER_SECURITY_INFORMATION,
+                    process.sid(),
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                )
+            };
+            if status != 0 {
+                return Err(WinError::code(ErrorKind::Other, status));
+            }
+        }
+        TestHandleOwner::Untrusted => return Err(WinError::code(ErrorKind::Unsafe, 5)),
+    }
+    process.verify_with_integrity_requirement(false)?;
+    if test_handle_owner_state(handle, &process)? == TestHandleOwner::Current {
+        Ok(())
+    } else {
+        Err(WinError::code(ErrorKind::Unsafe, 5))
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TestHandleOwner {
+    Current,
+    Trusted,
+    Untrusted,
+}
+
+#[cfg(feature = "test-support")]
+fn test_handle_owner_state(
     handle: BorrowedHandle<'_>,
     process: &ProcessIdentity,
-) -> Result<bool> {
+) -> Result<TestHandleOwner> {
     let mut owner: PSID = null_mut();
     let mut descriptor = null_mut();
     // SAFETY: output pointers are valid and descriptor is released by DescriptorGuard.
@@ -1251,11 +1289,20 @@ fn test_handle_owner_matches(
     if descriptor.0.is_null() {
         return Err(WinError::code(ErrorKind::Other, ERROR_INVALID_PARAMETER));
     }
-    // SAFETY: a non-null owner belongs to the live descriptor.
-    Ok(!owner.is_null()
-        && unsafe { IsValidSid(owner) } != 0
-        // SAFETY: owner and the captured process SID are both valid.
-        && unsafe { EqualSid(owner, process.sid()) } != 0)
+    if owner.is_null()
+        // SAFETY: a non-null owner belongs to the live descriptor.
+        || unsafe { IsValidSid(owner) } == 0
+    {
+        return Ok(TestHandleOwner::Untrusted);
+    }
+    // SAFETY: owner and the captured process SID are both valid.
+    if unsafe { EqualSid(owner, process.sid()) } != 0 {
+        Ok(TestHandleOwner::Current)
+    } else if trusted_namespace_sid(owner, process) {
+        Ok(TestHandleOwner::Trusted)
+    } else {
+        Ok(TestHandleOwner::Untrusted)
+    }
 }
 
 #[cfg(feature = "test-support")]

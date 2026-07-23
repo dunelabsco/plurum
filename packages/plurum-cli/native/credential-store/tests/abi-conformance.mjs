@@ -2238,86 +2238,103 @@ async function runChild() {
       nativeConfiguration.legacyPaths.hermes,
       legacyOptions,
     );
-    assert.equal(rawLegacy.status, "loaded");
-    assert.equal(sha256(rawLegacy.bytes), sha256(legacyDocument));
-    rawLegacy.bytes.fill(0);
+    if (rawLegacy.status === "unsafe") {
+      assert.equal(
+        expectedTarget,
+        "darwin-arm64",
+        "only Darwin arm64 may inherit an unsafe host-managed temp ancestor",
+      );
+      assert.deepEqual(
+        await first.legacy.read(
+          "hermes",
+          nativeConfiguration.legacyPaths.hermes,
+          legacyOptions,
+        ),
+        { status: "unsafe" },
+      );
+      legacyDocument.fill(0);
+    } else {
+      assert.equal(rawLegacy.status, "loaded");
+      assert.equal(sha256(rawLegacy.bytes), sha256(legacyDocument));
+      rawLegacy.bytes.fill(0);
 
-    let capturedRawLegacyBytes;
-    const capturingLegacyAdapter = Object.freeze({
-      read(...args) {
-        const result = Reflect.apply(
-          rawAdapters.legacy.read,
-          rawAdapters.legacy,
-          args,
-        );
-        if (result.status === "loaded") {
-          capturedRawLegacyBytes = result.bytes;
-        }
-        return result;
-      },
-    });
-    const capturingModule = Object.freeze({
-      abiVersion: addon.abiVersion,
-      createAdapters(configuration) {
-        assert.deepEqual(configuration, nativeConfiguration);
-        return Object.freeze({
-          codexDotenv: rawAdapters.codexDotenv,
-          journal: rawAdapters.journal,
-          legacy: capturingLegacyAdapter,
-          mutation: rawAdapters.mutation,
-          observation: rawAdapters.observation,
-          read: rawAdapters.read,
-        });
-      },
-      magic: addon.magic,
-      nodeApiVersion: addon.nodeApiVersion,
-      packageVersion: addon.packageVersion,
-      target: addon.target,
-    });
-    const capturingProvider = createNativeCredentialStoreProvider(
-      expectedTarget,
-      () => capturingModule,
-      nativeConfiguration,
-    );
-    const capturingLoaded = capturingProvider.load();
-    assert.equal(capturingLoaded.status, "available");
-    const publicLegacy = await capturingLoaded.legacy.read(
-      "hermes",
-      nativeConfiguration.legacyPaths.hermes,
-      legacyOptions,
-    );
-    assert.equal(publicLegacy.status, "loaded");
-    assert.equal(sha256(publicLegacy.bytes), sha256(legacyDocument));
-    assert.ok(capturedRawLegacyBytes instanceof Uint8Array);
-    assert.equal(
-      capturedRawLegacyBytes.every((byte) => byte === 0),
-      true,
-      "the native legacy buffer must be wiped by the public membrane",
-    );
-    publicLegacy.bytes.fill(0);
-    legacyDocument.fill(0);
-
-    writeFileSync(nativeConfiguration.legacyPaths.hermes, Buffer.alloc(0));
-    assert.deepEqual(
-      rawAdapters.legacy.read(
+      let capturedRawLegacyBytes;
+      const capturingLegacyAdapter = Object.freeze({
+        read(...args) {
+          const result = Reflect.apply(
+            rawAdapters.legacy.read,
+            rawAdapters.legacy,
+            args,
+          );
+          if (result.status === "loaded") {
+            capturedRawLegacyBytes = result.bytes;
+          }
+          return result;
+        },
+      });
+      const capturingModule = Object.freeze({
+        abiVersion: addon.abiVersion,
+        createAdapters(configuration) {
+          assert.deepEqual(configuration, nativeConfiguration);
+          return Object.freeze({
+            codexDotenv: rawAdapters.codexDotenv,
+            journal: rawAdapters.journal,
+            legacy: capturingLegacyAdapter,
+            mutation: rawAdapters.mutation,
+            observation: rawAdapters.observation,
+            read: rawAdapters.read,
+          });
+        },
+        magic: addon.magic,
+        nodeApiVersion: addon.nodeApiVersion,
+        packageVersion: addon.packageVersion,
+        target: addon.target,
+      });
+      const capturingProvider = createNativeCredentialStoreProvider(
+        expectedTarget,
+        () => capturingModule,
+        nativeConfiguration,
+      );
+      const capturingLoaded = capturingProvider.load();
+      assert.equal(capturingLoaded.status, "available");
+      const publicLegacy = await capturingLoaded.legacy.read(
         "hermes",
         nativeConfiguration.legacyPaths.hermes,
         legacyOptions,
-      ),
-      { status: "malformed" },
-    );
-    writeFileSync(
-      nativeConfiguration.legacyPaths.hermes,
-      Buffer.alloc(16_385, 0x78),
-    );
-    assert.deepEqual(
-      rawAdapters.legacy.read(
-        "hermes",
+      );
+      assert.equal(publicLegacy.status, "loaded");
+      assert.equal(sha256(publicLegacy.bytes), sha256(legacyDocument));
+      assert.ok(capturedRawLegacyBytes instanceof Uint8Array);
+      assert.equal(
+        capturedRawLegacyBytes.every((byte) => byte === 0),
+        true,
+        "the native legacy buffer must be wiped by the public membrane",
+      );
+      publicLegacy.bytes.fill(0);
+      legacyDocument.fill(0);
+
+      writeFileSync(nativeConfiguration.legacyPaths.hermes, Buffer.alloc(0));
+      assert.deepEqual(
+        rawAdapters.legacy.read(
+          "hermes",
+          nativeConfiguration.legacyPaths.hermes,
+          legacyOptions,
+        ),
+        { status: "malformed" },
+      );
+      writeFileSync(
         nativeConfiguration.legacyPaths.hermes,
-        legacyOptions,
-      ),
-      { status: "malformed" },
-    );
+        Buffer.alloc(16_385, 0x78),
+      );
+      assert.deepEqual(
+        rawAdapters.legacy.read(
+          "hermes",
+          nativeConfiguration.legacyPaths.hermes,
+          legacyOptions,
+        ),
+        { status: "malformed" },
+      );
+    }
   }
 
   const recovered = await recoverCredentialStore(

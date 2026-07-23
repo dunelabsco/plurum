@@ -2442,6 +2442,15 @@ mod tests {
             .open(path)
     }
 
+    fn open_test_security_file(path: &Path) -> std::io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .access_mode(GENERIC_READ | READ_CONTROL | WRITE_OWNER)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    }
+
     pub(super) fn verified_test_isolation() -> PathBuf {
         let configured = PathBuf::from(
             env::var("PLURUM_NATIVE_ISOLATION_ROOT")
@@ -2499,6 +2508,8 @@ mod tests {
             .expect("isolation root security handle must open");
         let temporary_security = open_test_security_directory(&temporary)
             .expect("temporary root security handle must open");
+        let marker_security =
+            open_test_security_file(&marker).expect("isolation marker security handle must open");
         assert_eq!(
             metadata(&configured_security)
                 .expect("isolation security handle must attest")
@@ -2511,8 +2522,18 @@ mod tests {
                 .identity,
             temporary_facts.identity
         );
+        assert_eq!(
+            metadata(&marker_security)
+                .expect("isolation marker security handle must attest")
+                .identity,
+            marker_facts.identity
+        );
 
         TEST_PROCESS_MEDIUM.get_or_init(|| {
+            plurum_windows_syscall::prepare_current_user_test_owner_handle(
+                marker_security.as_handle(),
+            )
+            .expect("isolated Windows marker must be current-user owned");
             plurum_windows_syscall::prepare_medium_integrity_test_directory_handle(
                 configured_security.as_handle(),
             )
