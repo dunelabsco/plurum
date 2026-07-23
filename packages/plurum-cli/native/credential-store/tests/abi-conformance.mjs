@@ -1332,12 +1332,13 @@ async function runChild() {
     ]);
 
   assert.equal(addon.magic, "plurum-native-credential-store");
-  assert.equal(addon.abiVersion, 3);
+  assert.equal(addon.abiVersion, 4);
   assert.equal(addon.nodeApiVersion, 8);
   assert.equal(addon.packageVersion, CLI_VERSION);
   assert.equal(addon.target, expectedTarget);
   assert.equal(typeof addon.createAdapters, "function");
   const nativeConfiguration = Object.freeze({
+    codexHomeDirectory: join(runRoot, "codex-home"),
     legacyPaths: Object.freeze({
       hermes: join(runRoot, "legacy-hermes", "plurum.json"),
       openclaw: join(runRoot, "legacy-openclaw", "plurum.json"),
@@ -1350,11 +1351,16 @@ async function runChild() {
   ]);
   assert.ok(rawAdapters !== null && typeof rawAdapters === "object");
   assert.deepEqual(Object.keys(rawAdapters).sort(), [
+    "codexDotenv",
     "journal",
     "legacy",
     "mutation",
     "observation",
     "read",
+  ]);
+  assert.deepEqual(Object.keys(rawAdapters.codexDotenv).sort(), [
+    "observe",
+    "synchronize",
   ]);
   assert.deepEqual(Object.keys(rawAdapters.journal), ["acquire"]);
   assert.deepEqual(Object.keys(rawAdapters.legacy), ["read"]);
@@ -1500,6 +1506,7 @@ async function runChild() {
     assert.fail("native credential adapters must be available");
   }
   assert.equal(Object.isFrozen(first), true);
+  assert.equal(Object.isFrozen(first.codexDotenv), true);
   assert.equal(Object.isFrozen(first.journal), true);
   assert.equal(Object.isFrozen(first.legacy), true);
   assert.equal(Object.isFrozen(first.read), true);
@@ -1652,6 +1659,259 @@ async function runChild() {
   );
   assert.deepEqual(unchanged, { status: "unchanged" });
   assert.equal(Object.isFrozen(unchanged), true);
+
+  const codexHomeDirectory = nativeConfiguration.codexHomeDirectory;
+  const codexDotenvPath = join(codexHomeDirectory, ".env");
+  const excludedProjectDirectory = join(runRoot, "excluded-project");
+  mkdirSync(excludedProjectDirectory, { mode: 0o700 });
+  if (process.platform !== "win32") {
+    chmodSync(excludedProjectDirectory, 0o700);
+  }
+  exactObjectIdentity(
+    excludedProjectDirectory,
+    "directory",
+    "native ABI excluded project directory",
+  );
+  assert.equal(pathExists(codexHomeDirectory), false);
+
+  const codexObserveRequest = Object.freeze({
+    kind: "codex-dotenv-observe",
+    scope: "user",
+    apiOrigin: "https://api.plurum.ai",
+    expectation: Object.freeze({
+      kind: "known",
+      apiKey: credentialKey,
+    }),
+    excludedProjectDirectory,
+  });
+  const codexMissing = await first.codexDotenv.observe(
+    codexObserveRequest,
+  );
+  assert.equal(codexMissing.status, "absent");
+  assert.match(codexMissing.revision, /^[0-9a-f]{64}$/u);
+  const codexCreated = await first.codexDotenv.synchronize(
+    Object.freeze({
+      kind: "codex-dotenv-synchronize",
+      scope: "user",
+      apiOrigin: "https://api.plurum.ai",
+      expectedRevision: codexMissing.revision,
+      expectedStatus: "absent",
+      expectation: codexObserveRequest.expectation,
+      excludedProjectDirectory,
+    }),
+  );
+  assert.equal(codexCreated.status, "completed");
+  if (codexCreated.status !== "completed") {
+    assert.fail("Codex dotenv creation must complete");
+  }
+  assert.equal(codexCreated.disposition, "changed");
+  assert.notEqual(codexCreated.stateRevision, codexMissing.revision);
+  exactObjectIdentity(
+    codexHomeDirectory,
+    "directory",
+    "native ABI Codex home",
+  );
+  exactObjectIdentity(
+    codexDotenvPath,
+    "file",
+    "native ABI Codex dotenv",
+  );
+  const canonicalCodexBytes = Buffer.from(
+    `PLURUM_API_KEY=${credentialKey}${expectedTarget.startsWith("win32-") ? "\r\n" : "\n"}`,
+    "utf8",
+  );
+  const canonicalCodexDigest = readBoundedDigest(
+    codexDotenvPath,
+    128 * 1024,
+    "native ABI Codex dotenv",
+  );
+  assert.equal(canonicalCodexDigest.size, canonicalCodexBytes.byteLength);
+  assert.equal(canonicalCodexDigest.digest, sha256(canonicalCodexBytes));
+
+  const codexExact = await first.codexDotenv.observe(codexObserveRequest);
+  assert.deepEqual(codexExact, {
+    revision: codexCreated.stateRevision,
+    status: "exact",
+  });
+  assert.deepEqual(
+    await first.codexDotenv.synchronize(
+      Object.freeze({
+        kind: "codex-dotenv-synchronize",
+        scope: "user",
+        apiOrigin: "https://api.plurum.ai",
+        expectedRevision: codexExact.revision,
+        expectedStatus: "exact",
+        expectation: codexObserveRequest.expectation,
+        excludedProjectDirectory,
+      }),
+    ),
+    {
+      status: "completed",
+      disposition: "unchanged",
+      stateRevision: codexExact.revision,
+    },
+  );
+
+  const otherCodexKey = `plrm_live_${"Z".repeat(43)}`;
+  const complexCodexBytes = Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]),
+    Buffer.from(
+      `# keep\r\nOTHER="unrelated"\r\nexport PLURUM_API_KEY = '${otherCodexKey}' # keep\r\nLAST=value\r\n`,
+      "utf8",
+    ),
+  ]);
+  writeFileSync(codexDotenvPath, complexCodexBytes, { flag: "w" });
+  if (process.platform !== "win32") {
+    chmodSync(codexDotenvPath, 0o600);
+  }
+  const codexMismatched = await first.codexDotenv.observe(
+    codexObserveRequest,
+  );
+  assert.equal(codexMismatched.status, "mismatched");
+  assert.notEqual(codexMismatched.revision, codexExact.revision);
+  const codexReplaced = await first.codexDotenv.synchronize(
+    Object.freeze({
+      kind: "codex-dotenv-synchronize",
+      scope: "user",
+      apiOrigin: "https://api.plurum.ai",
+      expectedRevision: codexMismatched.revision,
+      expectedStatus: "mismatched",
+      expectation: codexObserveRequest.expectation,
+      excludedProjectDirectory,
+    }),
+  );
+  assert.equal(codexReplaced.status, "completed");
+  if (codexReplaced.status !== "completed") {
+    assert.fail("Codex dotenv replacement must complete");
+  }
+  assert.equal(codexReplaced.disposition, "changed");
+  const expectedComplexCodexBytes = Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]),
+    Buffer.from(
+      `# keep\r\nOTHER="unrelated"\r\nexport PLURUM_API_KEY = '${credentialKey}' # keep\r\nLAST=value\r\n`,
+      "utf8",
+    ),
+  ]);
+  const complexCodexDigest = readBoundedDigest(
+    codexDotenvPath,
+    128 * 1024,
+    "native ABI replaced Codex dotenv",
+  );
+  assert.equal(complexCodexDigest.size, expectedComplexCodexBytes.byteLength);
+  assert.equal(complexCodexDigest.digest, sha256(expectedComplexCodexBytes));
+
+  writeFileSync(codexDotenvPath, complexCodexBytes, { flag: "w" });
+  const racedEvidence = await first.codexDotenv.observe(codexObserveRequest);
+  assert.equal(racedEvidence.status, "mismatched");
+  const racedCodexBytes = Buffer.concat([
+    complexCodexBytes,
+    Buffer.from("# raced\r\n", "utf8"),
+  ]);
+  writeFileSync(codexDotenvPath, racedCodexBytes, { flag: "w" });
+  assert.deepEqual(
+    await first.codexDotenv.synchronize(
+      Object.freeze({
+        kind: "codex-dotenv-synchronize",
+        scope: "user",
+        apiOrigin: "https://api.plurum.ai",
+        expectedRevision: racedEvidence.revision,
+        expectedStatus: "mismatched",
+        expectation: codexObserveRequest.expectation,
+        excludedProjectDirectory,
+      }),
+    ),
+    { status: "precondition-failed" },
+  );
+  const racedDigest = readBoundedDigest(
+    codexDotenvPath,
+    128 * 1024,
+    "native ABI raced Codex dotenv",
+  );
+  assert.equal(racedDigest.size, racedCodexBytes.byteLength);
+  assert.equal(racedDigest.digest, sha256(racedCodexBytes));
+
+  const currentRacedEvidence = await first.codexDotenv.observe(
+    codexObserveRequest,
+  );
+  assert.equal(currentRacedEvidence.status, "mismatched");
+  const convergedAfterRace = await first.codexDotenv.synchronize(
+    Object.freeze({
+      kind: "codex-dotenv-synchronize",
+      scope: "user",
+      apiOrigin: "https://api.plurum.ai",
+      expectedRevision: currentRacedEvidence.revision,
+      expectedStatus: "mismatched",
+      expectation: codexObserveRequest.expectation,
+      excludedProjectDirectory,
+    }),
+  );
+  assert.equal(convergedAfterRace.status, "completed");
+
+  const rawCodexObservation = rawAdapters.codexDotenv.observe(
+    Object.freeze({
+      excludedProjectDirectory,
+      maxBytes: 128 * 1024,
+      noFollow: true,
+      revisionNonce: "a".repeat(64),
+    }),
+  );
+  assert.equal(rawCodexObservation.status, "present");
+  assert.match(rawCodexObservation.revision, /^[0-9a-f]{64}$/u);
+  assert.equal(rawCodexObservation.read.endOfFile, true);
+  assert.equal(rawCodexObservation.read.bytes instanceof Uint8Array, true);
+  assert.deepEqual(
+    rawAdapters.codexDotenv.synchronize(
+      Object.freeze({
+        disposition: "unchanged",
+        excludedProjectDirectory,
+        expectedRevision: rawCodexObservation.revision,
+        maxBytes: 128 * 1024,
+        nextRevisionNonce: "b".repeat(64),
+        noFollow: true,
+        nonce: randomUUID(),
+      }),
+    ),
+    {
+      status: "completed",
+      disposition: "unchanged",
+      stateRevision: rawCodexObservation.revision,
+    },
+  );
+  rawCodexObservation.read.bytes.fill(0);
+  assert.deepEqual(
+    rawAdapters.codexDotenv.synchronize(
+      Object.freeze({
+        disposition: "unchanged",
+        excludedProjectDirectory,
+        expectedRevision: "f".repeat(64),
+        maxBytes: 128 * 1024,
+        nextRevisionNonce: "e".repeat(64),
+        noFollow: true,
+        nonce: randomUUID(),
+      }),
+    ),
+    { status: "precondition-failed" },
+  );
+
+  const duplicateCodexBytes = Buffer.from(
+    `PLURUM_API_KEY=${credentialKey}\nPLURUM_API_KEY=${credentialKey}\n`,
+    "utf8",
+  );
+  writeFileSync(codexDotenvPath, duplicateCodexBytes, { flag: "w" });
+  const duplicateCodexObservation = await first.codexDotenv.observe(
+    codexObserveRequest,
+  );
+  assert.equal(duplicateCodexObservation.status, "ambiguous");
+  writeFileSync(codexDotenvPath, expectedComplexCodexBytes, { flag: "w" });
+  assert.equal(
+    (await first.codexDotenv.observe(codexObserveRequest)).status,
+    "exact",
+  );
+  canonicalCodexBytes.fill(0);
+  complexCodexBytes.fill(0);
+  expectedComplexCodexBytes.fill(0);
+  racedCodexBytes.fill(0);
+  duplicateCodexBytes.fill(0);
 
   const presentObservation = await observationAuthority.inspect(
     Object.freeze({ directory: credentialDirectory }),
@@ -2001,6 +2261,7 @@ async function runChild() {
       createAdapters(configuration) {
         assert.deepEqual(configuration, nativeConfiguration);
         return Object.freeze({
+          codexDotenv: rawAdapters.codexDotenv,
           journal: rawAdapters.journal,
           legacy: capturingLegacyAdapter,
           mutation: rawAdapters.mutation,
@@ -2079,6 +2340,7 @@ async function runChild() {
   assert.equal(loaded.credential.api_origin, credential.api_origin);
   assert.equal(loaded.credential.agent_name, changedCredential.agent_name);
   assert.deepEqual(readdirSync(credentialDirectory).sort(), [
+    "codex-dotenv.lock",
     "credentials.json",
     "host-reconciliation.lock",
     "setup.lock",

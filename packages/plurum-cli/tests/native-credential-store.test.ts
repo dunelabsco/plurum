@@ -32,7 +32,9 @@ const LEGACY_PATHS = Object.freeze({
   removedCli: "/isolated/plurum/legacy.json",
 });
 const STATE_DIRECTORY = "/isolated/plurum";
+const CODEX_HOME_DIRECTORY = "/isolated/home/.codex";
 const CONFIGURATION = Object.freeze({
+  codexHomeDirectory: CODEX_HOME_DIRECTORY,
   legacyPaths: LEGACY_PATHS,
   stateDirectory: STATE_DIRECTORY,
 });
@@ -45,6 +47,20 @@ function defaultRawJournalAdapter(): Record<string, unknown> {
   return {
     acquire() {
       return { status: "busy" as const };
+    },
+  };
+}
+
+function defaultRawCodexDotenvAdapter(): Record<string, unknown> {
+  return {
+    observe() {
+      return {
+        status: "missing" as const,
+        revision: "1".repeat(64),
+      };
+    },
+    synchronize() {
+      return { status: "precondition-failed" as const };
     },
   };
 }
@@ -72,6 +88,7 @@ function completeRawAdapterPair(
   read: Record<string, unknown>,
   mutation: Record<string, unknown>,
   options: Readonly<{
+    codexDotenv?: Record<string, unknown>;
     journal?: Record<string, unknown>;
     legacy?: Record<string, unknown>;
     observation?: Record<string, unknown>;
@@ -88,6 +105,8 @@ function completeRawAdapterPair(
     });
   }
   return {
+    codexDotenv:
+      options.codexDotenv ?? defaultRawCodexDotenvAdapter(),
     journal: options.journal ?? defaultRawJournalAdapter(),
     legacy: options.legacy ?? defaultRawLegacyAdapter(),
     mutation,
@@ -420,18 +439,24 @@ describe("native credential store provider", () => {
     }
 
     expect(Object.isFrozen(loaded)).toBe(true);
+    expect(Object.isFrozen(loaded.codexDotenv)).toBe(true);
     expect(Object.isFrozen(loaded.journal)).toBe(true);
     expect(Object.isFrozen(loaded.legacy)).toBe(true);
     expect(Object.isFrozen(loaded.read)).toBe(true);
     expect(Object.isFrozen(loaded.observation)).toBe(true);
     expect(Object.isFrozen(loaded.mutation)).toBe(true);
     expect(Object.keys(loaded).sort()).toEqual([
+      "codexDotenv",
       "journal",
       "legacy",
       "mutation",
       "observation",
       "read",
       "status",
+    ]);
+    expect(Object.keys(loaded.codexDotenv).sort()).toEqual([
+      "observe",
+      "synchronize",
     ]);
     expect(Object.keys(loaded.journal)).toEqual(["acquire"]);
     expect(Object.keys(loaded.legacy)).toEqual(["read"]);
@@ -469,6 +494,7 @@ describe("native credential store provider", () => {
   });
 
   it("snapshots and deep-freezes the exact legacy allowlist for the raw factory", () => {
+    let codexHomeDirectoryReads = 0;
     let configurationReads = 0;
     let stateDirectoryReads = 0;
     let hermesReads = 0;
@@ -498,6 +524,15 @@ describe("native credential store provider", () => {
     const configuration = Object.defineProperties(
       {},
       {
+        codexHomeDirectory: {
+          enumerable: true,
+          get() {
+            codexHomeDirectoryReads += 1;
+            return codexHomeDirectoryReads === 1
+              ? CODEX_HOME_DIRECTORY
+              : SECRET_SENTINEL;
+          },
+        },
         legacyPaths: {
           enumerable: true,
           get() {
@@ -545,6 +580,7 @@ describe("native credential store provider", () => {
       configuration,
     );
 
+    expect(codexHomeDirectoryReads).toBe(1);
     expect(configurationReads).toBe(1);
     expect(stateDirectoryReads).toBe(1);
     expect(hermesReads).toBe(1);
@@ -567,6 +603,13 @@ describe("native credential store provider", () => {
     expect(
       (
         receivedConfiguration as {
+          readonly codexHomeDirectory: unknown;
+        }
+      ).codexHomeDirectory,
+    ).toBe(CODEX_HOME_DIRECTORY);
+    expect(
+      (
+        receivedConfiguration as {
           readonly stateDirectory: unknown;
         }
       ).stateDirectory,
@@ -577,11 +620,13 @@ describe("native credential store provider", () => {
     const invalidConfigurations: unknown[] = [
       Object.freeze({}),
       Object.freeze({
+        codexHomeDirectory: CODEX_HOME_DIRECTORY,
         legacyPaths: LEGACY_PATHS,
         stateDirectory: STATE_DIRECTORY,
         unexpected: SECRET_SENTINEL,
       }),
       Object.freeze({
+        codexHomeDirectory: CODEX_HOME_DIRECTORY,
         legacyPaths: Object.freeze({
           hermes: LEGACY_PATHS.hermes,
           openclaw: LEGACY_PATHS.openclaw,
@@ -589,6 +634,7 @@ describe("native credential store provider", () => {
         stateDirectory: STATE_DIRECTORY,
       }),
       Object.freeze({
+        codexHomeDirectory: CODEX_HOME_DIRECTORY,
         legacyPaths: Object.freeze({
           ...LEGACY_PATHS,
           hermes: "",
@@ -596,28 +642,56 @@ describe("native credential store provider", () => {
         stateDirectory: STATE_DIRECTORY,
       }),
       Object.freeze({
+        codexHomeDirectory: CODEX_HOME_DIRECTORY,
         legacyPaths: Object.freeze({
           ...LEGACY_PATHS,
           openclaw: `${LEGACY_PATHS.openclaw}\0${SECRET_SENTINEL}`,
         }),
         stateDirectory: STATE_DIRECTORY,
       }),
-      Object.freeze({ legacyPaths: LEGACY_PATHS }),
       Object.freeze({
+        codexHomeDirectory: CODEX_HOME_DIRECTORY,
+        legacyPaths: LEGACY_PATHS,
+      }),
+      Object.freeze({
+        codexHomeDirectory: CODEX_HOME_DIRECTORY,
         legacyPaths: LEGACY_PATHS,
         stateDirectory: "",
       }),
       Object.freeze({
+        codexHomeDirectory: CODEX_HOME_DIRECTORY,
         legacyPaths: LEGACY_PATHS,
         stateDirectory: `${STATE_DIRECTORY}\0${SECRET_SENTINEL}`,
       }),
       Object.freeze({
+        codexHomeDirectory: CODEX_HOME_DIRECTORY,
         legacyPaths: LEGACY_PATHS,
         stateDirectory: `${STATE_DIRECTORY}\n${SECRET_SENTINEL}`,
       }),
       Object.freeze({
+        codexHomeDirectory: CODEX_HOME_DIRECTORY,
         legacyPaths: LEGACY_PATHS,
         stateDirectory: "x".repeat(32_769),
+      }),
+      Object.freeze({
+        codexHomeDirectory: "",
+        legacyPaths: LEGACY_PATHS,
+        stateDirectory: STATE_DIRECTORY,
+      }),
+      Object.freeze({
+        codexHomeDirectory: `${CODEX_HOME_DIRECTORY}\0${SECRET_SENTINEL}`,
+        legacyPaths: LEGACY_PATHS,
+        stateDirectory: STATE_DIRECTORY,
+      }),
+      Object.freeze({
+        codexHomeDirectory: `${CODEX_HOME_DIRECTORY}\n${SECRET_SENTINEL}`,
+        legacyPaths: LEGACY_PATHS,
+        stateDirectory: STATE_DIRECTORY,
+      }),
+      Object.freeze({
+        codexHomeDirectory: "x".repeat(32_769),
+        legacyPaths: LEGACY_PATHS,
+        stateDirectory: STATE_DIRECTORY,
       }),
     ];
 
@@ -3002,20 +3076,51 @@ describe("native credential store provider", () => {
       }),
     ],
     [
+      "missing Codex dotenv adapter",
+      createNativeModule({
+        createAdapters() {
+          const pair = completeRawAdapterPair(
+            { openPrivateDirectory() {} },
+            { acquireSetupLease() {} },
+          );
+          delete pair.codexDotenv;
+          return pair;
+        },
+      }),
+    ],
+    [
+      "malformed Codex dotenv adapter",
+      createNativeModule({
+        createAdapters() {
+          return completeRawAdapterPair(
+            { openPrivateDirectory() {} },
+            { acquireSetupLease() {} },
+            {
+              codexDotenv: {
+                observe() {
+                  return { status: "missing", revision: "1".repeat(64) };
+                },
+              },
+            },
+          );
+        },
+      }),
+    ],
+    [
       "extra adapter-pair key",
       createNativeModule({
         createAdapters() {
           return {
             ...completeRawAdapterPair(
               {
-              openPrivateDirectory() {
-                return { status: "missing" as const };
-              },
+                openPrivateDirectory() {
+                  return { status: "missing" as const };
+                },
               },
               {
-              acquireSetupLease() {
-                return { status: "busy" as const };
-              },
+                acquireSetupLease() {
+                  return { status: "busy" as const };
+                },
               },
             ),
             unexpected: SECRET_SENTINEL,
@@ -3188,6 +3293,7 @@ describe("native credential store provider", () => {
     };
     const pair = Object.defineProperties(
       {
+        codexDotenv: defaultRawCodexDotenvAdapter(),
         journal: defaultRawJournalAdapter(),
         legacy: defaultRawLegacyAdapter(),
         mutation,
@@ -3242,6 +3348,75 @@ describe("native credential store provider", () => {
     expect(factoryReads).toBe(1);
     expect(pairReadReads).toBe(1);
     expect(methodReads).toBe(1);
+  });
+
+  it("captures the Codex adapter and both raw methods exactly once", () => {
+    let adapterReads = 0;
+    let observeReads = 0;
+    let synchronizeReads = 0;
+    const codexDotenv = Object.defineProperties(
+      {},
+      {
+        observe: {
+          enumerable: true,
+          get() {
+            observeReads += 1;
+            return observeReads === 1
+              ? () => ({
+                  status: "missing" as const,
+                  revision: "1".repeat(64),
+                })
+              : SECRET_SENTINEL;
+          },
+        },
+        synchronize: {
+          enumerable: true,
+          get() {
+            synchronizeReads += 1;
+            return synchronizeReads === 1
+              ? () => ({ status: "precondition-failed" as const })
+              : SECRET_SENTINEL;
+          },
+        },
+      },
+    );
+    const pair = completeRawAdapterPair(
+      {
+        openPrivateDirectory() {
+          return { status: "missing" as const };
+        },
+      },
+      {
+        acquireSetupLease() {
+          return { status: "busy" as const };
+        },
+      },
+    );
+    Object.defineProperty(pair, "codexDotenv", {
+      enumerable: true,
+      get() {
+        adapterReads += 1;
+        return adapterReads === 1 ? codexDotenv : SECRET_SENTINEL;
+      },
+    });
+    const loaded = createNativeCredentialStoreProvider(
+      TARGET,
+      resolverReturning(
+        createNativeModule({
+          createAdapters() {
+            return pair;
+          },
+        }),
+      ),
+      CONFIGURATION,
+    ).load();
+
+    expect(loaded.status).toBe("available");
+    expect({ adapterReads, observeReads, synchronizeReads }).toEqual({
+      adapterReads: 1,
+      observeReads: 1,
+      synchronizeReads: 1,
+    });
   });
 
   it("never consults poisoned own call properties on captured functions", async () => {

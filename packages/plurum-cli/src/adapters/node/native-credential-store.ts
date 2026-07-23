@@ -1,5 +1,10 @@
 import { randomUUID as nodeRandomUUID } from "node:crypto";
 
+import {
+  createNativeCodexDotenvAdapter,
+  type NativeCodexDotenvRawCalls,
+} from "./native-codex-dotenv.js";
+import type { CodexDotenvNativeAdapter } from "../../credentials/codex-dotenv-contracts.js";
 import type {
   CredentialCanonicalEntry,
   CredentialConditionalMoveResult,
@@ -56,7 +61,7 @@ import { CLI_VERSION } from "../../version.js";
 
 export const NATIVE_CREDENTIAL_STORE_MAGIC =
   "plurum-native-credential-store" as const;
-export const NATIVE_CREDENTIAL_STORE_ABI_VERSION = 3 as const;
+export const NATIVE_CREDENTIAL_STORE_ABI_VERSION = 4 as const;
 export const NATIVE_CREDENTIAL_STORE_NODE_API_VERSION = 8 as const;
 
 export const NATIVE_CREDENTIAL_TARGET_IDS = Object.freeze([
@@ -90,6 +95,7 @@ export interface NativeCredentialLegacyPathAllowlist {
 }
 
 export interface NativeCredentialStoreConfiguration {
+  readonly codexHomeDirectory: string;
   readonly legacyPaths: NativeCredentialLegacyPathAllowlist;
   readonly stateDirectory: string;
 }
@@ -97,6 +103,7 @@ export interface NativeCredentialStoreConfiguration {
 export type NativeCredentialStoreLoadResult =
   | Readonly<{
       status: "available";
+      codexDotenv: CodexDotenvNativeAdapter;
       journal: ReconciliationJournalStoreAdapter;
       legacy: LegacyCredentialReadAdapter;
       read: CredentialStoreReadAdapter;
@@ -125,6 +132,7 @@ const MODULE_KEYS = Object.freeze([
   "target",
 ] as const);
 const ADAPTER_PAIR_KEYS = Object.freeze([
+  "codexDotenv",
   "journal",
   "legacy",
   "mutation",
@@ -137,6 +145,7 @@ const LEGACY_PATH_ALLOWLIST_KEYS = Object.freeze([
   "removedCli",
 ] as const);
 const PROVIDER_CONFIGURATION_KEYS = Object.freeze([
+  "codexHomeDirectory",
   "legacyPaths",
   "stateDirectory",
 ] as const);
@@ -161,6 +170,10 @@ const OBSERVATION_ENTRY_OPTIONS_KEYS = Object.freeze([
 ] as const);
 const LEGACY_ADAPTER_KEYS = Object.freeze(["read"] as const);
 const JOURNAL_ADAPTER_KEYS = Object.freeze(["acquire"] as const);
+const CODEX_DOTENV_ADAPTER_KEYS = Object.freeze([
+  "observe",
+  "synchronize",
+] as const);
 const READ_ADAPTER_KEYS = Object.freeze(["openPrivateDirectory"] as const);
 const OBSERVATION_ADAPTER_KEYS = Object.freeze([
   "openPrivateDirectory",
@@ -300,11 +313,14 @@ interface NativeCredentialModuleSnapshot {
 }
 
 interface NativeCredentialAdapterPairSnapshot {
+  readonly codexDotenvReceiver: UnknownRecord;
   readonly journalReceiver: UnknownRecord;
   readonly legacyReceiver: UnknownRecord;
   readonly readReceiver: UnknownRecord;
   readonly observationReceiver: UnknownRecord;
   readonly mutationReceiver: UnknownRecord;
+  readonly observeCodexDotenv: RawFunction;
+  readonly synchronizeCodexDotenv: RawFunction;
   readonly acquireJournalLease: RawFunction;
   readonly readLegacy: RawFunction;
   readonly openReadPrivateDirectory: RawFunction;
@@ -493,12 +509,21 @@ function normalizeProviderConfiguration(
     const legacyPaths = normalizeLegacyPathAllowlist(
       captureRawField(value, "legacyPaths"),
     );
+    const codexHomeDirectory = copyStateDirectory(
+      captureRawField(value, "codexHomeDirectory"),
+    );
     const stateDirectory = copyStateDirectory(
       captureRawField(value, "stateDirectory"),
     );
-    return legacyPaths === undefined || stateDirectory === undefined
+    return legacyPaths === undefined ||
+      codexHomeDirectory === undefined ||
+      stateDirectory === undefined
       ? undefined
-      : FREEZE({ legacyPaths, stateDirectory });
+      : FREEZE({
+          codexHomeDirectory,
+          legacyPaths,
+          stateDirectory,
+        });
   } catch {
     return undefined;
   }
@@ -613,12 +638,18 @@ function parseAdapterPair(
     return undefined;
   }
 
+  const codexDotenvReceiver = captureRawField(value, "codexDotenv");
   const journalReceiver = captureRawField(value, "journal");
   const legacyReceiver = captureRawField(value, "legacy");
   const mutationReceiver = captureRawField(value, "mutation");
   const observationReceiver = captureRawField(value, "observation");
   const readReceiver = captureRawField(value, "read");
   if (
+    !isRecord(codexDotenvReceiver) ||
+    !hasExactOwnKeys(
+      codexDotenvReceiver,
+      CODEX_DOTENV_ADAPTER_KEYS,
+    ) ||
     !isRecord(journalReceiver) ||
     !hasExactOwnKeys(journalReceiver, JOURNAL_ADAPTER_KEYS) ||
     !isRecord(legacyReceiver) ||
@@ -632,6 +663,14 @@ function parseAdapterPair(
   ) {
     return undefined;
   }
+  const observeCodexDotenv = captureRawField(
+    codexDotenvReceiver,
+    "observe",
+  );
+  const synchronizeCodexDotenv = captureRawField(
+    codexDotenvReceiver,
+    "synchronize",
+  );
   const acquireJournalLease = captureRawField(journalReceiver, "acquire");
   const readLegacy = captureRawField(legacyReceiver, "read");
   const openReadPrivateDirectory = captureRawField(
@@ -651,6 +690,8 @@ function parseAdapterPair(
     "acquireObservedSetupLease",
   );
   if (
+    typeof observeCodexDotenv !== "function" ||
+    typeof synchronizeCodexDotenv !== "function" ||
     typeof acquireJournalLease !== "function" ||
     typeof readLegacy !== "function" ||
     typeof openReadPrivateDirectory !== "function" ||
@@ -662,11 +703,14 @@ function parseAdapterPair(
   }
 
   return Object.freeze({
+    codexDotenvReceiver,
     journalReceiver,
     legacyReceiver,
     readReceiver,
     observationReceiver,
     mutationReceiver,
+    observeCodexDotenv: observeCodexDotenv as RawFunction,
+    synchronizeCodexDotenv: synchronizeCodexDotenv as RawFunction,
     acquireJournalLease: acquireJournalLease as RawFunction,
     readLegacy: readLegacy as RawFunction,
     openReadPrivateDirectory: openReadPrivateDirectory as RawFunction,
@@ -2586,7 +2630,28 @@ function normalizeJournalAcquireResult(
 function wrapAdapterPair(
   pair: NativeCredentialAdapterPairSnapshot,
   configuration: Readonly<NativeCredentialStoreConfiguration>,
+  target: NativeCredentialTarget,
 ): Exclude<NativeCredentialStoreLoadResult, { status: "unavailable" }> {
+  const rawCodexDotenv = FREEZE<NativeCodexDotenvRawCalls>({
+    observe(options) {
+      return callRaw(
+        pair.observeCodexDotenv,
+        pair.codexDotenvReceiver,
+        [options],
+      );
+    },
+    synchronize(options) {
+      return callRaw(
+        pair.synchronizeCodexDotenv,
+        pair.codexDotenvReceiver,
+        [options],
+      );
+    },
+  });
+  const codexDotenv = createNativeCodexDotenvAdapter(
+    rawCodexDotenv,
+    target.startsWith("win32-") ? "crlf" : "lf",
+  );
   const wholePassEvidence: WholePassEvidenceMembrane = {
     publicToRaw: new WeakMap<object, object>(),
     seenRaw: new WeakSet<object>(),
@@ -2741,6 +2806,7 @@ function wrapAdapterPair(
 
   return FREEZE({
     status: "available" as const,
+    codexDotenv,
     journal,
     legacy,
     read,
@@ -2779,7 +2845,7 @@ function loadOnce(
     const pair = parseAdapterPair(adapters);
     return pair === undefined
       ? UNAVAILABLE
-      : wrapAdapterPair(pair, configuration);
+      : wrapAdapterPair(pair, configuration, target);
   } catch {
     return UNAVAILABLE;
   }

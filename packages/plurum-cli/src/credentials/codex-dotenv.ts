@@ -44,6 +44,10 @@ export type CodexDotenvRewriteResult =
       bytes: Uint8Array;
     }>;
 
+export type CodexDotenvInspectionResult = Readonly<{
+  status: "absent" | "present";
+}>;
+
 interface TargetAssignment {
   readonly valueStart: number;
   readonly valueEnd: number;
@@ -962,6 +966,60 @@ function appendAssignment(
   }
 }
 
+function inspectAssignment(bytes: Uint8Array): Readonly<{
+  assignment: TargetAssignment | null;
+  contentStart: number;
+  newline: CodexDotenvNewline | null;
+  terminated: boolean;
+}> {
+  const bom = hasLeadingBom(bytes);
+  const contentStart = bom ? UTF8_BOM.byteLength : 0;
+  validateUtf8(bytes, contentStart);
+  const scanned = scanLogicalRecords(bytes, 0);
+
+  let assignment: TargetAssignment | null = null;
+  for (const record of scanned.records) {
+    const candidate = assignmentInRecord(bytes, record);
+    if (candidate === null) {
+      continue;
+    }
+    if (assignment !== null) {
+      return fail("codex_dotenv_duplicate");
+    }
+    assignment = candidate;
+  }
+
+  return Object.freeze({
+    assignment,
+    contentStart,
+    newline: scanned.newline,
+    terminated: scanned.terminated,
+  });
+}
+
+/*
+ * Deferred registration must distinguish a missing target assignment from a
+ * present one without inventing a placeholder credential. This shares the
+ * exact parser used by rewriting and never decodes unrelated dotenv secrets
+ * into an immutable JavaScript string.
+ */
+export function inspectCodexDotenv(
+  input: Uint8Array,
+): CodexDotenvInspectionResult {
+  let bytes: Uint8Array | undefined;
+  try {
+    bytes = safeInput(input);
+    return Object.freeze({
+      status:
+        inspectAssignment(bytes).assignment === null
+          ? "absent"
+          : "present",
+    });
+  } finally {
+    wipe(bytes);
+  }
+}
+
 export function rewriteCodexDotenv(
   input: Uint8Array,
   apiKey: Uint8Array,
@@ -976,22 +1034,8 @@ export function rewriteCodexDotenv(
   try {
     bytes = safeInput(input);
     key = safeApiKey(apiKey);
-    const bom = hasLeadingBom(bytes);
-    const contentStart = bom ? UTF8_BOM.byteLength : 0;
-    validateUtf8(bytes, contentStart);
-    const scanned = scanLogicalRecords(bytes, 0);
-
-    let assignment: TargetAssignment | null = null;
-    for (const record of scanned.records) {
-      const candidate = assignmentInRecord(bytes, record);
-      if (candidate === null) {
-        continue;
-      }
-      if (assignment !== null) {
-        return fail("codex_dotenv_duplicate");
-      }
-      assignment = candidate;
-    }
+    const inspected = inspectAssignment(bytes);
+    const assignment = inspected.assignment;
 
     if (assignment !== null) {
       if (
@@ -1015,11 +1059,12 @@ export function rewriteCodexDotenv(
       status: "changed",
       bytes: appendAssignment(
         bytes,
-        contentStart,
-        scanned.newline,
-        scanned.terminated,
+        inspected.contentStart,
+        inspected.newline,
+        inspected.terminated,
         defaultNewline,
-        bom && bytes.byteLength === contentStart,
+        inspected.contentStart !== 0 &&
+          bytes.byteLength === inspected.contentStart,
         key,
       ),
     });

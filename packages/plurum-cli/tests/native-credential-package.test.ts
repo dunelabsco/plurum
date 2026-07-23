@@ -42,6 +42,7 @@ const SECRET = "plrm_live_NATIVE_PACKAGE_SECRET_SENTINEL";
 const ROOT_PREFIX = "plurum-native-package-test-";
 const TEST_REQUIRE_CACHE = createRequire(import.meta.url).cache;
 const NATIVE_CONFIGURATION = Object.freeze({
+  codexHomeDirectory: "/isolated/home/.codex",
   legacyPaths: Object.freeze({
     hermes: "/isolated/home/.hermes/plurum.json",
     openclaw: "/isolated/home/.openclaw/plurum.json",
@@ -276,6 +277,17 @@ function createNativeModule(
       };
     },
   });
+  const codexDotenv = Object.freeze({
+    observe() {
+      return {
+        status: "missing" as const,
+        revision: "1".repeat(64),
+      };
+    },
+    synchronize() {
+      return { status: "precondition-failed" as const };
+    },
+  });
   return {
     magic: NATIVE_CREDENTIAL_STORE_MAGIC,
     abiVersion: NATIVE_CREDENTIAL_STORE_ABI_VERSION,
@@ -283,7 +295,14 @@ function createNativeModule(
     packageVersion: CLI_VERSION,
     target,
     createAdapters() {
-      return { journal, legacy, mutation, observation, read };
+      return {
+        codexDotenv,
+        journal,
+        legacy,
+        mutation,
+        observation,
+        read,
+      };
     },
     ...overrides,
   };

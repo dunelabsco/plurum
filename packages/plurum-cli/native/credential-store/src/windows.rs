@@ -14,9 +14,14 @@ use plurum_windows_syscall::{
 };
 use sha2::{Digest, Sha256};
 
+mod dotenv;
 mod journal;
 mod mutation;
 
+pub(crate) use dotenv::{
+    observe_codex_dotenv, synchronize_codex_dotenv, CodexDotenvObservation, CodexDotenvState,
+    CodexDotenvSynchronizeDisposition, CodexDotenvSynchronizeResult,
+};
 pub(crate) use journal::{
     acquire_reconciliation_journal_lease, JournalObservation, JournalRemoveResult,
     JournalReplaceResult, JournalRevision, ReconciliationJournalLeaseAcquireResult,

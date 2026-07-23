@@ -13,10 +13,15 @@ use sha2::{Digest, Sha256};
 
 use plurum_native_secret_memory::zeroize_bytes;
 
+mod dotenv;
 mod journal;
 mod mutation;
 mod platform;
 
+pub(crate) use dotenv::{
+    observe_codex_dotenv, synchronize_codex_dotenv, CodexDotenvObservation, CodexDotenvState,
+    CodexDotenvSynchronizeDisposition, CodexDotenvSynchronizeResult,
+};
 pub(crate) use journal::{
     acquire_reconciliation_journal_lease, JournalObservation, JournalRemoveResult,
     JournalReplaceResult, JournalRevision, PosixReconciliationJournalLease,
@@ -1359,9 +1364,8 @@ where
             return Err(error);
         }
     }
-    process.verify().map_err(|error| {
+    process.verify().inspect_err(|_| {
         zeroize_bytes(bytes.as_mut_slice());
-        error
     })?;
 
     let end_of_file = u64::try_from(bytes.len()).ok() == Some(after.size);

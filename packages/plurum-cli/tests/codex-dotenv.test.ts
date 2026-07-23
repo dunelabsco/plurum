@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CodexDotenvError,
+  inspectCodexDotenv,
   MAX_CODEX_DOTENV_BYTES,
   rewriteCodexDotenv,
 } from "../src/credentials/codex-dotenv.js";
@@ -58,6 +59,26 @@ function expectCode(
 }
 
 describe("Codex dotenv byte-preserving rewrite", () => {
+  it("shares exact target detection with deferred registration inspection", () => {
+    expect(inspectCodexDotenv(bytes("# comment\nOTHER=value\n"))).toEqual({
+      status: "absent",
+    });
+    expect(
+      inspectCodexDotenv(
+        bytes(`# comment\nexport PLURUM_API_KEY = '${KEY_TEXT}'\n`),
+      ),
+    ).toEqual({ status: "present" });
+    expectCode(
+      () =>
+        inspectCodexDotenv(
+          bytes(
+            `PLURUM_API_KEY=${KEY_TEXT}\nPLURUM_API_KEY=${KEY_TEXT}\n`,
+          ),
+        ),
+      "codex_dotenv_duplicate",
+    );
+  });
+
   it("creates one canonical assignment with the selected empty-file newline", () => {
     expect(text("", KEY_TEXT, "lf")).toBe(
       `PLURUM_API_KEY=${KEY_TEXT}\n`,

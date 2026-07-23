@@ -131,6 +131,7 @@ const expectedFiles = [
   "dist/adapters/node/clock.js",
   "dist/adapters/node/credential-environment.js",
   "dist/adapters/node/hash.js",
+  "dist/adapters/node/native-codex-dotenv.js",
   "dist/adapters/node/native-credential-package.js",
   "dist/adapters/node/native-credential-store.js",
   "dist/adapters/node/network.js",
@@ -464,6 +465,7 @@ try {
   assert.equal(installedPackageMetadata.version, "0.0.0-development");
   assert.equal(installedPackageMetadata.private, true);
   assert.equal(installedPackageMetadata.type, "module");
+  assert.deepEqual(installedPackageMetadata.exports, {});
   assert.deepEqual(installedPackageMetadata.engines, {
     node: "^22.12.0 || ^24.0.0",
   });

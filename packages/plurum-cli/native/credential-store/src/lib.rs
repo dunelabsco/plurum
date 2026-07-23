@@ -30,7 +30,7 @@ pub const magic: &str = "plurum-native-credential-store";
 
 #[allow(non_upper_case_globals)]
 #[napi]
-pub const abiVersion: u32 = 3;
+pub const abiVersion: u32 = 4;
 
 #[allow(non_upper_case_globals)]
 #[napi]
@@ -64,7 +64,7 @@ mod tests {
     #[test]
     fn descriptor_values_are_stable() {
         assert_eq!(magic, "plurum-native-credential-store");
-        assert_eq!(abiVersion, 3);
+        assert_eq!(abiVersion, 4);
         assert_eq!(nodeApiVersion, 8);
         assert_eq!(packageVersion, "0.0.0-development");
         assert_eq!(target, TARGET_VALUE);

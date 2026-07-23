@@ -43,8 +43,40 @@ const graph = new Map([
   ],
   [
     "dist/adapters/node/native-credential-store.js",
-    new Set(["node:crypto", "../../version.js"]),
+    new Set([
+      "node:crypto",
+      "./native-codex-dotenv.js",
+      "../../version.js",
+    ]),
   ],
+  [
+    "dist/adapters/node/native-codex-dotenv.js",
+    new Set([
+      "node:crypto",
+      "../../credentials/codex-dotenv-contracts.js",
+      "../../credentials/codex-dotenv.js",
+      "../../credentials/schema.js",
+      "../../data/uint8-array.js",
+    ]),
+  ],
+  [
+    "dist/credentials/codex-dotenv-contracts.js",
+    new Set(),
+  ],
+  [
+    "dist/credentials/codex-dotenv.js",
+    new Set(["../data/uint8-array.js"]),
+  ],
+  [
+    "dist/credentials/schema.js",
+    new Set(["./errors.js", "./origin.js"]),
+  ],
+  [
+    "dist/credentials/origin.js",
+    new Set(["./errors.js"]),
+  ],
+  ["dist/credentials/errors.js", new Set()],
+  ["dist/data/uint8-array.js", new Set()],
   ["dist/system/runtime-support.js", new Set()],
   ["dist/version.js", new Set()],
 ]);

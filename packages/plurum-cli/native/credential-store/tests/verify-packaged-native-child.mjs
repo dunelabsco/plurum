@@ -290,6 +290,7 @@ if (cachePolicy === "preloaded") {
 }
 
 const nativeConfiguration = Object.freeze({
+  codexHomeDirectory: join(testRoot, "codex-home"),
   legacyPaths: Object.freeze({
     hermes: join(testRoot, "legacy-hermes", "plurum.json"),
     openclaw: join(testRoot, "legacy-openclaw", "plurum.json"),
@@ -334,6 +335,7 @@ if (cachePolicy === "preloaded") {
   }
   assert.equal(Object.isFrozen(loaded), true);
   assert.deepEqual(Object.keys(loaded).sort(), [
+    "codexDotenv",
     "journal",
     "legacy",
     "mutation",
@@ -341,12 +343,17 @@ if (cachePolicy === "preloaded") {
     "read",
     "status",
   ]);
+  assert.equal(Object.isFrozen(loaded.codexDotenv), true);
   assert.equal(Object.isFrozen(loaded.journal), true);
   assert.equal(Object.isFrozen(loaded.legacy), true);
   assert.equal(Object.isFrozen(loaded.read), true);
   assert.equal(Object.isFrozen(loaded.observation), true);
   assert.equal(Object.isFrozen(loaded.mutation), true);
   assert.deepEqual(Object.keys(loaded.journal), ["acquire"]);
+  assert.deepEqual(Object.keys(loaded.codexDotenv).sort(), [
+    "observe",
+    "synchronize",
+  ]);
   assert.deepEqual(Object.keys(loaded.legacy), ["read"]);
   assert.deepEqual(Object.keys(loaded.read), ["openPrivateDirectory"]);
   assert.deepEqual(Object.keys(loaded.observation), ["openPrivateDirectory"]);
@@ -371,6 +378,7 @@ if (cachePolicy === "preloaded") {
   }
   assert.equal(Object.isFrozen(laterLoaded), true);
   assert.deepEqual(Object.keys(laterLoaded).sort(), [
+    "codexDotenv",
     "journal",
     "legacy",
     "mutation",
@@ -378,12 +386,17 @@ if (cachePolicy === "preloaded") {
     "read",
     "status",
   ]);
+  assert.equal(Object.isFrozen(laterLoaded.codexDotenv), true);
   assert.equal(Object.isFrozen(laterLoaded.journal), true);
   assert.equal(Object.isFrozen(laterLoaded.legacy), true);
   assert.equal(Object.isFrozen(laterLoaded.read), true);
   assert.equal(Object.isFrozen(laterLoaded.observation), true);
   assert.equal(Object.isFrozen(laterLoaded.mutation), true);
   assert.deepEqual(Object.keys(laterLoaded.journal), ["acquire"]);
+  assert.deepEqual(Object.keys(laterLoaded.codexDotenv).sort(), [
+    "observe",
+    "synchronize",
+  ]);
   assert.deepEqual(Object.keys(laterLoaded.legacy), ["read"]);
   assert.deepEqual(Object.keys(laterLoaded.read), ["openPrivateDirectory"]);
   assert.deepEqual(Object.keys(laterLoaded.observation), ["openPrivateDirectory"]);

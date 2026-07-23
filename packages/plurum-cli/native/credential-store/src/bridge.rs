@@ -19,8 +19,10 @@ use crate::windows as platform;
 
 use platform::{
     acquire_observed_setup_lease, acquire_reconciliation_journal_lease, acquire_setup_lease,
-    observe_missing_private_directory, open_private_directory, read_allowlisted_legacy_credential,
-    BoundedRead, CanonicalEntryRole, ConditionalMutationResult, CredentialFileAttestation,
+    observe_codex_dotenv, observe_missing_private_directory, open_private_directory,
+    read_allowlisted_legacy_credential, synchronize_codex_dotenv, BoundedRead, CanonicalEntryRole,
+    CodexDotenvObservation, CodexDotenvState, CodexDotenvSynchronizeDisposition,
+    CodexDotenvSynchronizeResult, ConditionalMutationResult, CredentialFileAttestation,
     CredentialReadOpenResult, DirectoryAttestation, DirectoryDisposition, ExclusiveCreateResult,
     ExpectedEntrySnapshot, JournalObservation, JournalRemoveResult, JournalReplaceResult,
     JournalRevision, LeaseRenewal, LegacyCredentialReadResult, ManagedEntry,
@@ -74,10 +76,17 @@ struct LegacyPaths {
     removed_cli: String,
 }
 
-#[derive(Debug)]
 struct AdapterAuthority {
+    codex_home_directory: String,
+    codex_dotenv_revision: Mutex<Option<CodexDotenvRevision>>,
     legacy_paths: LegacyPaths,
     state_directory: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CodexDotenvRevision {
+    revision: String,
+    state: CodexDotenvState,
 }
 
 struct JournalRevisionToken {
@@ -243,30 +252,45 @@ fn expect_true(object: &Object<'_>, name: &str) -> Result<()> {
     }
 }
 
+fn contains_control(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| matches!(character as u32, 0x00..=0x1f | 0x7f..=0x9f))
+}
+
 fn parse_authority(configuration: &Object<'_>) -> Result<AdapterAuthority> {
-    exact_keys(configuration, &["legacyPaths", "stateDirectory"])?;
+    exact_keys(
+        configuration,
+        &["codexHomeDirectory", "legacyPaths", "stateDirectory"],
+    )?;
     let paths = property::<Object<'_>>(configuration, "legacyPaths")?;
     exact_keys(&paths, &["hermes", "openclaw", "removedCli"])?;
     let hermes = property::<String>(&paths, "hermes")?;
     let openclaw = property::<String>(&paths, "openclaw")?;
     let removed_cli = property::<String>(&paths, "removedCli")?;
+    let codex_home_directory = property::<String>(configuration, "codexHomeDirectory")?;
     let state_directory = property::<String>(configuration, "stateDirectory")?;
     if hermes.is_empty()
         || openclaw.is_empty()
         || removed_cli.is_empty()
+        || codex_home_directory.is_empty()
         || state_directory.is_empty()
         || hermes.len() > 32_768
         || openclaw.len() > 32_768
         || removed_cli.len() > 32_768
+        || codex_home_directory.len() > 32_768
         || state_directory.len() > 32_768
         || hermes.contains('\0')
         || openclaw.contains('\0')
         || removed_cli.contains('\0')
-        || state_directory.contains('\0')
+        || contains_control(&codex_home_directory)
+        || contains_control(&state_directory)
     {
         return Err(invalid_request());
     }
     Ok(AdapterAuthority {
+        codex_home_directory,
+        codex_dotenv_revision: Mutex::new(None),
         legacy_paths: LegacyPaths {
             hermes,
             openclaw,
@@ -335,6 +359,58 @@ fn hexadecimal(bytes: &[u8]) -> String {
         result.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
     }
     result
+}
+
+fn exact_lower_hex_64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn exact_uuid_v4(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes[8] == b'-'
+        && bytes[13] == b'-'
+        && bytes[18] == b'-'
+        && bytes[23] == b'-'
+        && bytes[14] == b'4'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 8 | 13 | 18 | 23)
+                || byte.is_ascii_digit()
+                || matches!(byte, b'a'..=b'f')
+        })
+}
+
+fn adopt_codex_dotenv_revision(
+    authority: &AdapterAuthority,
+    state: CodexDotenvState,
+    candidate: String,
+    reusable: bool,
+) -> Result<String> {
+    if !exact_lower_hex_64(&candidate) {
+        return Err(invalid_request());
+    }
+    let mut current = authority
+        .codex_dotenv_revision
+        .lock()
+        .map_err(|_| bridge_error())?;
+    if reusable {
+        match current.as_ref() {
+            Some(existing) if existing.state == state => {
+                return Ok(existing.revision.clone());
+            }
+            _ => {}
+        }
+    }
+    *current = Some(CodexDotenvRevision {
+        revision: candidate.clone(),
+        state,
+    });
+    Ok(candidate)
 }
 
 fn object_identity(env: &Env, value: ObjectIdentity) -> Result<BridgeObject> {
@@ -1498,9 +1574,9 @@ fn make_setup_lease(env: &Env, handle: PlatformSetupLease) -> Result<BridgeObjec
 
 const MAX_RECONCILIATION_JOURNAL_BYTES: usize = 65_536;
 
-struct PendingJournalBytes(Option<Vec<u8>>);
+struct PendingSecretBytes(Option<Vec<u8>>);
 
-impl PendingJournalBytes {
+impl PendingSecretBytes {
     fn new(bytes: Vec<u8>) -> Self {
         Self(Some(bytes))
     }
@@ -1510,7 +1586,7 @@ impl PendingJournalBytes {
     }
 }
 
-impl Drop for PendingJournalBytes {
+impl Drop for PendingSecretBytes {
     fn drop(&mut self) {
         if let Some(bytes) = self.0.as_mut() {
             zeroize_bytes(bytes.as_mut_slice());
@@ -1564,7 +1640,7 @@ fn make_reconciliation_journal_lease(
                     Ok(GuardedObjectRef::plain(finish_object(&value)?))
                 }
                 JournalObservation::Present { revision, bytes } => {
-                    let mut pending = PendingJournalBytes::new(bytes);
+                    let mut pending = PendingSecretBytes::new(bytes);
                     let mut value = Object::new(context.env).map_err(|_| bridge_error())?;
                     value
                         .set_named_property("status", "present")
@@ -1672,6 +1748,227 @@ fn make_reconciliation_journal_lease(
         .map_err(|_| bridge_error())?;
     result
         .set_named_property("abandon", abandon)
+        .map_err(|_| bridge_error())?;
+
+    finish_object(&result)
+}
+
+const MAX_CODEX_DOTENV_BYTES: usize = 128 * 1024;
+
+fn make_codex_dotenv_adapter(env: &Env, authority: Arc<AdapterAuthority>) -> Result<BridgeObject> {
+    let mut result = Object::new(env).map_err(|_| bridge_error())?;
+
+    let observe_authority = Arc::clone(&authority);
+    let observe = env
+        .create_function_from_closure::<(), GuardedObjectRef, _>("observe", move |context| {
+            exact_argument_count(&context, 1)?;
+            let options = argument::<Object<'_>>(&context, 0)?;
+            exact_keys(
+                &options,
+                &[
+                    "excludedProjectDirectory",
+                    "maxBytes",
+                    "noFollow",
+                    "revisionNonce",
+                ],
+            )?;
+            expect_true(&options, "noFollow")?;
+            if property::<f64>(&options, "maxBytes")? != MAX_CODEX_DOTENV_BYTES as f64 {
+                return Err(invalid_request());
+            }
+            let excluded_project = property::<String>(&options, "excludedProjectDirectory")?;
+            let revision_nonce = property::<String>(&options, "revisionNonce")?;
+            if !exact_lower_hex_64(&revision_nonce) {
+                return Err(invalid_request());
+            }
+
+            let observation = match observe_codex_dotenv(
+                Path::new(&observe_authority.codex_home_directory),
+                Path::new(&excluded_project),
+                MAX_CODEX_DOTENV_BYTES,
+            ) {
+                Ok(value) => value,
+                Err(PlatformStoreError::InvalidInput) => return Err(invalid_request()),
+                Err(_) => return Err(bridge_error()),
+            };
+            let (status, state, pending, reusable) = match observation {
+                CodexDotenvObservation::Missing { state } => ("missing", state, None, true),
+                CodexDotenvObservation::Present { state, bytes } => {
+                    ("present", state, Some(PendingSecretBytes::new(bytes)), true)
+                }
+                CodexDotenvObservation::Oversized { state } => ("oversized", state, None, false),
+                CodexDotenvObservation::Unsafe { state } => ("unsafe", state, None, false),
+            };
+            let revision =
+                adopt_codex_dotenv_revision(&observe_authority, state, revision_nonce, reusable)?;
+            let mut value = Object::new(context.env).map_err(|_| bridge_error())?;
+            value
+                .set_named_property("status", status)
+                .map_err(|_| bridge_error())?;
+            value
+                .set_named_property("revision", revision)
+                .map_err(|_| bridge_error())?;
+            if let Some(mut pending) = pending {
+                let read = create_guarded_bounded_read_result(context.env, pending.take()?, true)
+                    .map_err(|_| bridge_error())?;
+                let continuation = read.secret_continuation().ok_or_else(bridge_error)?;
+                value
+                    .set_named_property("read", read)
+                    .map_err(|_| bridge_error())?;
+                return Ok(continuation.protect(finish_object(&value)?));
+            }
+            Ok(GuardedObjectRef::plain(finish_object(&value)?))
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("observe", observe)
+        .map_err(|_| bridge_error())?;
+
+    let synchronize_authority = Arc::clone(&authority);
+    let synchronize = env
+        .create_function_from_closure::<(), _, _>("synchronize", move |context| {
+            exact_argument_count(&context, 1)?;
+            let options = argument::<Object<'_>>(&context, 0)?;
+            let disposition = property::<String>(&options, "disposition")?;
+            let changed = match disposition.as_str() {
+                "changed" => {
+                    exact_keys(
+                        &options,
+                        &[
+                            "bytes",
+                            "disposition",
+                            "excludedProjectDirectory",
+                            "expectedRevision",
+                            "maxBytes",
+                            "nextRevisionNonce",
+                            "noFollow",
+                            "nonce",
+                        ],
+                    )?;
+                    true
+                }
+                "unchanged" => {
+                    exact_keys(
+                        &options,
+                        &[
+                            "disposition",
+                            "excludedProjectDirectory",
+                            "expectedRevision",
+                            "maxBytes",
+                            "nextRevisionNonce",
+                            "noFollow",
+                            "nonce",
+                        ],
+                    )?;
+                    false
+                }
+                _ => return Err(invalid_request()),
+            };
+            expect_true(&options, "noFollow")?;
+            if property::<f64>(&options, "maxBytes")? != MAX_CODEX_DOTENV_BYTES as f64 {
+                return Err(invalid_request());
+            }
+            let excluded_project = property::<String>(&options, "excludedProjectDirectory")?;
+            let expected_revision = property::<String>(&options, "expectedRevision")?;
+            let next_revision = property::<String>(&options, "nextRevisionNonce")?;
+            let nonce = property::<String>(&options, "nonce")?;
+            if !exact_lower_hex_64(&expected_revision)
+                || !exact_lower_hex_64(&next_revision)
+                || !exact_uuid_v4(&nonce)
+                || (changed && expected_revision == next_revision)
+            {
+                return Err(invalid_request());
+            }
+            let desired = if changed {
+                let value = property::<Uint8Array>(&options, "bytes")?;
+                if value.is_empty() || value.len() > MAX_CODEX_DOTENV_BYTES {
+                    return Err(invalid_request());
+                }
+                Some(value)
+            } else {
+                None
+            };
+
+            let mut rendered = Object::new(context.env).map_err(|_| bridge_error())?;
+            let mut registry = synchronize_authority
+                .codex_dotenv_revision
+                .lock()
+                .map_err(|_| bridge_error())?;
+            let Some(expected) = registry.as_ref().cloned() else {
+                rendered
+                    .set_named_property("status", "precondition-failed")
+                    .map_err(|_| bridge_error())?;
+                return finish_object(&rendered);
+            };
+            if expected.revision != expected_revision {
+                rendered
+                    .set_named_property("status", "precondition-failed")
+                    .map_err(|_| bridge_error())?;
+                return finish_object(&rendered);
+            }
+
+            let synchronized = match synchronize_codex_dotenv(
+                Path::new(&synchronize_authority.codex_home_directory),
+                Path::new(&synchronize_authority.state_directory),
+                Path::new(&excluded_project),
+                &expected.state,
+                &nonce,
+                desired.as_ref().map(|bytes| bytes.as_ref()),
+                MAX_CODEX_DOTENV_BYTES,
+            ) {
+                Ok(value) => value,
+                Err(PlatformStoreError::InvalidInput) => return Err(invalid_request()),
+                Err(_) => {
+                    rendered
+                        .set_named_property("status", "failed")
+                        .map_err(|_| bridge_error())?;
+                    return finish_object(&rendered);
+                }
+            };
+            let CodexDotenvSynchronizeResult::Completed {
+                disposition: actual_disposition,
+                state,
+            } = synchronized
+            else {
+                rendered
+                    .set_named_property("status", "precondition-failed")
+                    .map_err(|_| bridge_error())?;
+                return finish_object(&rendered);
+            };
+
+            let actual_changed = actual_disposition == CodexDotenvSynchronizeDisposition::Changed;
+            if actual_changed != changed
+                || (changed && state == expected.state)
+                || (!changed && state != expected.state)
+            {
+                rendered
+                    .set_named_property("status", "failed")
+                    .map_err(|_| bridge_error())?;
+                return finish_object(&rendered);
+            }
+            let state_revision = if changed {
+                *registry = Some(CodexDotenvRevision {
+                    revision: next_revision.clone(),
+                    state,
+                });
+                next_revision
+            } else {
+                expected_revision
+            };
+            rendered
+                .set_named_property("status", "completed")
+                .map_err(|_| bridge_error())?;
+            rendered
+                .set_named_property("disposition", disposition)
+                .map_err(|_| bridge_error())?;
+            rendered
+                .set_named_property("stateRevision", state_revision)
+                .map_err(|_| bridge_error())?;
+            finish_object(&rendered)
+        })
+        .map_err(|_| bridge_error())?;
+    result
+        .set_named_property("synchronize", synchronize)
         .map_err(|_| bridge_error())?;
 
     finish_object(&result)
@@ -2065,6 +2362,12 @@ fn make_mutation_adapter(env: &Env, authority: Arc<AdapterAuthority>) -> Result<
 pub(crate) fn create_adapters(env: &Env, configuration: &Object<'_>) -> Result<BridgeObject> {
     let authority = Arc::new(parse_authority(configuration)?);
     let mut result = Object::new(env).map_err(|_| bridge_error())?;
+    result
+        .set_named_property(
+            "codexDotenv",
+            make_codex_dotenv_adapter(env, Arc::clone(&authority))?,
+        )
+        .map_err(|_| bridge_error())?;
     result
         .set_named_property(
             "journal",

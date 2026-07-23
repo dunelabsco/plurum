@@ -11,6 +11,8 @@ const nativeCredentialPackagePath =
   "src/adapters/node/native-credential-package.ts";
 const nativeCredentialStorePath =
   "src/adapters/node/native-credential-store.ts";
+const nativeCodexDotenvPath =
+  "src/adapters/node/native-codex-dotenv.ts";
 const exactNativeCredentialStoreImports = Object.freeze([
   "NATIVE_CREDENTIAL_STORE_ABI_VERSION",
   "NATIVE_CREDENTIAL_STORE_NODE_API_VERSION",
@@ -30,6 +32,94 @@ const exactNativeCredentialStoreLocalImports = Object.freeze([
 const exactNativeCredentialStoreExternalLocalImports = new Map([
   ["node:crypto", ["randomUUID:nodeRandomUUID"]],
 ]);
+const exactNativeCodexDotenvDependencies = new Map([
+  [
+    "node:crypto",
+    Object.freeze({
+      bindings: ["randomBytes", "randomUUID"],
+      locals: [
+        "randomBytes:nodeRandomBytes",
+        "randomUUID:nodeRandomUUID",
+      ],
+    }),
+  ],
+  [
+    "../../credentials/codex-dotenv-contracts.js",
+    Object.freeze({
+      bindings: [
+        "CODEX_DOTENV_API_ORIGIN",
+        "type:CodexDotenvCredentialExpectation",
+        "type:CodexDotenvNativeAdapter",
+        "type:CodexDotenvNativeEvidence",
+        "type:CodexDotenvNativeMutationResult",
+        "type:CodexDotenvObserveRequest",
+        "type:CodexDotenvProjectionStatus",
+        "type:CodexDotenvSynchronizeRequest",
+      ],
+      locals: [
+        "CODEX_DOTENV_API_ORIGIN:CODEX_DOTENV_API_ORIGIN",
+        "type:CodexDotenvCredentialExpectation:CodexDotenvCredentialExpectation",
+        "type:CodexDotenvNativeAdapter:CodexDotenvNativeAdapter",
+        "type:CodexDotenvNativeEvidence:CodexDotenvNativeEvidence",
+        "type:CodexDotenvNativeMutationResult:CodexDotenvNativeMutationResult",
+        "type:CodexDotenvObserveRequest:CodexDotenvObserveRequest",
+        "type:CodexDotenvProjectionStatus:CodexDotenvProjectionStatus",
+        "type:CodexDotenvSynchronizeRequest:CodexDotenvSynchronizeRequest",
+      ],
+    }),
+  ],
+  [
+    "../../credentials/codex-dotenv.js",
+    Object.freeze({
+      bindings: [
+        "CodexDotenvError",
+        "MAX_CODEX_DOTENV_BYTES",
+        "inspectCodexDotenv",
+        "rewriteCodexDotenv",
+        "type:CodexDotenvNewline",
+      ],
+      locals: [
+        "CodexDotenvError:CodexDotenvError",
+        "MAX_CODEX_DOTENV_BYTES:MAX_CODEX_DOTENV_BYTES",
+        "inspectCodexDotenv:inspectCodexDotenv",
+        "rewriteCodexDotenv:rewriteCodexDotenv",
+        "type:CodexDotenvNewline:CodexDotenvNewline",
+      ],
+    }),
+  ],
+  [
+    "../../credentials/schema.js",
+    Object.freeze({
+      bindings: ["parseApiKey", "type:ApiKey"],
+      locals: ["parseApiKey:parseApiKey", "type:ApiKey:ApiKey"],
+    }),
+  ],
+  [
+    "../../data/uint8-array.js",
+    Object.freeze({
+      bindings: [
+        "copyUint8Array",
+        "intrinsicUint8ArrayByteLength",
+        "wipeUint8Array",
+      ],
+      locals: [
+        "copyUint8Array:copyUint8Array",
+        "intrinsicUint8ArrayByteLength:intrinsicUint8ArrayByteLength",
+        "wipeUint8Array:wipeUint8Array",
+      ],
+    }),
+  ],
+]);
+const exactNativeCodexDotenvStoreImport = Object.freeze({
+  bindings: [
+    "createNativeCodexDotenvAdapter",
+    "type:NativeCodexDotenvRawCalls",
+  ],
+  locals: [
+    "createNativeCodexDotenvAdapter:createNativeCodexDotenvAdapter",
+    "type:NativeCodexDotenvRawCalls:NativeCodexDotenvRawCalls",
+  ],
+});
 const exactNativeCredentialPackageExternalImports = new Map([
   ["node:crypto", ["createHash"]],
   [
@@ -96,6 +186,10 @@ const allowedExternalImports = new Map([
   [
     nativeCredentialStorePath,
     new Map([["node:crypto", ["randomUUID"]]]),
+  ],
+  [
+    nativeCodexDotenvPath,
+    new Map([["node:crypto", ["randomBytes", "randomUUID"]]]),
   ],
   [
     "src/adapters/node/network.ts",
@@ -174,6 +268,43 @@ const verifierOnlyNativePackageStem =
   "src/adapters/node/native-credential-package";
 const codexCredentialBoundaryStem = "src/credentials/codex-dotenv";
 const exactCodexCredentialBoundaryImports = new Map([
+  [
+    nativeCredentialStorePath,
+    new Map([
+      [
+        "src/credentials/codex-dotenv-contracts.js",
+        ["type:CodexDotenvNativeAdapter"],
+      ],
+    ]),
+  ],
+  [
+    nativeCodexDotenvPath,
+    new Map([
+      [
+        "src/credentials/codex-dotenv-contracts.js",
+        [
+          "CODEX_DOTENV_API_ORIGIN",
+          "type:CodexDotenvCredentialExpectation",
+          "type:CodexDotenvNativeAdapter",
+          "type:CodexDotenvNativeEvidence",
+          "type:CodexDotenvNativeMutationResult",
+          "type:CodexDotenvObserveRequest",
+          "type:CodexDotenvProjectionStatus",
+          "type:CodexDotenvSynchronizeRequest",
+        ],
+      ],
+      [
+        "src/credentials/codex-dotenv.js",
+        [
+          "CodexDotenvError",
+          "MAX_CODEX_DOTENV_BYTES",
+          "inspectCodexDotenv",
+          "rewriteCodexDotenv",
+          "type:CodexDotenvNewline",
+        ],
+      ],
+    ]),
+  ],
   [
     "src/commands/setup-host-execution.ts",
     new Map([
@@ -783,6 +914,48 @@ function isExactNativeCredentialStoreImport(
   );
 }
 
+function isNativeCodexDotenvModule(resolvedModule) {
+  return sourceModuleExtensions.some(
+    (extension) =>
+      resolvedModule ===
+      `src/adapters/node/native-codex-dotenv${extension}`,
+  );
+}
+
+function isExactNativeCodexDotenvStoreImport(
+  relativePath,
+  resolvedModule,
+  specifier,
+  declaration,
+) {
+  return (
+    relativePath === nativeCredentialStorePath &&
+    resolvedModule === "src/adapters/node/native-codex-dotenv.js" &&
+    specifier === "./native-codex-dotenv.js" &&
+    declaration?.type === "ImportDeclaration" &&
+    JSON.stringify(importBindings(declaration)) ===
+      JSON.stringify(
+        [...exactNativeCodexDotenvStoreImport.bindings].sort(),
+      ) &&
+    JSON.stringify(importLocalBindings(declaration)) ===
+      JSON.stringify(
+        [...exactNativeCodexDotenvStoreImport.locals].sort(),
+      )
+  );
+}
+
+function isExactNativeCodexDotenvDependency(specifier, declaration) {
+  const expected = exactNativeCodexDotenvDependencies.get(specifier);
+  return (
+    expected !== undefined &&
+    declaration?.type === "ImportDeclaration" &&
+    JSON.stringify(importBindings(declaration)) ===
+      JSON.stringify([...expected.bindings].sort()) &&
+    JSON.stringify(importLocalBindings(declaration)) ===
+      JSON.stringify([...expected.locals].sort())
+  );
+}
+
 function isExactRuntimeObservationReflectApply(
   relativePath,
   member,
@@ -843,7 +1016,8 @@ function isAllowedBoundaryReflectReference(
     );
   }
   const allowedMembers =
-    relativePath === "src/adapters/node/native-credential-store.ts"
+    relativePath === "src/adapters/node/native-credential-store.ts" ||
+    relativePath === nativeCodexDotenvPath
       ? ["apply", "ownKeys"]
       : relativePath === nativeCredentialPackagePath
         ? ["ownKeys"]
@@ -1743,6 +1917,34 @@ function scanText(relativePath, text) {
       }
     }
 
+    if (
+      relativePath === nativeCodexDotenvPath &&
+      !isExactNativeCodexDotenvDependency(specifier, importNode)
+    ) {
+      report(
+        node,
+        "native-codex-dotenv-boundary",
+        "the native Codex dotenv bridge has an exact reviewed dependency graph",
+      );
+    }
+
+    if (
+      resolvedModule !== undefined &&
+      isNativeCodexDotenvModule(resolvedModule) &&
+      !isExactNativeCodexDotenvStoreImport(
+        relativePath,
+        resolvedModule,
+        specifier,
+        importNode,
+      )
+    ) {
+      report(
+        node,
+        "native-codex-dotenv-boundary",
+        "only the exact native credential store bridge may compose the native Codex dotenv adapter",
+      );
+    }
+
     validateDiagnosticReadOnlyImport(node, resolvedModule, importNode);
 
     if (resolvedModule?.startsWith("src/adapters/node/")) {
@@ -2060,6 +2262,7 @@ function scanText(relativePath, text) {
             propertyName === "getOwnPropertyDescriptor" &&
             isExactNativePackageDescriptorCall(node, parent, ancestors)) ||
           ((([
+              "src/adapters/node/native-codex-dotenv.ts",
               "src/adapters/node/native-credential-store.ts",
               "src/commands/setup-approval.ts",
               "src/commands/setup-credential-plan.ts",
@@ -2112,13 +2315,15 @@ function scanText(relativePath, text) {
       }
       if (
         ([
+            "src/adapters/node/native-codex-dotenv.ts",
             "src/adapters/node/native-credential-store.ts",
             nativeCredentialPackagePath,
             "src/data/uint8-array.ts",
           ].includes(relativePath) ||
           diagnosticReflectionMembers.has(relativePath)) &&
         objectName === "Reflect" &&
-        (relativePath === "src/adapters/node/native-credential-store.ts"
+        (relativePath === "src/adapters/node/native-credential-store.ts" ||
+        relativePath === nativeCodexDotenvPath
           ? ["apply", "ownKeys"]
           : relativePath === nativeCredentialPackagePath
             ? ["ownKeys"]
@@ -2400,6 +2605,66 @@ const negativeFixtures = [
   ["src/example.ts", 'import { readFile } from "node:fs/promises";', "external-module"],
   ["src/example.ts", 'import fs from "fs";', "external-module"],
   ["src/example.ts", 'export * from "node:https";', "external-module"],
+  [
+    "src/adapters/node/other.ts",
+    'import { createNativeCodexDotenvAdapter, type NativeCodexDotenvRawCalls } from "./native-codex-dotenv.js"; void createNativeCodexDotenvAdapter; type Raw = NativeCodexDotenvRawCalls;',
+    "native-codex-dotenv-boundary",
+  ],
+  [
+    nativeCredentialStorePath,
+    'import * as dotenv from "./native-codex-dotenv.js"; void dotenv;',
+    "native-codex-dotenv-boundary",
+  ],
+  [
+    nativeCredentialStorePath,
+    'import { createNativeCodexDotenvAdapter as create, type NativeCodexDotenvRawCalls } from "./native-codex-dotenv.js"; void create; type Raw = NativeCodexDotenvRawCalls;',
+    "native-codex-dotenv-boundary",
+  ],
+  [
+    nativeCredentialStorePath,
+    'import { createNativeCodexDotenvAdapter, type NativeCodexDotenvRawCalls, invalid } from "./native-codex-dotenv.js"; void createNativeCodexDotenvAdapter; void invalid; type Raw = NativeCodexDotenvRawCalls;',
+    "native-codex-dotenv-boundary",
+  ],
+  [
+    nativeCredentialStorePath,
+    'import "./native-codex-dotenv.js";',
+    "native-codex-dotenv-boundary",
+  ],
+  [
+    nativeCredentialStorePath,
+    'export { createNativeCodexDotenvAdapter } from "./native-codex-dotenv.js";',
+    "native-codex-dotenv-boundary",
+  ],
+  [
+    nativeCodexDotenvPath,
+    'import { readFileSync } from "node:fs"; void readFileSync;',
+    "native-codex-dotenv-boundary",
+  ],
+  [
+    nativeCodexDotenvPath,
+    'import { randomBytes, randomUUID } from "node:crypto"; randomBytes(32); randomUUID();',
+    "native-codex-dotenv-boundary",
+  ],
+  [
+    nativeCodexDotenvPath,
+    'const apply = Reflect.apply; apply(() => undefined, undefined, []);',
+    "dynamic-code",
+  ],
+  [
+    nativeCodexDotenvPath,
+    'Reflect["ownKeys"]({});',
+    "dynamic-code",
+  ],
+  [
+    nativeCodexDotenvPath,
+    'const descriptor = Object.getOwnPropertyDescriptor; descriptor({}, "key");',
+    "dynamic-code",
+  ],
+  [
+    nativeCodexDotenvPath,
+    'Object["getPrototypeOf"]({});',
+    "dynamic-code",
+  ],
   [
     "src/credentials/paths.ts",
     'import { posix } from "node:path";',
@@ -3649,11 +3914,39 @@ const positiveFixtures = [
   ],
   [
     nativeCredentialStorePath,
+    'import { createNativeCodexDotenvAdapter, type NativeCodexDotenvRawCalls } from "./native-codex-dotenv.js"; void createNativeCodexDotenvAdapter; type Raw = NativeCodexDotenvRawCalls;',
+  ],
+  [
+    nativeCodexDotenvPath,
+    'import { randomBytes as nodeRandomBytes, randomUUID as nodeRandomUUID } from "node:crypto"; nodeRandomBytes(32); nodeRandomUUID();',
+  ],
+  [
+    nativeCodexDotenvPath,
+    'import { CODEX_DOTENV_API_ORIGIN, type CodexDotenvCredentialExpectation, type CodexDotenvNativeAdapter, type CodexDotenvNativeEvidence, type CodexDotenvNativeMutationResult, type CodexDotenvObserveRequest, type CodexDotenvProjectionStatus, type CodexDotenvSynchronizeRequest } from "../../credentials/codex-dotenv-contracts.js"; void CODEX_DOTENV_API_ORIGIN; type Values = [CodexDotenvCredentialExpectation, CodexDotenvNativeAdapter, CodexDotenvNativeEvidence, CodexDotenvNativeMutationResult, CodexDotenvObserveRequest, CodexDotenvProjectionStatus, CodexDotenvSynchronizeRequest];',
+  ],
+  [
+    nativeCodexDotenvPath,
+    'import { CodexDotenvError, inspectCodexDotenv, MAX_CODEX_DOTENV_BYTES, rewriteCodexDotenv, type CodexDotenvNewline } from "../../credentials/codex-dotenv.js"; void CodexDotenvError; void inspectCodexDotenv; void MAX_CODEX_DOTENV_BYTES; void rewriteCodexDotenv; type Newline = CodexDotenvNewline;',
+  ],
+  [
+    nativeCodexDotenvPath,
+    'import { parseApiKey, type ApiKey } from "../../credentials/schema.js"; void parseApiKey; type Key = ApiKey;',
+  ],
+  [
+    nativeCodexDotenvPath,
+    'import { copyUint8Array, intrinsicUint8ArrayByteLength, wipeUint8Array } from "../../data/uint8-array.js"; void copyUint8Array; void intrinsicUint8ArrayByteLength; void wipeUint8Array;',
+  ],
+  [
+    nativeCredentialStorePath,
     "Reflect.apply(() => 1, undefined, []);",
   ],
   [
     nativeCredentialStorePath,
     "Reflect.ownKeys(Object.freeze({}));",
+  ],
+  [
+    nativeCodexDotenvPath,
+    'Reflect.apply(String.prototype.charCodeAt, "a", [0]); Reflect.ownKeys({}); Object.getOwnPropertyDescriptor({}, "key"); Object.getPrototypeOf({});',
   ],
   [
     nativeCredentialPackagePath,

@@ -4,6 +4,7 @@
   "private": true,
   "description": "Securely connect Claude Code and Codex to Plurum's collective intelligence.",
   "type": "module",
+  "exports": {},
   "bin": {
     "plurum": "./dist/index.js"
   },
