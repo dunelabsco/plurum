@@ -2127,6 +2127,12 @@ pub(crate) fn synchronize_codex_dotenv(
         return Ok(CodexDotenvSynchronizeResult::PreconditionFailed);
     }
     let nonce = ValidatedUuidV4::parse(nonce)?;
+    if matches!(
+        expected.dotenv_kind,
+        CodexDotenvKind::Oversized | CodexDotenvKind::Unsafe
+    ) {
+        return Ok(CodexDotenvSynchronizeResult::PreconditionFailed);
+    }
     let mut lease = match acquire_dotenv_lock(
         state_directory,
         &parsed_home,
@@ -3094,7 +3100,7 @@ mod tests {
             ORIGINAL
         );
         assert!(candidate_paths(&fixture.codex_home).is_empty());
-        assert_clean_role_lock(&fixture);
+        assert!(!fixture.test.store.join(DOTENV_LOCK_ENTRY).exists());
         fixture.canary_is_intact();
     }
 
