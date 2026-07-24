@@ -680,6 +680,7 @@ pub fn create_guarded_bounded_read_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CStr;
     use std::sync::Mutex;
 
     const FAKE_ENV: sys::napi_env = 0x10usize as sys::napi_env;
@@ -890,14 +891,14 @@ mod tests {
             properties: &[sys::napi_property_descriptor],
         ) -> sys::napi_status {
             assert_eq!(properties.len(), 2);
-            if properties[0].utf8name == STATUS_PROPERTY.as_ptr().cast() {
+            if property_name(&properties[0]) == STATUS_PROPERTY {
                 assert_eq!(properties[0].value, FAKE_STATUS);
-                assert_eq!(properties[1].utf8name, BYTES_PROPERTY.as_ptr().cast());
+                assert_eq!(property_name(&properties[1]), BYTES_PROPERTY);
                 assert_eq!(properties[1].value, FAKE_TYPED_ARRAY);
             } else {
-                assert_eq!(properties[0].utf8name, BYTES_PROPERTY.as_ptr().cast());
+                assert_eq!(property_name(&properties[0]), BYTES_PROPERTY);
                 assert_eq!(properties[0].value, FAKE_TYPED_ARRAY);
-                assert_eq!(properties[1].utf8name, END_OF_FILE_PROPERTY.as_ptr().cast());
+                assert_eq!(property_name(&properties[1]), END_OF_FILE_PROPERTY);
                 assert_eq!(properties[1].value, FAKE_BOOLEAN);
             }
             assert_eq!(
@@ -952,6 +953,13 @@ mod tests {
 
     fn leaked_fake(failing: Boundary) -> &'static FakeOps {
         Box::leak(Box::new(FakeOps::new(failing)))
+    }
+
+    fn property_name(property: &sys::napi_property_descriptor) -> &[u8] {
+        assert!(!property.utf8name.is_null());
+        // SAFETY: this fake receives only descriptors built by `raw_property`
+        // from the module's NUL-terminated, static-lifetime property names.
+        unsafe { CStr::from_ptr(property.utf8name) }.to_bytes_with_nul()
     }
 
     fn assert_wiped(probe: &WipeProbe) {
