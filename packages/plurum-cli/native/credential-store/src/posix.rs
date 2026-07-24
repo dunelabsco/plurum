@@ -2169,6 +2169,7 @@ mod tests {
     pub(super) const TEST_MARKER: &str = "plurum-posix-native-test-v1\n";
     const CHILD_DIRECTORY_ENV: &str = "PLURUM_POSIX_LEASE_CHILD_DIRECTORY";
     const CHILD_READY_ENV: &str = "PLURUM_POSIX_LEASE_CHILD_READY";
+    const UMASK_CHILD_DIRECTORY_ENV: &str = "PLURUM_POSIX_UMASK_CHILD_DIRECTORY";
     const MAX_TEST_CLEANUP_DEPTH: usize = 16;
     const MAX_TEST_CLEANUP_ENTRIES: usize = 8_192;
     const MAX_TEST_CLEANUP_BYTES: u64 = 8 * 1024 * 1024;
@@ -2347,6 +2348,63 @@ mod tests {
         );
         assert!(!ready.exists(), "lease child ready path must not preexist");
         Some((directory, ready))
+    }
+
+    fn verified_umask_child_directory() -> Option<PathBuf> {
+        let directory = PathBuf::from(env::var_os(UMASK_CHILD_DIRECTORY_ENV)?);
+        NormalizedAbsolutePath::parse(&directory)
+            .expect("umask child directory must be a normalized absolute path");
+
+        let (process, _, temporary) = verified_test_isolation();
+        let test_root = directory
+            .parent()
+            .expect("umask child directory must have a parent");
+        assert_eq!(test_root.parent(), Some(temporary.as_path()));
+        assert_eq!(directory, test_root.join("plurum"));
+        assert_eq!(
+            test_root
+                .canonicalize()
+                .expect("umask child test root must canonicalize"),
+            test_root
+        );
+
+        let root_metadata =
+            fs::symlink_metadata(test_root).expect("umask child test root must exist");
+        assert!(!root_metadata.file_type().is_symlink());
+        assert!(root_metadata.is_dir());
+        assert_eq!(root_metadata.uid(), process.uid);
+        assert_eq!(root_metadata.gid(), process.gid);
+        assert_eq!(
+            root_metadata.mode() & PERMISSION_AND_SPECIAL_BITS,
+            PRIVATE_DIRECTORY_MODE
+        );
+
+        let marker = test_root.join(".plurum-posix-native-test");
+        let marker_metadata =
+            fs::symlink_metadata(&marker).expect("umask child test marker must exist");
+        assert!(!marker_metadata.file_type().is_symlink());
+        assert!(marker_metadata.is_file());
+        assert_eq!(marker_metadata.uid(), process.uid);
+        assert_eq!(marker_metadata.gid(), process.gid);
+        assert_eq!(marker_metadata.nlink(), 1);
+        assert_eq!(
+            marker_metadata.mode() & PERMISSION_AND_SPECIAL_BITS,
+            PRIVATE_FILE_MODE
+        );
+        assert_eq!(
+            fs::read_to_string(marker).expect("umask child marker must be readable"),
+            TEST_MARKER
+        );
+        assert_eq!(
+            fs::read(test_root.join("outside-canary"))
+                .expect("umask child outside canary must be readable"),
+            b"outside-canary\n"
+        );
+        assert!(
+            !directory.exists(),
+            "fresh umask child store must not preexist"
+        );
+        Some(directory)
     }
 
     fn cleanup_metadata(file: &File) -> Result<MetadataFacts, TestCleanupError> {
@@ -4015,6 +4073,182 @@ mod tests {
             Err(PosixStoreError::InvalidInput)
         ));
         assert!(!test.store.exists());
+    }
+
+    #[test]
+    fn permissive_umask_cannot_broaden_native_store_permissions() {
+        let test = TestRoot::new();
+        let root = test.root.clone();
+        let marker_before =
+            fs::read(&test.marker).expect("umask parent marker must remain readable");
+        let outside_before =
+            fs::read(&test.outside).expect("umask parent outside canary must remain readable");
+        let isolation_marker = test
+            .temporary
+            .parent()
+            .expect("isolated temporary root must have an isolation parent")
+            .join(".plurum-native-isolation");
+
+        let status = Command::new(
+            env::current_exe().expect("native umask test binary path must be available"),
+        )
+        .args([
+            "--exact",
+            "posix::tests::permissive_umask_native_lifecycle_child",
+            "--nocapture",
+        ])
+        .env(UMASK_CHILD_DIRECTORY_ENV, &test.store)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("native umask child must start");
+        assert!(status.success(), "native umask child failed: {status}");
+
+        let store_metadata =
+            fs::symlink_metadata(&test.store).expect("umask-created store must exist");
+        assert!(!store_metadata.file_type().is_symlink());
+        assert!(store_metadata.is_dir());
+        assert_eq!(store_metadata.uid(), test.process.uid);
+        assert_eq!(store_metadata.gid(), test.process.gid);
+        assert_eq!(
+            store_metadata.mode() & PERMISSION_AND_SPECIAL_BITS,
+            PRIVATE_DIRECTORY_MODE
+        );
+
+        for entry in [SETUP_LOCK_ENTRY, CREDENTIAL_ENTRY] {
+            let path = test.store.join(entry);
+            let metadata =
+                fs::symlink_metadata(&path).expect("umask-created private file must exist");
+            assert!(!metadata.file_type().is_symlink());
+            assert!(metadata.is_file());
+            assert_eq!(metadata.uid(), test.process.uid);
+            assert_eq!(metadata.gid(), test.process.gid);
+            assert_eq!(metadata.nlink(), 1);
+            assert_eq!(
+                metadata.mode() & PERMISSION_AND_SPECIAL_BITS,
+                PRIVATE_FILE_MODE
+            );
+        }
+        assert_eq!(
+            fs::read(test.store.join(CREDENTIAL_ENTRY))
+                .expect("umask-created credential must remain readable"),
+            b"credential-under-zero-umask"
+        );
+
+        let mut entries = fs::read_dir(&test.store)
+            .expect("umask-created store must enumerate")
+            .map(|entry| {
+                entry
+                    .expect("umask-created store entry must enumerate")
+                    .file_name()
+            })
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec![
+                OsString::from(CREDENTIAL_ENTRY),
+                OsString::from(SETUP_LOCK_ENTRY),
+            ],
+            "completed lifecycle must leave only canonical owned entries"
+        );
+        assert_eq!(
+            fs::read(&test.marker).expect("umask parent marker must remain readable"),
+            marker_before
+        );
+        assert_eq!(
+            fs::read(&test.outside).expect("umask parent outside canary must remain readable"),
+            outside_before
+        );
+
+        drop(test);
+        assert!(
+            !root.exists(),
+            "umask lifecycle cleanup must remove only its TestRoot"
+        );
+        assert_eq!(
+            fs::read(isolation_marker).expect("isolation marker must survive TestRoot cleanup"),
+            ISOLATION_MARKER.as_bytes()
+        );
+    }
+
+    #[test]
+    fn permissive_umask_native_lifecycle_child() {
+        let Some(directory) = verified_umask_child_directory() else {
+            return;
+        };
+        let previous_umask = process::umask(Mode::empty());
+        assert_eq!(
+            process::umask(Mode::empty()),
+            Mode::empty(),
+            "umask child must run with a zero creation mask"
+        );
+
+        let (_, _, mut lease) = acquired_lease(&directory, NONCE_1);
+        let candidate = TemporaryEntry::parse(TemporaryEntryRole::Credential, NONCE_3)
+            .expect("umask credential candidate must validate");
+        let missing_candidate = match lease
+            .observe_entry(ManagedEntry::Temporary(candidate))
+            .expect("umask candidate observation must complete")
+        {
+            ManagedEntryObservation::Missing { snapshot } => snapshot,
+            ManagedEntryObservation::Opened { .. } => {
+                panic!("umask candidate unexpectedly exists")
+            }
+        };
+        let mut writer = match lease
+            .create_temporary_exclusive(candidate, &missing_candidate)
+            .expect("umask candidate creation must complete")
+        {
+            ExclusiveCreateResult::Conflict => panic!("umask candidate unexpectedly conflicts"),
+            ExclusiveCreateResult::Created(writer) => writer,
+        };
+        writer
+            .write_all(b"credential-under-zero-umask")
+            .expect("umask candidate write must complete");
+        writer.sync().expect("umask candidate must sync");
+        writer.close().expect("umask candidate writer must close");
+
+        let (source, mut source_reader) = match lease
+            .observe_entry(ManagedEntry::Temporary(candidate))
+            .expect("umask written candidate observation must complete")
+        {
+            ManagedEntryObservation::Missing { .. } => {
+                panic!("umask written candidate unexpectedly missing")
+            }
+            ManagedEntryObservation::Opened { snapshot, file, .. } => (snapshot, file),
+        };
+        source_reader
+            .close()
+            .expect("umask candidate reader must close");
+        let destination = match lease
+            .observe_entry(ManagedEntry::credential())
+            .expect("umask credential observation must complete")
+        {
+            ManagedEntryObservation::Missing { snapshot } => snapshot,
+            ManagedEntryObservation::Opened { .. } => {
+                panic!("umask canonical credential unexpectedly exists")
+            }
+        };
+        assert_eq!(
+            lease.move_temporary_conditionally(
+                candidate,
+                &source,
+                CanonicalEntryRole::Credential,
+                ExpectedEntrySnapshot::Missing(&destination),
+            ),
+            Ok(ConditionalMutationResult::Applied)
+        );
+        lease
+            .sync_directory()
+            .expect("umask credential installation must become durable");
+        lease.release().expect("umask lifecycle lease must release");
+        assert_eq!(
+            process::umask(previous_umask),
+            Mode::empty(),
+            "umask child must restore its process-local creation mask"
+        );
     }
 
     #[test]

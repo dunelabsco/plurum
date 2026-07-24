@@ -4,6 +4,9 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsHandle;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use plurum_native_secret_memory::zeroize_bytes;
 use plurum_windows_syscall::{
     attest_no_untrusted_namespace_control, attest_security, create_private_directory,
@@ -39,6 +42,78 @@ const DOTENV_LOCK_HOME_VOLUME_END: usize = DOTENV_LOCK_HOME_IDENTITY_START + 8;
 const DOTENV_LOCK_HOME_IDENTITY_END: usize = DOTENV_LOCK_HOME_VOLUME_END + 16;
 const DOTENV_LOCK_HOME_CHECKSUM_START: usize = DOTENV_LOCK_HOME_IDENTITY_END;
 const DOTENV_LOCK_HOME_CHECKSUM_END: usize = DOTENV_LOCK_HOME_CHECKSUM_START + 16;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DotenvTestFault {
+    ObserveAfterRead,
+    ObserveAfterRebind,
+    HomeAfterIntent,
+    HomeAfterCreateBeforeClaim,
+    HomeAfterClaim,
+    CandidateAfterCreate,
+    CandidateAfterWrite,
+    CandidateAfterReadback,
+    CandidateAfterFlush,
+    InstallBeforeRename,
+    InstallAfterRename,
+    PostInstallObservation,
+    RecoveryBeforeCandidateRemove,
+    RecoveryAfterCandidateRemove,
+    ReleaseBeforeClean,
+    ReleaseAfterClean,
+}
+
+#[cfg(test)]
+thread_local! {
+    static DOTENV_TEST_FAULT: Cell<Option<DotenvTestFault>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+fn arm_dotenv_test_fault(fault: DotenvTestFault) {
+    DOTENV_TEST_FAULT.with(|armed| {
+        assert!(
+            armed.replace(Some(fault)).is_none(),
+            "a Windows Codex dotenv test fault is already armed"
+        );
+    });
+}
+
+#[cfg(test)]
+fn take_dotenv_test_fault(fault: DotenvTestFault) -> bool {
+    DOTENV_TEST_FAULT.with(|armed| {
+        if armed.get() == Some(fault) {
+            armed.set(None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(test)]
+fn assert_dotenv_test_fault_consumed() {
+    DOTENV_TEST_FAULT.with(|armed| {
+        assert!(
+            armed.get().is_none(),
+            "the armed Windows Codex dotenv test fault was not reached"
+        );
+    });
+}
+
+#[cfg(test)]
+macro_rules! fail_on_dotenv_test_fault {
+    ($point:ident, $error:expr) => {
+        if take_dotenv_test_fault(DotenvTestFault::$point) {
+            return Err($error);
+        }
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! fail_on_dotenv_test_fault {
+    ($point:ident, $error:expr) => {};
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CodexHomeKind {
@@ -503,6 +578,13 @@ fn stable_dotenv_file(
         zeroize_bytes(bounded.as_mut_slice());
         return Err(WindowsStoreError::Lost);
     };
+    #[cfg(test)]
+    if take_dotenv_test_fault(DotenvTestFault::ObserveAfterRead) {
+        if let Some(bytes) = bytes.as_mut() {
+            zeroize_bytes(bytes.as_mut_slice());
+        }
+        return Err(WindowsStoreError::Io);
+    }
     let after_result = (|| {
         let after = metadata(&file)?;
         let security_after = attest_security(file.as_handle(), &home.process, SecurityKind::File)
@@ -521,6 +603,13 @@ fn stable_dotenv_file(
             return Err(error);
         }
     };
+    #[cfg(test)]
+    if take_dotenv_test_fault(DotenvTestFault::ObserveAfterRebind) {
+        if let Some(bytes) = bytes.as_mut() {
+            zeroize_bytes(bytes.as_mut_slice());
+        }
+        return Err(WindowsStoreError::Io);
+    }
     if before != after
         || security_before != security_after
         || current_facts.identity != before.identity
@@ -1220,12 +1309,14 @@ fn remove_exact_candidate(
     {
         return Err(WindowsStoreError::Unsafe);
     }
+    fail_on_dotenv_test_fault!(RecoveryBeforeCandidateRemove, WindowsStoreError::Lost);
     match remove_by_handle(file.as_handle()).map_err(map_win)? {
         MutationAttempt::Applied => {}
         MutationAttempt::Conflict => return Err(WindowsStoreError::Lost),
         MutationAttempt::Unsupported => return Err(WindowsStoreError::Unsupported),
     }
     drop(file);
+    fail_on_dotenv_test_fault!(RecoveryAfterCandidateRemove, WindowsStoreError::Lost);
     require_home_stable(home)?;
     match open_object_nofollow(&path) {
         Err(error)
@@ -1415,6 +1506,7 @@ impl DotenvLockLease {
         let lock = self.lock.as_ref().ok_or(WindowsStoreError::Closed)?;
         clear_held_home_cleanup_claim(lock, self.path_binding, self.nonce, self.home_cleanup)?;
         self.home_cleanup = HomeCleanupClaim::None;
+        fail_on_dotenv_test_fault!(ReleaseBeforeClean, WindowsStoreError::Lost);
         write_dotenv_lock_state(lock, DOTENV_LOCK_STATE_CLEAN)?;
         if read_dotenv_lock_record(lock, self.path_binding)?
             != (DotenvLockRecord::Clean {
@@ -1423,6 +1515,7 @@ impl DotenvLockLease {
         {
             return Err(WindowsStoreError::Lost);
         }
+        fail_on_dotenv_test_fault!(ReleaseAfterClean, WindowsStoreError::Lost);
         unlock(lock.as_handle()).map_err(map_win)?;
         self.lock.take();
         self.terminal = true;
@@ -1631,6 +1724,7 @@ fn create_candidate(
         FileCreateAttempt::Conflict => return Err(WindowsStoreError::Unsafe),
     };
     let prepared = (|| {
+        fail_on_dotenv_test_fault!(CandidateAfterCreate, WindowsStoreError::Lost);
         let facts = metadata(&file)?;
         let security = attest_security(file.as_handle(), &home.process, SecurityKind::File)
             .map_err(map_win)?;
@@ -1651,13 +1745,16 @@ fn create_candidate(
         write_all_at(&file, bytes, 0)?;
         file.set_len(u64::try_from(bytes.len()).map_err(|_| WindowsStoreError::Limit)?)
             .map_err(|_| WindowsStoreError::Io)?;
+        fail_on_dotenv_test_fault!(CandidateAfterWrite, WindowsStoreError::Lost);
         let mut readback = read_exact_at(&file, bytes.len())?;
         let exact = readback == bytes;
         zeroize_bytes(readback.as_mut_slice());
         if !exact {
             return Err(WindowsStoreError::Lost);
         }
+        fail_on_dotenv_test_fault!(CandidateAfterReadback, WindowsStoreError::Lost);
         flush_file(file.as_handle()).map_err(map_win)?;
+        fail_on_dotenv_test_fault!(CandidateAfterFlush, WindowsStoreError::Lost);
         let after = metadata(&file)?;
         let security_after = attest_security(file.as_handle(), &home.process, SecurityKind::File)
             .map_err(map_win)?;
@@ -1790,6 +1887,10 @@ fn install_candidate(
     if !destination_matches {
         return Ok(MutationAttempt::Conflict);
     }
+    fail_on_dotenv_test_fault!(
+        InstallBeforeRename,
+        CandidateInstallError::BeforeRename(WindowsStoreError::Lost)
+    );
     let destination: Vec<u16> = OsStr::new(DOTENV_ENTRY).encode_wide().collect();
     let result = rename_by_handle(
         candidate.as_handle(),
@@ -1799,6 +1900,12 @@ fn install_candidate(
     )
     .map_err(map_win)
     .map_err(CandidateInstallError::RenameUncertain)?;
+    if matches!(result, MutationAttempt::Applied) {
+        fail_on_dotenv_test_fault!(
+            InstallAfterRename,
+            CandidateInstallError::RenameUncertain(WindowsStoreError::Lost)
+        );
+    }
     Ok(result)
 }
 
@@ -1908,6 +2015,7 @@ fn post_install_observation(
     excluded: &Path,
     max_bytes: usize,
 ) -> Result<CodexDotenvObservation, WindowsStoreError> {
+    fail_on_dotenv_test_fault!(PostInstallObservation, WindowsStoreError::Io);
     observe_internal(codex_home, excluded, max_bytes)
 }
 
@@ -2097,6 +2205,7 @@ pub(crate) fn synchronize_codex_dotenv(
 
     if expected.home_kind == CodexHomeKind::Missing {
         lease.mark_home_creation_preparing()?;
+        fail_on_dotenv_test_fault!(HomeAfterIntent, WindowsStoreError::Lost);
     }
     let (home, created_home) = match open_or_create_home_for_install(expected, &excluded) {
         Ok(home) => home,
@@ -2113,12 +2222,14 @@ pub(crate) fn synchronize_codex_dotenv(
         Err(HomeInstallError::CreationUncertain(error)) => return Err(error),
     };
     if created_home {
+        fail_on_dotenv_test_fault!(HomeAfterCreateBeforeClaim, WindowsStoreError::Lost);
         if let Err(error) = lease.mark_home_created(home.identity) {
             return match remove_created_home(home) {
                 Ok(()) => Err(error),
                 Err(cleanup) => Err(cleanup),
             };
         }
+        fail_on_dotenv_test_fault!(HomeAfterClaim, WindowsStoreError::Lost);
     }
     lease.verify()?;
     let (candidate, candidate_facts, _) =
@@ -2238,11 +2349,290 @@ pub(crate) fn synchronize_codex_dotenv(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::Write;
     use std::os::windows::ffi::OsStringExt;
+    use std::path::{Path, PathBuf};
 
+    use super::super::tests::TestRoot;
     use super::*;
 
     const NONCE: &str = "b56c52f5-a090-41eb-a164-1c92e36db94f";
+    const NONCE_2: &str = "11111111-1111-4111-8111-111111111111";
+    const NONCE_3: &str = "22222222-2222-4222-8222-222222222222";
+    const NONCE_4: &str = "33333333-3333-4333-8333-333333333333";
+    const MAX_BYTES: usize = MAX_CODEX_DOTENV_BYTES;
+    const ORIGINAL: &[u8] = b"UNRELATED=value\nPLURUM_API_KEY=plrm_live_windows_original\n";
+    const DESIRED: &[u8] = b"UNRELATED=value\nPLURUM_API_KEY=plrm_live_windows_replacement\n";
+    const DESIRED_ASSIGNMENT: &[u8] = b"PLURUM_API_KEY=plrm_live_windows_replacement";
+    const DESIRED_TOKEN: &[u8] = b"plrm_live_windows_replacement";
+
+    struct Fixture {
+        test: TestRoot,
+        codex_home: PathBuf,
+        excluded_project: PathBuf,
+        canary: Vec<u8>,
+    }
+
+    impl Fixture {
+        fn new(create_home: bool) -> Self {
+            let test = TestRoot::new();
+            ensure_private_directory(&test.store).expect("state directory must be private");
+            let excluded_project = test.root.join("project");
+            ensure_private_directory(&excluded_project)
+                .expect("excluded project directory must be private");
+            let codex_home = test.root.join("codex");
+            if create_home {
+                ensure_private_directory(&codex_home).expect("Codex home must be private");
+            }
+            let canary = fs::read(&test.marker).expect("test-root canary must be readable");
+            Self {
+                test,
+                codex_home,
+                excluded_project,
+                canary,
+            }
+        }
+
+        fn dotenv(&self) -> PathBuf {
+            self.codex_home.join(DOTENV_ENTRY)
+        }
+
+        fn synchronize(
+            &self,
+            expected: &CodexDotenvState,
+            nonce: &str,
+            desired: Option<&[u8]>,
+        ) -> Result<CodexDotenvSynchronizeResult, WindowsStoreError> {
+            synchronize_codex_dotenv(
+                &self.codex_home,
+                &self.test.store,
+                &self.excluded_project,
+                expected,
+                nonce,
+                desired,
+                MAX_BYTES,
+            )
+        }
+
+        fn acquire_role_lock(
+            &self,
+            nonce: &str,
+        ) -> Result<DotenvLockAcquireResult, WindowsStoreError> {
+            let home =
+                NormalizedAbsolutePath::parse(&self.codex_home).expect("Codex home must normalize");
+            let excluded_path = NormalizedAbsolutePath::parse(&self.excluded_project)
+                .expect("excluded project must normalize");
+            let excluded =
+                open_bound_directory(&excluded_path).expect("excluded project must bind");
+            let process = ProcessIdentity::capture().expect("test process must be safe");
+            acquire_dotenv_lock(
+                &self.test.store,
+                &home,
+                &excluded,
+                &process,
+                ValidatedUuidV4::parse(nonce).expect("test nonce must validate"),
+            )
+        }
+
+        fn bound_home(&self) -> BoundCodexHome {
+            let process = ProcessIdentity::capture().expect("test process must be safe");
+            let home =
+                NormalizedAbsolutePath::parse(&self.codex_home).expect("Codex home must normalize");
+            let excluded_path = NormalizedAbsolutePath::parse(&self.excluded_project)
+                .expect("excluded project must normalize");
+            let excluded =
+                open_bound_directory(&excluded_path).expect("excluded project must bind");
+            open_existing_home_for_mutation(&process, &home, &excluded)
+                .expect("Codex home lookup must succeed")
+                .expect("Codex home must exist")
+        }
+
+        fn canary_is_intact(&self) {
+            assert_eq!(
+                fs::read(&self.test.marker).expect("test-root canary must remain readable"),
+                self.canary
+            );
+        }
+    }
+
+    fn create_private_test_file(path: &Path, bytes: &[u8]) {
+        let process = ProcessIdentity::capture().expect("test process must be safe");
+        let mut file = match create_private_file(
+            path,
+            &process,
+            GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC | WRITE_OWNER | DELETE,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+        )
+        .expect("private test file creation must complete")
+        {
+            FileCreateAttempt::Created(file) => file,
+            FileCreateAttempt::Conflict => panic!("private test file unexpectedly exists"),
+        };
+        file.write_all(bytes)
+            .expect("private test file bytes must be written");
+        flush_file(file.as_handle()).expect("private test file must be flushed");
+    }
+
+    fn missing_state(fixture: &Fixture) -> CodexDotenvState {
+        match observe_codex_dotenv(&fixture.codex_home, &fixture.excluded_project, MAX_BYTES)
+            .expect("missing dotenv observation must succeed")
+        {
+            CodexDotenvObservation::Missing { state } => state,
+            mut other => {
+                wipe_observation(&mut other);
+                panic!("dotenv must be reported missing");
+            }
+        }
+    }
+
+    fn present_state(fixture: &Fixture, expected_bytes: &[u8]) -> CodexDotenvState {
+        match observe_codex_dotenv(&fixture.codex_home, &fixture.excluded_project, MAX_BYTES)
+            .expect("present dotenv observation must succeed")
+        {
+            CodexDotenvObservation::Present { state, mut bytes } => {
+                assert_eq!(bytes, expected_bytes);
+                zeroize_bytes(bytes.as_mut_slice());
+                state
+            }
+            _ => panic!("dotenv must be reported present"),
+        }
+    }
+
+    fn expect_changed(
+        result: Result<CodexDotenvSynchronizeResult, WindowsStoreError>,
+    ) -> CodexDotenvState {
+        match result.expect("dotenv synchronization must succeed") {
+            CodexDotenvSynchronizeResult::Completed {
+                disposition: CodexDotenvSynchronizeDisposition::Changed,
+                state,
+            } => state,
+            _ => panic!("dotenv synchronization must report a change"),
+        }
+    }
+
+    fn expect_unchanged(
+        result: Result<CodexDotenvSynchronizeResult, WindowsStoreError>,
+    ) -> CodexDotenvState {
+        match result.expect("dotenv confirmation must succeed") {
+            CodexDotenvSynchronizeResult::Completed {
+                disposition: CodexDotenvSynchronizeDisposition::Unchanged,
+                state,
+            } => state,
+            _ => panic!("dotenv synchronization must report no change"),
+        }
+    }
+
+    fn expect_precondition_failed(result: Result<CodexDotenvSynchronizeResult, WindowsStoreError>) {
+        assert!(matches!(
+            result,
+            Ok(CodexDotenvSynchronizeResult::PreconditionFailed)
+        ));
+    }
+
+    fn observed_role_lock(fixture: &Fixture) -> DotenvLockRecord {
+        let normalized =
+            NormalizedAbsolutePath::parse(&fixture.codex_home).expect("Codex home must normalize");
+        let file = open_file_nofollow(
+            &fixture.test.store.join(DOTENV_LOCK_ENTRY),
+            true,
+            false,
+            true,
+        )
+        .expect("dotenv role lock must open");
+        read_dotenv_lock_record(&file, path_binding(&normalized))
+            .expect("dotenv role lock must parse")
+    }
+
+    fn assert_clean_role_lock(fixture: &Fixture) {
+        let normalized =
+            NormalizedAbsolutePath::parse(&fixture.codex_home).expect("Codex home must normalize");
+        assert_eq!(
+            observed_role_lock(fixture),
+            DotenvLockRecord::Clean {
+                path_binding: path_binding(&normalized)
+            }
+        );
+    }
+
+    fn candidate_paths(home: &Path) -> Vec<PathBuf> {
+        if !home.exists() {
+            return Vec::new();
+        }
+        let mut paths = fs::read_dir(home)
+            .expect("Codex home must be readable")
+            .map(|entry| entry.expect("Codex home entry must load").path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(DOTENV_CANDIDATE_PREFIX))
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    fn directory_names(path: &Path) -> Vec<OsString> {
+        if !path.exists() {
+            return Vec::new();
+        }
+        let mut names = fs::read_dir(path)
+            .expect("test directory must be readable")
+            .map(|entry| entry.expect("test directory entry must load").file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    fn assert_plaintexts_absent(root: &Path, plaintexts: &[&[u8]]) {
+        fn visit(path: &Path, plaintexts: &[&[u8]]) {
+            for entry in fs::read_dir(path).expect("fixture tree must be readable") {
+                let entry = entry.expect("fixture entry must load");
+                let kind = entry.file_type().expect("fixture entry type must load");
+                if kind.is_dir() {
+                    visit(&entry.path(), plaintexts);
+                } else if kind.is_file() {
+                    let bytes = fs::read(entry.path()).expect("fixture file must be readable");
+                    for plaintext in plaintexts {
+                        assert!(
+                            !bytes
+                                .windows(plaintext.len())
+                                .any(|window| window == *plaintext),
+                            "fault cleanup retained a desired dotenv secret fragment"
+                        );
+                    }
+                } else {
+                    panic!("fixture cleanup encountered a non-file object");
+                }
+            }
+        }
+        assert!(!plaintexts.is_empty());
+        assert!(plaintexts.iter().all(|plaintext| !plaintext.is_empty()));
+        visit(root, plaintexts);
+    }
+
+    fn assert_private_home_and_dotenv(fixture: &Fixture) {
+        let process = ProcessIdentity::capture().expect("test process must be safe");
+        let home = open_directory_nofollow(&fixture.codex_home, false)
+            .expect("Codex home must open without following reparses");
+        let home_security = attest_security(home.as_handle(), &process, SecurityKind::Directory)
+            .expect("Codex home security must attest");
+        assert!(
+            home_security.owner_current
+                && home_security.exact_protected_dacl
+                && home_security.semantic_medium_label
+        );
+        let dotenv =
+            open_dotenv_nofollow(&fixture.dotenv(), false).expect("dotenv must open securely");
+        let dotenv_facts = metadata(&dotenv).expect("dotenv metadata must attest");
+        let dotenv_security = attest_security(dotenv.as_handle(), &process, SecurityKind::File)
+            .expect("dotenv security must attest");
+        assert!(dotenv_facts.exact_file());
+        assert!(
+            dotenv_security.owner_current
+                && dotenv_security.exact_protected_dacl
+                && dotenv_security.semantic_medium_label
+        );
+    }
 
     #[test]
     fn candidate_names_round_trip_only_the_exact_role() {
@@ -2564,5 +2954,694 @@ mod tests {
             parse_dotenv_lock_record(&pending),
             Err(WindowsStoreError::Unsafe)
         );
+    }
+
+    #[test]
+    fn ntfs_missing_and_present_transactions_are_private_atomic_and_exact() {
+        let missing = Fixture::new(false);
+        let missing_expected = missing_state(&missing);
+        assert!(!missing.codex_home.exists());
+
+        let installed =
+            expect_changed(missing.synchronize(&missing_expected, NONCE, Some(DESIRED)));
+        assert_eq!(
+            fs::read(missing.dotenv()).expect("installed dotenv must be readable"),
+            DESIRED
+        );
+        assert_eq!(present_state(&missing, DESIRED), installed);
+        assert_eq!(
+            expect_unchanged(missing.synchronize(&installed, NONCE_2, None)),
+            installed
+        );
+        assert_private_home_and_dotenv(&missing);
+        assert!(candidate_paths(&missing.codex_home).is_empty());
+        assert_eq!(
+            directory_names(&missing.codex_home),
+            vec![OsString::from(DOTENV_ENTRY)]
+        );
+        assert_eq!(
+            directory_names(&missing.test.store),
+            vec![OsString::from(DOTENV_LOCK_ENTRY)]
+        );
+        assert_clean_role_lock(&missing);
+        missing.canary_is_intact();
+
+        let present = Fixture::new(true);
+        create_private_test_file(&present.dotenv(), ORIGINAL);
+        let present_expected = present_state(&present, ORIGINAL);
+        let replaced = expect_changed(present.synchronize(&present_expected, NONCE, Some(DESIRED)));
+        assert_eq!(present_state(&present, DESIRED), replaced);
+        expect_precondition_failed(present.synchronize(&present_expected, NONCE_2, None));
+        assert_eq!(
+            fs::read(present.dotenv()).expect("replacement must remain readable"),
+            DESIRED
+        );
+        assert!(candidate_paths(&present.codex_home).is_empty());
+        assert_clean_role_lock(&present);
+        present.canary_is_intact();
+    }
+
+    #[test]
+    fn ntfs_bounds_hard_links_and_broad_dacls_are_classified_without_mutation() {
+        let fixture = Fixture::new(true);
+        let exact = vec![b'x'; MAX_BYTES];
+        create_private_test_file(&fixture.dotenv(), &exact);
+        let _ = present_state(&fixture, &exact);
+        fs::remove_file(fixture.dotenv()).expect("exact-limit fixture must be removed");
+
+        let oversized = vec![b'y'; MAX_BYTES + 1];
+        create_private_test_file(&fixture.dotenv(), &oversized);
+        let oversized_state =
+            match observe_codex_dotenv(&fixture.codex_home, &fixture.excluded_project, MAX_BYTES)
+                .expect("oversized observation must complete")
+            {
+                CodexDotenvObservation::Oversized { state } => state,
+                _ => panic!("oversized dotenv must be classified"),
+            };
+        expect_precondition_failed(fixture.synchronize(&oversized_state, NONCE, Some(DESIRED)));
+        assert_eq!(
+            fs::metadata(fixture.dotenv())
+                .expect("oversized fixture must remain")
+                .len(),
+            (MAX_BYTES + 1) as u64
+        );
+        fs::remove_file(fixture.dotenv()).expect("oversized fixture must be removed");
+
+        create_private_test_file(&fixture.dotenv(), ORIGINAL);
+        let alias = fixture.codex_home.join("dotenv-hard-link-alias");
+        fs::hard_link(fixture.dotenv(), &alias).expect("hard-link fixture must be created");
+        let mut hard_link_observation =
+            observe_codex_dotenv(&fixture.codex_home, &fixture.excluded_project, MAX_BYTES);
+        let hard_link_synchronize = match hard_link_observation.as_ref() {
+            Ok(CodexDotenvObservation::Unsafe { state }) => {
+                Some(fixture.synchronize(state, NONCE_2, Some(DESIRED)))
+            }
+            _ => None,
+        };
+        let hard_link_bytes = fs::read(fixture.dotenv());
+        fs::remove_file(alias).expect("hard-link alias must be removed");
+        let hard_link_was_unsafe = matches!(
+            &hard_link_observation,
+            Ok(CodexDotenvObservation::Unsafe { .. })
+        );
+        if let Ok(observation) = hard_link_observation.as_mut() {
+            wipe_observation(observation);
+        }
+        assert!(hard_link_was_unsafe);
+        expect_precondition_failed(
+            hard_link_synchronize.expect("unsafe hard-link state must be synchronized"),
+        );
+        assert_eq!(
+            hard_link_bytes.expect("hard-linked dotenv must remain readable"),
+            ORIGINAL
+        );
+
+        plurum_windows_syscall::set_broad_dacl_for_tests(&fixture.dotenv(), SecurityKind::File)
+            .expect("broad-DACL fixture must be installed");
+        let mut broad_observation =
+            observe_codex_dotenv(&fixture.codex_home, &fixture.excluded_project, MAX_BYTES);
+        let broad_synchronize = match broad_observation.as_ref() {
+            Ok(CodexDotenvObservation::Unsafe { state }) => {
+                Some(fixture.synchronize(state, NONCE_3, Some(DESIRED)))
+            }
+            _ => None,
+        };
+        let broad_bytes = fs::read(fixture.dotenv());
+        plurum_windows_syscall::set_private_current_user_dacl_for_tests(
+            &fixture.dotenv(),
+            SecurityKind::File,
+        )
+        .expect("private dotenv DACL must be restored");
+        let broad_was_unsafe = matches!(
+            &broad_observation,
+            Ok(CodexDotenvObservation::Unsafe { .. })
+        );
+        if let Ok(observation) = broad_observation.as_mut() {
+            wipe_observation(observation);
+        }
+        assert!(broad_was_unsafe);
+        expect_precondition_failed(
+            broad_synchronize.expect("unsafe broad-DACL state must be synchronized"),
+        );
+        assert_eq!(
+            broad_bytes.expect("broad-DACL dotenv must remain readable"),
+            ORIGINAL
+        );
+
+        let _ = present_state(&fixture, ORIGINAL);
+        assert_eq!(
+            fs::read(fixture.dotenv()).expect("unsafe fixtures must not mutate dotenv"),
+            ORIGINAL
+        );
+        assert!(candidate_paths(&fixture.codex_home).is_empty());
+        assert_clean_role_lock(&fixture);
+        fixture.canary_is_intact();
+    }
+
+    #[test]
+    fn ntfs_safe_inherited_and_unsafe_broad_home_dacls_are_distinguished() {
+        let inherited = Fixture::new(true);
+        let process = ProcessIdentity::capture().expect("test process must be safe");
+        plurum_windows_syscall::set_inherited_current_user_dacl_for_tests(
+            &inherited.codex_home,
+            SecurityKind::Directory,
+        )
+        .expect("safe inherited-user home DACL must be installed");
+        let inherited_handle = open_directory_nofollow(&inherited.codex_home, false);
+        let inherited_security = inherited_handle.as_ref().ok().and_then(|home| {
+            attest_security(home.as_handle(), &process, SecurityKind::Directory).ok()
+        });
+        let mut inherited_observation = observe_codex_dotenv(
+            &inherited.codex_home,
+            &inherited.excluded_project,
+            MAX_BYTES,
+        );
+        let inherited_synchronize = match inherited_observation.as_ref() {
+            Ok(CodexDotenvObservation::Missing { state }) => {
+                Some(inherited.synchronize(state, NONCE, Some(DESIRED)))
+            }
+            _ => None,
+        };
+        let inherited_bytes = fs::read(inherited.dotenv());
+        plurum_windows_syscall::set_private_current_user_dacl_for_tests(
+            &inherited.codex_home,
+            SecurityKind::Directory,
+        )
+        .expect("exact private home DACL must be restored");
+        let inherited_was_missing = matches!(
+            &inherited_observation,
+            Ok(CodexDotenvObservation::Missing { .. })
+        );
+        if let Ok(observation) = inherited_observation.as_mut() {
+            wipe_observation(observation);
+        }
+        let inherited_security =
+            inherited_security.expect("inherited-user home security must attest");
+        assert!(
+            inherited_security.owner_current
+                && !inherited_security.exact_protected_dacl
+                && inherited_security.semantic_medium_label
+        );
+        assert!(inherited_was_missing);
+        expect_changed(inherited_synchronize.expect("safe inherited-user home must synchronize"));
+        assert_eq!(
+            inherited_bytes.expect("inherited-user home dotenv must be readable"),
+            DESIRED
+        );
+        let _ = present_state(&inherited, DESIRED);
+        assert_private_home_and_dotenv(&inherited);
+        assert_clean_role_lock(&inherited);
+        inherited.canary_is_intact();
+
+        let broad = Fixture::new(true);
+        plurum_windows_syscall::set_broad_dacl_for_tests(
+            &broad.codex_home,
+            SecurityKind::Directory,
+        )
+        .expect("broad home DACL must be installed");
+        let mut broad_observation =
+            observe_codex_dotenv(&broad.codex_home, &broad.excluded_project, MAX_BYTES);
+        let broad_synchronize = match broad_observation.as_ref() {
+            Ok(CodexDotenvObservation::Unsafe { state }) => {
+                Some(broad.synchronize(state, NONCE_2, Some(DESIRED)))
+            }
+            _ => None,
+        };
+        let broad_dotenv_exists = broad.dotenv().exists();
+        plurum_windows_syscall::set_private_current_user_dacl_for_tests(
+            &broad.codex_home,
+            SecurityKind::Directory,
+        )
+        .expect("broad home DACL must be restored");
+        let broad_was_unsafe = matches!(
+            &broad_observation,
+            Ok(CodexDotenvObservation::Unsafe { .. })
+        );
+        if let Ok(observation) = broad_observation.as_mut() {
+            wipe_observation(observation);
+        }
+        assert!(broad_was_unsafe);
+        expect_precondition_failed(
+            broad_synchronize.expect("unsafe broad-home state must be synchronized"),
+        );
+        assert!(!broad_dotenv_exists);
+        assert!(!broad.test.store.join(DOTENV_LOCK_ENTRY).exists());
+        broad.canary_is_intact();
+    }
+
+    #[test]
+    fn ntfs_create_delete_aba_invalidates_an_old_missing_precondition() {
+        let fixture = Fixture::new(true);
+        let expected = missing_state(&fixture);
+        let rebound = (0..128).find_map(|attempt| {
+            create_private_test_file(&fixture.dotenv(), ORIGINAL);
+            fs::remove_file(fixture.dotenv()).expect("transient dotenv must be removed");
+            if attempt % 8 == 7 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            } else {
+                std::thread::yield_now();
+            }
+            let current = missing_state(&fixture);
+            (!current.same_state(&expected)).then_some(current)
+        });
+        let rebound = rebound.expect("NTFS namespace evidence must record create/delete ABA");
+
+        expect_precondition_failed(fixture.synchronize(&expected, NONCE, Some(DESIRED)));
+        assert!(!fixture.dotenv().exists());
+        expect_changed(fixture.synchronize(&rebound, NONCE_2, Some(DESIRED)));
+        assert_eq!(
+            fs::read(fixture.dotenv()).expect("fresh observation must install dotenv"),
+            DESIRED
+        );
+        assert_clean_role_lock(&fixture);
+        fixture.canary_is_intact();
+    }
+
+    #[test]
+    fn post_read_and_rebind_observation_faults_are_non_mutating() {
+        for fault in [
+            DotenvTestFault::ObserveAfterRead,
+            DotenvTestFault::ObserveAfterRebind,
+        ] {
+            let fixture = Fixture::new(true);
+            create_private_test_file(&fixture.dotenv(), ORIGINAL);
+            arm_dotenv_test_fault(fault);
+            assert_eq!(
+                observe_codex_dotenv(&fixture.codex_home, &fixture.excluded_project, MAX_BYTES,)
+                    .err(),
+                Some(WindowsStoreError::Io)
+            );
+            assert_dotenv_test_fault_consumed();
+            assert_eq!(
+                fs::read(fixture.dotenv()).expect("faulted dotenv must remain readable"),
+                ORIGINAL
+            );
+            assert!(!fixture.test.store.join(DOTENV_LOCK_ENTRY).exists());
+            assert!(candidate_paths(&fixture.codex_home).is_empty());
+            fixture.canary_is_intact();
+        }
+    }
+
+    #[test]
+    fn missing_home_claim_boundaries_recover_or_fail_closed_by_ownership() {
+        let intent = Fixture::new(false);
+        let intent_expected = missing_state(&intent);
+        arm_dotenv_test_fault(DotenvTestFault::HomeAfterIntent);
+        assert_eq!(
+            intent
+                .synchronize(&intent_expected, NONCE, Some(DESIRED))
+                .err(),
+            Some(WindowsStoreError::Lost)
+        );
+        assert_dotenv_test_fault_consumed();
+        assert!(!intent.codex_home.exists());
+        assert!(matches!(
+            observed_role_lock(&intent),
+            DotenvLockRecord::Held {
+                home_cleanup: HomeCleanupClaim::Preparing(None),
+                ..
+            }
+        ));
+        expect_changed(intent.synchronize(&intent_expected, NONCE_2, Some(DESIRED)));
+        assert_eq!(
+            fs::read(intent.dotenv()).expect("intent recovery must install dotenv"),
+            DESIRED
+        );
+        assert_clean_role_lock(&intent);
+        intent.canary_is_intact();
+
+        let unclaimed = Fixture::new(false);
+        let unclaimed_expected = missing_state(&unclaimed);
+        arm_dotenv_test_fault(DotenvTestFault::HomeAfterCreateBeforeClaim);
+        assert_eq!(
+            unclaimed
+                .synchronize(&unclaimed_expected, NONCE, Some(DESIRED))
+                .err(),
+            Some(WindowsStoreError::Lost)
+        );
+        assert_dotenv_test_fault_consumed();
+        assert!(unclaimed.codex_home.is_dir());
+        assert!(directory_names(&unclaimed.codex_home).is_empty());
+        assert_eq!(
+            unclaimed.acquire_role_lock(NONCE_2).err(),
+            Some(WindowsStoreError::Lost)
+        );
+        assert!(
+            unclaimed.codex_home.is_dir(),
+            "an unclaimed home must never be guessed as Plurum-owned"
+        );
+        remove_created_home(unclaimed.bound_home())
+            .expect("the disposable fixture may remove its attested empty home");
+        let mut recovered = match unclaimed
+            .acquire_role_lock(NONCE_3)
+            .expect("role lock must recover after fixture-owned cleanup")
+        {
+            DotenvLockAcquireResult::Acquired(lease) => lease,
+            DotenvLockAcquireResult::Busy => panic!("role lock must not remain busy"),
+        };
+        recovered
+            .release(None)
+            .expect("recovered role lock must release");
+        let rebound = missing_state(&unclaimed);
+        expect_changed(unclaimed.synchronize(&rebound, NONCE_4, Some(DESIRED)));
+        assert_clean_role_lock(&unclaimed);
+        unclaimed.canary_is_intact();
+
+        let claimed = Fixture::new(false);
+        let claimed_expected = missing_state(&claimed);
+        arm_dotenv_test_fault(DotenvTestFault::HomeAfterClaim);
+        assert_eq!(
+            claimed
+                .synchronize(&claimed_expected, NONCE, Some(DESIRED))
+                .err(),
+            Some(WindowsStoreError::Lost)
+        );
+        assert_dotenv_test_fault_consumed();
+        assert!(claimed.codex_home.is_dir());
+        assert!(matches!(
+            observed_role_lock(&claimed),
+            DotenvLockRecord::Held {
+                home_cleanup: HomeCleanupClaim::Created(_),
+                ..
+            }
+        ));
+        let mut recovered = match claimed
+            .acquire_role_lock(NONCE_2)
+            .expect("claimed home recovery must acquire the role lock")
+        {
+            DotenvLockAcquireResult::Acquired(lease) => lease,
+            DotenvLockAcquireResult::Busy => panic!("role lock must not remain busy"),
+        };
+        assert!(
+            !claimed.codex_home.exists(),
+            "exactly claimed empty home must be removed during recovery"
+        );
+        recovered
+            .release(None)
+            .expect("claimed-home recovery lock must release");
+        let rebound = missing_state(&claimed);
+        expect_changed(claimed.synchronize(&rebound, NONCE_3, Some(DESIRED)));
+        assert_clean_role_lock(&claimed);
+        claimed.canary_is_intact();
+    }
+
+    #[test]
+    fn candidate_preparation_and_flush_faults_clean_then_retry() {
+        for fault in [
+            DotenvTestFault::CandidateAfterCreate,
+            DotenvTestFault::CandidateAfterWrite,
+            DotenvTestFault::CandidateAfterReadback,
+            DotenvTestFault::CandidateAfterFlush,
+        ] {
+            let fixture = Fixture::new(true);
+            let expected = missing_state(&fixture);
+            arm_dotenv_test_fault(fault);
+            assert_eq!(
+                fixture.synchronize(&expected, NONCE, Some(DESIRED)).err(),
+                Some(WindowsStoreError::Lost)
+            );
+            assert_dotenv_test_fault_consumed();
+            assert!(!fixture.dotenv().exists());
+            assert!(candidate_paths(&fixture.codex_home).is_empty());
+            assert_clean_role_lock(&fixture);
+            assert_plaintexts_absent(
+                &fixture.test.root,
+                &[DESIRED, DESIRED_ASSIGNMENT, DESIRED_TOKEN],
+            );
+
+            let rebound = missing_state(&fixture);
+            expect_changed(fixture.synchronize(&rebound, NONCE_2, Some(DESIRED)));
+            assert_eq!(
+                fs::read(fixture.dotenv()).expect("candidate retry must install dotenv"),
+                DESIRED
+            );
+            assert!(candidate_paths(&fixture.codex_home).is_empty());
+            assert_clean_role_lock(&fixture);
+            fixture.canary_is_intact();
+        }
+    }
+
+    #[test]
+    fn atomic_install_faults_distinguish_definite_cleanup_from_uncertainty() {
+        let before = Fixture::new(true);
+        let before_expected = missing_state(&before);
+        arm_dotenv_test_fault(DotenvTestFault::InstallBeforeRename);
+        assert_eq!(
+            before
+                .synchronize(&before_expected, NONCE, Some(DESIRED))
+                .err(),
+            Some(WindowsStoreError::Lost)
+        );
+        assert_dotenv_test_fault_consumed();
+        assert!(!before.dotenv().exists());
+        assert!(candidate_paths(&before.codex_home).is_empty());
+        assert_clean_role_lock(&before);
+        assert_plaintexts_absent(
+            &before.test.root,
+            &[DESIRED, DESIRED_ASSIGNMENT, DESIRED_TOKEN],
+        );
+        let rebound = missing_state(&before);
+        expect_changed(before.synchronize(&rebound, NONCE_2, Some(DESIRED)));
+        assert_clean_role_lock(&before);
+
+        let after = Fixture::new(true);
+        let after_expected = missing_state(&after);
+        arm_dotenv_test_fault(DotenvTestFault::InstallAfterRename);
+        assert_eq!(
+            after
+                .synchronize(&after_expected, NONCE, Some(DESIRED))
+                .err(),
+            Some(WindowsStoreError::Lost)
+        );
+        assert_dotenv_test_fault_consumed();
+        assert_eq!(
+            fs::read(after.dotenv()).expect("uncertain rename result must be observable"),
+            DESIRED
+        );
+        assert!(candidate_paths(&after.codex_home).is_empty());
+        assert!(matches!(
+            observed_role_lock(&after),
+            DotenvLockRecord::Held { .. }
+        ));
+        let installed = present_state(&after, DESIRED);
+        assert_eq!(
+            expect_unchanged(after.synchronize(&installed, NONCE_2, None)),
+            installed
+        );
+        assert_clean_role_lock(&after);
+        after.canary_is_intact();
+    }
+
+    #[test]
+    fn post_install_failures_roll_back_missing_and_existing_without_plaintext_residue() {
+        let missing = Fixture::new(true);
+        let missing_expected = missing_state(&missing);
+        arm_dotenv_test_fault(DotenvTestFault::PostInstallObservation);
+        assert_eq!(
+            missing
+                .synchronize(&missing_expected, NONCE, Some(DESIRED))
+                .err(),
+            Some(WindowsStoreError::Io)
+        );
+        assert_dotenv_test_fault_consumed();
+        assert!(!missing.dotenv().exists());
+        assert!(candidate_paths(&missing.codex_home).is_empty());
+        assert_plaintexts_absent(
+            &missing.test.root,
+            &[DESIRED, DESIRED_ASSIGNMENT, DESIRED_TOKEN],
+        );
+        assert!(matches!(
+            observed_role_lock(&missing),
+            DotenvLockRecord::Held { .. }
+        ));
+        let rebound = missing_state(&missing);
+        assert_eq!(
+            expect_unchanged(missing.synchronize(&rebound, NONCE_2, None)),
+            rebound
+        );
+        assert_clean_role_lock(&missing);
+        missing.canary_is_intact();
+
+        let present = Fixture::new(true);
+        create_private_test_file(&present.dotenv(), ORIGINAL);
+        let present_expected = present_state(&present, ORIGINAL);
+        arm_dotenv_test_fault(DotenvTestFault::PostInstallObservation);
+        assert_eq!(
+            present
+                .synchronize(&present_expected, NONCE, Some(DESIRED))
+                .err(),
+            Some(WindowsStoreError::Io)
+        );
+        assert_dotenv_test_fault_consumed();
+        assert_eq!(
+            fs::read(present.dotenv()).expect("rollback must restore original dotenv"),
+            ORIGINAL
+        );
+        assert!(candidate_paths(&present.codex_home).is_empty());
+        assert_plaintexts_absent(
+            &present.test.root,
+            &[DESIRED, DESIRED_ASSIGNMENT, DESIRED_TOKEN],
+        );
+        let restored = present_state(&present, ORIGINAL);
+        assert_eq!(
+            expect_unchanged(present.synchronize(&restored, NONCE_2, None)),
+            restored
+        );
+        assert_clean_role_lock(&present);
+        present.canary_is_intact();
+
+        let missing_home = Fixture::new(false);
+        let missing_home_expected = missing_state(&missing_home);
+        arm_dotenv_test_fault(DotenvTestFault::PostInstallObservation);
+        assert_eq!(
+            missing_home
+                .synchronize(&missing_home_expected, NONCE, Some(DESIRED))
+                .err(),
+            Some(WindowsStoreError::Io)
+        );
+        assert_dotenv_test_fault_consumed();
+        assert!(!missing_home.codex_home.exists());
+        assert!(candidate_paths(&missing_home.codex_home).is_empty());
+        assert_plaintexts_absent(
+            &missing_home.test.root,
+            &[DESIRED, DESIRED_ASSIGNMENT, DESIRED_TOKEN],
+        );
+        let rebound = missing_state(&missing_home);
+        assert_eq!(
+            expect_unchanged(missing_home.synchronize(&rebound, NONCE_2, None)),
+            rebound
+        );
+        assert_clean_role_lock(&missing_home);
+        missing_home.canary_is_intact();
+    }
+
+    #[test]
+    fn role_lock_contention_release_and_abandonment_all_converge() {
+        let contention = Fixture::new(true);
+        let expected = missing_state(&contention);
+        let held = match contention
+            .acquire_role_lock(NONCE)
+            .expect("fresh role lock must acquire")
+        {
+            DotenvLockAcquireResult::Acquired(lease) => lease,
+            DotenvLockAcquireResult::Busy => panic!("fresh role lock must not be busy"),
+        };
+        expect_precondition_failed(contention.synchronize(&expected, NONCE_2, Some(DESIRED)));
+        assert!(!contention.dotenv().exists());
+        drop(held);
+        expect_changed(contention.synchronize(&expected, NONCE_3, Some(DESIRED)));
+        assert_eq!(
+            fs::read(contention.dotenv()).expect("post-contention retry must install"),
+            DESIRED
+        );
+        assert_clean_role_lock(&contention);
+        contention.canary_is_intact();
+
+        for fault in [
+            DotenvTestFault::ReleaseBeforeClean,
+            DotenvTestFault::ReleaseAfterClean,
+        ] {
+            let fixture = Fixture::new(true);
+            let expected = missing_state(&fixture);
+            arm_dotenv_test_fault(fault);
+            assert_eq!(
+                fixture.synchronize(&expected, NONCE, Some(DESIRED)).err(),
+                Some(WindowsStoreError::Lost)
+            );
+            assert_dotenv_test_fault_consumed();
+            assert_eq!(
+                fs::read(fixture.dotenv()).expect("release fault must retain installed dotenv"),
+                DESIRED
+            );
+            if fault == DotenvTestFault::ReleaseBeforeClean {
+                assert!(matches!(
+                    observed_role_lock(&fixture),
+                    DotenvLockRecord::Held { .. }
+                ));
+            } else {
+                assert!(matches!(
+                    observed_role_lock(&fixture),
+                    DotenvLockRecord::Clean { .. }
+                ));
+            }
+            let installed = present_state(&fixture, DESIRED);
+            assert_eq!(
+                expect_unchanged(fixture.synchronize(&installed, NONCE_2, None)),
+                installed
+            );
+            assert!(candidate_paths(&fixture.codex_home).is_empty());
+            assert_clean_role_lock(&fixture);
+            fixture.canary_is_intact();
+        }
+    }
+
+    #[test]
+    fn candidate_recovery_faults_converge_without_partial_publication() {
+        for fault in [
+            DotenvTestFault::RecoveryBeforeCandidateRemove,
+            DotenvTestFault::RecoveryAfterCandidateRemove,
+        ] {
+            let fixture = Fixture::new(true);
+            let held = match fixture
+                .acquire_role_lock(NONCE)
+                .expect("fixture role lock must acquire")
+            {
+                DotenvLockAcquireResult::Acquired(lease) => lease,
+                DotenvLockAcquireResult::Busy => panic!("fixture role lock must not be busy"),
+            };
+            let home = fixture.bound_home();
+            let nonce = ValidatedUuidV4::parse(NONCE).expect("fixture nonce must validate");
+            let (candidate, _, _) = create_candidate(&home, nonce, DESIRED, MAX_BYTES, false)
+                .expect("interrupted candidate must prepare");
+            drop(candidate);
+            drop(home);
+            drop(held);
+            assert_eq!(candidate_paths(&fixture.codex_home).len(), 1);
+            assert!(matches!(
+                observed_role_lock(&fixture),
+                DotenvLockRecord::Held { .. }
+            ));
+
+            arm_dotenv_test_fault(fault);
+            assert_eq!(
+                fixture.acquire_role_lock(NONCE_2).err(),
+                Some(WindowsStoreError::Lost)
+            );
+            assert_dotenv_test_fault_consumed();
+            assert!(!fixture.dotenv().exists());
+            assert_eq!(
+                candidate_paths(&fixture.codex_home).len(),
+                usize::from(fault == DotenvTestFault::RecoveryBeforeCandidateRemove)
+            );
+
+            let mut recovered = match fixture
+                .acquire_role_lock(NONCE_3)
+                .expect("candidate recovery retry must acquire")
+            {
+                DotenvLockAcquireResult::Acquired(lease) => lease,
+                DotenvLockAcquireResult::Busy => panic!("candidate recovery must not remain busy"),
+            };
+            let home = fixture.bound_home();
+            recovered
+                .release(Some(&home))
+                .expect("candidate recovery role lock must release");
+            drop(home);
+            assert!(candidate_paths(&fixture.codex_home).is_empty());
+            assert_plaintexts_absent(
+                &fixture.test.root,
+                &[DESIRED, DESIRED_ASSIGNMENT, DESIRED_TOKEN],
+            );
+            assert_clean_role_lock(&fixture);
+
+            let rebound = missing_state(&fixture);
+            expect_changed(fixture.synchronize(&rebound, NONCE_4, Some(DESIRED)));
+            assert_eq!(
+                fs::read(fixture.dotenv()).expect("recovered transaction must install"),
+                DESIRED
+            );
+            assert!(candidate_paths(&fixture.codex_home).is_empty());
+            assert_clean_role_lock(&fixture);
+            fixture.canary_is_intact();
+        }
     }
 }

@@ -696,17 +696,17 @@ pub(crate) struct MissingDirectoryBinding {
     process: ProcessIdentity,
     path: NormalizedAbsolutePath,
     parent_chain: OpenedDirectoryChain,
-    parent_identities: Vec<ObjectIdentity>,
+    parent_facts: Vec<MetadataFacts>,
 }
 
 impl MissingDirectoryBinding {
-    fn parent_is_current(
+    fn current_parent_facts(
         &self,
         expected_path: &NormalizedAbsolutePath,
-    ) -> Result<bool, WindowsStoreError> {
+    ) -> Result<Option<Vec<MetadataFacts>>, WindowsStoreError> {
         self.process.verify().map_err(|_| WindowsStoreError::Lost)?;
         if self.path != *expected_path {
-            return Ok(false);
+            return Ok(None);
         }
         let retained = self
             .parent_chain
@@ -715,7 +715,7 @@ impl MissingDirectoryBinding {
             .chain(std::iter::once(&self.parent_chain.leaf))
             .map(metadata)
             .collect::<Result<Vec<_>, _>>()?;
-        if retained.len() != self.parent_identities.len()
+        if retained.len() != self.parent_facts.len()
             || retained.iter().any(|facts| {
                 facts.kind != ObjectKind::Directory
                     || facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
@@ -723,15 +723,15 @@ impl MissingDirectoryBinding {
             || !retained
                 .iter()
                 .map(|facts| facts.identity)
-                .eq(self.parent_identities.iter().copied())
+                .eq(self.parent_facts.iter().map(|facts| facts.identity))
         {
-            return Ok(false);
+            return Ok(None);
         }
         let reopened = match expected_path.open_parent() {
             Ok(chain) => chain,
             Err(
                 WindowsStoreError::Missing | WindowsStoreError::Unsafe | WindowsStoreError::Lost,
-            ) => return Ok(false),
+            ) => return Ok(None),
             Err(error) => return Err(error),
         };
         let reopened = reopened
@@ -740,22 +740,48 @@ impl MissingDirectoryBinding {
             .chain(std::iter::once(&reopened.leaf))
             .map(metadata)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(reopened.len() == self.parent_identities.len()
-            && reopened.iter().all(|facts| {
-                facts.kind == ObjectKind::Directory
-                    && facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        if reopened.len() != self.parent_facts.len()
+            || reopened.iter().any(|facts| {
+                facts.kind != ObjectKind::Directory
+                    || facts.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
             })
-            && reopened
+            || !reopened
                 .iter()
                 .map(|facts| facts.identity)
-                .eq(self.parent_identities.iter().copied()))
+                .eq(self.parent_facts.iter().map(|facts| facts.identity))
+        {
+            return Ok(None);
+        }
+        Ok(Some(reopened))
+    }
+
+    fn parent_is_current(
+        &self,
+        expected_path: &NormalizedAbsolutePath,
+    ) -> Result<bool, WindowsStoreError> {
+        Ok(self.current_parent_facts(expected_path)?.is_some())
+    }
+
+    fn parent_matches_observation(
+        &self,
+        expected_path: &NormalizedAbsolutePath,
+    ) -> Result<bool, WindowsStoreError> {
+        let Some(reopened) = self.current_parent_facts(expected_path)? else {
+            return Ok(false);
+        };
+        let observed_parent = self.parent_facts.last().ok_or(WindowsStoreError::Lost)?;
+        // The direct parent's last-write time versions the target namespace. Ancestor
+        // identities stay bound without rejecting unrelated sibling churn above it.
+        Ok(reopened
+            .last()
+            .is_some_and(|facts| facts.modified == observed_parent.modified))
     }
 
     fn target_is_missing(
         &self,
         expected_path: &NormalizedAbsolutePath,
     ) -> Result<bool, WindowsStoreError> {
-        if !self.parent_is_current(expected_path)? {
+        if !self.parent_matches_observation(expected_path)? {
             return Ok(false);
         }
         match open_object_nofollow(&expected_path.path) {
@@ -779,20 +805,17 @@ pub(crate) fn observe_missing_private_directory(
     let process = ProcessIdentity::capture().map_err(map_win)?;
     let path = NormalizedAbsolutePath::parse(path)?;
     let parent_chain = path.open_parent()?;
-    let parent_identities = parent_chain
+    let parent_facts = parent_chain
         .ancestors
         .iter()
         .chain(std::iter::once(&parent_chain.leaf))
         .map(metadata)
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|facts| facts.identity)
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     let binding = MissingDirectoryBinding {
         process,
         path,
         parent_chain,
-        parent_identities,
+        parent_facts,
     };
     if binding.target_is_missing(&binding.path)? {
         Ok(Some(binding))
@@ -4020,6 +4043,101 @@ mod tests {
         ));
         assert!(!busy_validation.get());
         held.release().expect("held lease must release");
+    }
+
+    #[test]
+    fn observed_missing_rejects_create_delete_aba_before_directory_creation() {
+        let test = TestRoot::new();
+        let binding = observe_missing_private_directory(&test.store)
+            .expect("missing observation must complete")
+            .expect("store must initially be absent");
+        let observed_parent_modified = binding
+            .parent_facts
+            .last()
+            .expect("missing binding must retain its direct parent facts")
+            .modified;
+
+        let mut changed_parent_modified = None;
+        'attempts: for _ in 0..64 {
+            fs::create_dir(&test.store).expect("ABA directory must be created");
+            fs::remove_dir(&test.store).expect("ABA directory must be removed");
+            for _ in 0..8 {
+                let reopened = binding
+                    .path
+                    .open_parent()
+                    .expect("ABA parent must reopen through a no-follow chain");
+                let current = metadata(&reopened.leaf)
+                    .expect("reopened parent metadata must remain readable")
+                    .modified;
+                if current != observed_parent_modified {
+                    changed_parent_modified = Some(current);
+                    break 'attempts;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        assert!(
+            changed_parent_modified.is_some(),
+            "bounded create/delete retries must expose an NTFS parent modification change"
+        );
+        assert!(
+            path_is_missing(&test.store),
+            "the ABA fixture must leave the observed directory absent"
+        );
+
+        let validation_ran = std::cell::Cell::new(false);
+        assert!(matches!(
+            acquire_observed_setup_lease(
+                &test.store,
+                NONCE_1,
+                ObservedDirectoryExpectation::Missing(&binding),
+                |_| {
+                    validation_ran.set(true);
+                    Ok(true)
+                },
+            ),
+            Ok(ObservedSetupLeaseAcquireResult::PreconditionFailed)
+        ));
+        assert!(
+            !validation_ran.get(),
+            "stale missing evidence must fail before validation"
+        );
+        assert!(
+            path_is_missing(&test.store),
+            "stale missing evidence must not create a directory"
+        );
+        assert!(
+            path_is_missing(&test.store.join(SETUP_LOCK_ENTRY)),
+            "stale missing evidence must not leave a lock"
+        );
+
+        let fresh = observe_missing_private_directory(&test.store)
+            .expect("fresh missing observation must complete")
+            .expect("store must remain absent");
+        match acquire_observed_setup_lease(
+            &test.store,
+            NONCE_2,
+            ObservedDirectoryExpectation::Missing(&fresh),
+            |_| Ok(true),
+        )
+        .expect("fresh observed acquisition must complete")
+        {
+            ObservedSetupLeaseAcquireResult::Acquired {
+                prior,
+                directory,
+                mut lease,
+            } => {
+                assert_eq!(prior, PriorLease::Absent);
+                assert_eq!(directory, DirectoryDisposition::Created);
+                lease.release().expect("fresh lease must release");
+            }
+            ObservedSetupLeaseAcquireResult::Busy => {
+                panic!("fresh missing evidence must not be busy")
+            }
+            ObservedSetupLeaseAcquireResult::PreconditionFailed => {
+                panic!("fresh missing evidence must remain valid")
+            }
+        }
     }
 
     #[test]

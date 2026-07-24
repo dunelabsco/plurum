@@ -982,12 +982,85 @@ impl WindowsSetupLease {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{acquired_lease, TestRoot};
+    use std::env;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+
+    use super::super::tests::{acquired_lease, verified_test_isolation, TestRoot};
     use super::*;
 
     const NONCE: &str = "b56c52f5-a090-41eb-a164-1c92e36db94f";
+    const NONCE_2: &str = "4657f2a0-739f-4923-86e8-f25f1dc328f9";
     const ID_1: &str = "6d27ba17-aac9-4f72-bfca-bc6fe266fd27";
     const ID_2: &str = "342607ae-47c7-4da9-a01b-d763b8296e67";
+    const ID_3: &str = "f168758d-3f57-4d14-b33a-b5ac27553d3e";
+    const CHILD_DIRECTORY_ENV: &str = "PLURUM_WINDOWS_MUTATION_CHILD_DIRECTORY";
+    const CHILD_STAGE_ENV: &str = "PLURUM_WINDOWS_MUTATION_CHILD_STAGE";
+    const TEST_MARKER_BYTES: &[u8] = b"plurum-windows-native-test-v1\n";
+    const OLD_CREDENTIAL_BYTES: &[u8] = b"old-credential";
+    const NEW_CREDENTIAL_BYTES: &[u8] = b"new-credential";
+    const JOURNAL_BYTES: &[u8] = b"rollback-authority";
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CrashStage {
+        TransactionCandidateCreated,
+        TransactionCandidateSynced,
+        TransactionInstalled,
+        TransactionBarrier,
+        CredentialCandidateCreated,
+        CredentialCandidateSynced,
+        CredentialInstalled,
+        CredentialBarrier,
+        TransactionRemoved,
+        TransactionRemovalBarrier,
+    }
+
+    impl CrashStage {
+        const ALL: [Self; 10] = [
+            Self::TransactionCandidateCreated,
+            Self::TransactionCandidateSynced,
+            Self::TransactionInstalled,
+            Self::TransactionBarrier,
+            Self::CredentialCandidateCreated,
+            Self::CredentialCandidateSynced,
+            Self::CredentialInstalled,
+            Self::CredentialBarrier,
+            Self::TransactionRemoved,
+            Self::TransactionRemovalBarrier,
+        ];
+
+        fn parse(value: &str) -> Option<Self> {
+            match value {
+                "transaction-candidate-created" => Some(Self::TransactionCandidateCreated),
+                "transaction-candidate-synced" => Some(Self::TransactionCandidateSynced),
+                "transaction-installed" => Some(Self::TransactionInstalled),
+                "transaction-barrier" => Some(Self::TransactionBarrier),
+                "credential-candidate-created" => Some(Self::CredentialCandidateCreated),
+                "credential-candidate-synced" => Some(Self::CredentialCandidateSynced),
+                "credential-installed" => Some(Self::CredentialInstalled),
+                "credential-barrier" => Some(Self::CredentialBarrier),
+                "transaction-removed" => Some(Self::TransactionRemoved),
+                "transaction-removal-barrier" => Some(Self::TransactionRemovalBarrier),
+                _ => None,
+            }
+        }
+
+        fn as_str(self) -> &'static str {
+            match self {
+                Self::TransactionCandidateCreated => "transaction-candidate-created",
+                Self::TransactionCandidateSynced => "transaction-candidate-synced",
+                Self::TransactionInstalled => "transaction-installed",
+                Self::TransactionBarrier => "transaction-barrier",
+                Self::CredentialCandidateCreated => "credential-candidate-created",
+                Self::CredentialCandidateSynced => "credential-candidate-synced",
+                Self::CredentialInstalled => "credential-installed",
+                Self::CredentialBarrier => "credential-barrier",
+                Self::TransactionRemoved => "transaction-removed",
+                Self::TransactionRemovalBarrier => "transaction-removal-barrier",
+            }
+        }
+    }
 
     fn temporary(role: TemporaryEntryRole, id: &str) -> TemporaryEntry {
         TemporaryEntry::parse(role, id).expect("temporary entry must validate")
@@ -1040,6 +1113,96 @@ mod tests {
         assert!(read.end_of_file);
         reader.close().expect("reader must close");
         snapshot
+    }
+
+    fn verified_mutation_child_fixture() -> Option<(PathBuf, CrashStage)> {
+        let directory = PathBuf::from(env::var_os(CHILD_DIRECTORY_ENV)?);
+        let stage = env::var(CHILD_STAGE_ENV)
+            .ok()
+            .and_then(|value| CrashStage::parse(&value))
+            .expect("mutation child stage must be exact");
+        NormalizedAbsolutePath::parse(&directory)
+            .expect("mutation child directory must be a canonical local drive path");
+
+        let temporary = verified_test_isolation();
+        let test_root = directory
+            .parent()
+            .expect("mutation child directory must have a parent");
+        assert_eq!(test_root.parent(), Some(temporary.as_path()));
+        assert_eq!(directory, test_root.join("Plurum"));
+        assert_eq!(
+            fs::read(test_root.join(".plurum-windows-native-test"))
+                .expect("mutation child marker must be readable"),
+            TEST_MARKER_BYTES
+        );
+        assert!(
+            !directory.exists(),
+            "fresh mutation child store must not preexist"
+        );
+        Some((directory, stage))
+    }
+
+    fn exit_at(current: CrashStage, selected: CrashStage) {
+        if current == selected {
+            std::process::exit(0);
+        }
+    }
+
+    fn spawn_crash_child(directory: &Path, stage: CrashStage) {
+        let status =
+            Command::new(env::current_exe().expect("native mutation test binary must exist"))
+                .args([
+                    "--exact",
+                    "windows::mutation::tests::mutation_crash_child",
+                    "--nocapture",
+                ])
+                .env(CHILD_DIRECTORY_ENV, directory)
+                .env(CHILD_STAGE_ENV, stage.as_str())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("mutation crash child must start");
+        assert!(
+            status.success(),
+            "mutation crash child failed at {}: {status}",
+            stage.as_str()
+        );
+    }
+
+    fn assert_entry_and_remove(
+        lease: &WindowsSetupLease,
+        entry: ManagedEntry,
+        expected: Option<&[u8]>,
+    ) -> bool {
+        match lease
+            .observe_entry(entry)
+            .expect("recovered entry observation must complete")
+        {
+            ManagedEntryObservation::Missing { .. } => {
+                assert!(
+                    expected.is_none(),
+                    "recovered entry is unexpectedly missing"
+                );
+                false
+            }
+            ManagedEntryObservation::Opened {
+                snapshot, mut file, ..
+            } => {
+                let expected = expected.expect("recovered entry unexpectedly exists");
+                let read = file
+                    .read_bounded(entry.max_bytes() + 1)
+                    .expect("recovered entry must be bounded");
+                assert!(read.end_of_file);
+                assert_eq!(read.bytes, expected);
+                file.close().expect("recovered reader must close");
+                assert_eq!(
+                    lease.remove_conditionally(entry, &snapshot),
+                    Ok(ConditionalMutationResult::Applied)
+                );
+                true
+            }
+        }
     }
 
     #[test]
@@ -1258,6 +1421,262 @@ mod tests {
         }
         std::fs::remove_file(test.store.join("noise-overflow"))
             .expect("known directory-scan overflow fixture must be removed");
+    }
+
+    #[test]
+    fn canonical_transaction_crashes_leave_old_or_new_recoverable_state() {
+        for stage in CrashStage::ALL {
+            let test = TestRoot::new();
+            let marker_before =
+                fs::read(&test.marker).expect("outside-store marker must remain readable");
+            spawn_crash_child(&test.store, stage);
+            assert_eq!(
+                fs::read(&test.marker).expect("outside-store marker must remain readable"),
+                marker_before,
+                "stage {} must not mutate outside the store",
+                stage.as_str()
+            );
+
+            let (prior, disposition, mut recovered) = acquired_lease(&test.store, NONCE_2);
+            assert_eq!(
+                prior,
+                PriorLease::ProvenAbandoned,
+                "stage {} must retain abandonment proof",
+                stage.as_str()
+            );
+            assert_eq!(disposition, DirectoryDisposition::Existing);
+
+            let expected_credential = match stage {
+                CrashStage::TransactionCandidateCreated
+                | CrashStage::TransactionCandidateSynced
+                | CrashStage::TransactionInstalled
+                | CrashStage::TransactionBarrier
+                | CrashStage::CredentialCandidateCreated
+                | CrashStage::CredentialCandidateSynced => OLD_CREDENTIAL_BYTES,
+                CrashStage::CredentialInstalled
+                | CrashStage::CredentialBarrier
+                | CrashStage::TransactionRemoved
+                | CrashStage::TransactionRemovalBarrier => NEW_CREDENTIAL_BYTES,
+            };
+            let expected_transaction_candidate = match stage {
+                CrashStage::TransactionCandidateCreated => Some(&b""[..]),
+                CrashStage::TransactionCandidateSynced => Some(JOURNAL_BYTES),
+                _ => None,
+            };
+            let expected_transaction = match stage {
+                CrashStage::TransactionInstalled
+                | CrashStage::TransactionBarrier
+                | CrashStage::CredentialCandidateCreated
+                | CrashStage::CredentialCandidateSynced
+                | CrashStage::CredentialInstalled
+                | CrashStage::CredentialBarrier => Some(JOURNAL_BYTES),
+                _ => None,
+            };
+            let expected_credential_candidate = match stage {
+                CrashStage::CredentialCandidateCreated => Some(&b""[..]),
+                CrashStage::CredentialCandidateSynced => Some(NEW_CREDENTIAL_BYTES),
+                _ => None,
+            };
+
+            let transaction_candidate = temporary(TemporaryEntryRole::Transaction, ID_2);
+            let credential_candidate = temporary(TemporaryEntryRole::Credential, ID_3);
+            let mut removed = assert_entry_and_remove(
+                &recovered,
+                ManagedEntry::credential(),
+                Some(expected_credential),
+            );
+            removed |= assert_entry_and_remove(
+                &recovered,
+                ManagedEntry::Temporary(transaction_candidate),
+                expected_transaction_candidate,
+            );
+            removed |= assert_entry_and_remove(
+                &recovered,
+                ManagedEntry::transaction(),
+                expected_transaction,
+            );
+            removed |= assert_entry_and_remove(
+                &recovered,
+                ManagedEntry::Temporary(credential_candidate),
+                expected_credential_candidate,
+            );
+            if removed {
+                recovered
+                    .sync_directory()
+                    .expect("recovered cleanup process-crash barrier must succeed");
+            }
+            assert!(
+                recovered
+                    .list_temporary_entries()
+                    .expect("post-recovery temporary listing must succeed")
+                    .is_empty(),
+                "stage {} must leave no unowned temporary residue",
+                stage.as_str()
+            );
+            recovered
+                .release()
+                .expect("recovered crash-stage lease must release");
+
+            let mut entries = fs::read_dir(&test.store)
+                .expect("recovered store must enumerate")
+                .map(|entry| {
+                    entry
+                        .expect("recovered store entry must enumerate")
+                        .file_name()
+                })
+                .collect::<Vec<_>>();
+            entries.sort();
+            assert_eq!(
+                entries,
+                vec![OsString::from(SETUP_LOCK_ENTRY)],
+                "stage {} must leave only the owned setup lock",
+                stage.as_str()
+            );
+            assert_eq!(
+                fs::read(&test.marker).expect("outside-store marker must remain readable"),
+                marker_before,
+                "stage {} recovery must remain inside the store",
+                stage.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_crash_child() {
+        let Some((directory, stage)) = verified_mutation_child_fixture() else {
+            return;
+        };
+        let (_, _, lease) = acquired_lease(&directory, NONCE);
+
+        let old_candidate = temporary(TemporaryEntryRole::Credential, ID_1);
+        let old_source = create_written(&lease, old_candidate, OLD_CREDENTIAL_BYTES);
+        let missing_credential = missing(&lease, ManagedEntry::credential());
+        assert_eq!(
+            lease.move_temporary_conditionally(
+                old_candidate,
+                &old_source,
+                CanonicalEntryRole::Credential,
+                ExpectedEntrySnapshot::Missing(&missing_credential),
+            ),
+            Ok(ConditionalMutationResult::Applied)
+        );
+        lease
+            .sync_directory()
+            .expect("old credential process-crash barrier must succeed");
+
+        let transaction_candidate = temporary(TemporaryEntryRole::Transaction, ID_2);
+        let missing_transaction_candidate =
+            missing(&lease, ManagedEntry::Temporary(transaction_candidate));
+        let mut transaction_writer = match lease
+            .create_temporary_exclusive(transaction_candidate, &missing_transaction_candidate)
+            .expect("transaction candidate creation must complete")
+        {
+            ExclusiveCreateResult::Conflict => {
+                panic!("transaction candidate unexpectedly conflicts")
+            }
+            ExclusiveCreateResult::Created(writer) => writer,
+        };
+        exit_at(CrashStage::TransactionCandidateCreated, stage);
+
+        transaction_writer
+            .write_all(JOURNAL_BYTES)
+            .expect("transaction candidate write must complete");
+        transaction_writer
+            .sync()
+            .expect("transaction candidate flush must complete");
+        exit_at(CrashStage::TransactionCandidateSynced, stage);
+        transaction_writer
+            .close()
+            .expect("transaction candidate writer must close");
+
+        let (transaction_source, mut transaction_reader) =
+            opened(&lease, ManagedEntry::Temporary(transaction_candidate));
+        transaction_reader
+            .close()
+            .expect("transaction candidate reader must close");
+        let missing_transaction = missing(&lease, ManagedEntry::transaction());
+        assert_eq!(
+            lease.move_temporary_conditionally(
+                transaction_candidate,
+                &transaction_source,
+                CanonicalEntryRole::Transaction,
+                ExpectedEntrySnapshot::Missing(&missing_transaction),
+            ),
+            Ok(ConditionalMutationResult::Applied)
+        );
+        exit_at(CrashStage::TransactionInstalled, stage);
+
+        lease
+            .sync_directory()
+            .expect("transaction installation process-crash barrier must succeed");
+        exit_at(CrashStage::TransactionBarrier, stage);
+
+        let credential_candidate = temporary(TemporaryEntryRole::Credential, ID_3);
+        let missing_credential_candidate =
+            missing(&lease, ManagedEntry::Temporary(credential_candidate));
+        let mut credential_writer = match lease
+            .create_temporary_exclusive(credential_candidate, &missing_credential_candidate)
+            .expect("credential candidate creation must complete")
+        {
+            ExclusiveCreateResult::Conflict => {
+                panic!("credential candidate unexpectedly conflicts")
+            }
+            ExclusiveCreateResult::Created(writer) => writer,
+        };
+        exit_at(CrashStage::CredentialCandidateCreated, stage);
+
+        credential_writer
+            .write_all(NEW_CREDENTIAL_BYTES)
+            .expect("credential candidate write must complete");
+        credential_writer
+            .sync()
+            .expect("credential candidate flush must complete");
+        exit_at(CrashStage::CredentialCandidateSynced, stage);
+        credential_writer
+            .close()
+            .expect("credential candidate writer must close");
+
+        let (credential_source, mut credential_reader) =
+            opened(&lease, ManagedEntry::Temporary(credential_candidate));
+        credential_reader
+            .close()
+            .expect("credential candidate reader must close");
+        let (old_credential, mut old_credential_reader) =
+            opened(&lease, ManagedEntry::credential());
+        old_credential_reader
+            .close()
+            .expect("old credential reader must close");
+        assert_eq!(
+            lease.move_temporary_conditionally(
+                credential_candidate,
+                &credential_source,
+                CanonicalEntryRole::Credential,
+                ExpectedEntrySnapshot::Present(&old_credential),
+            ),
+            Ok(ConditionalMutationResult::Applied)
+        );
+        exit_at(CrashStage::CredentialInstalled, stage);
+
+        lease
+            .sync_directory()
+            .expect("credential installation process-crash barrier must succeed");
+        exit_at(CrashStage::CredentialBarrier, stage);
+
+        let (transaction, mut transaction_reader) = opened(&lease, ManagedEntry::transaction());
+        transaction_reader
+            .close()
+            .expect("installed transaction reader must close");
+        assert_eq!(
+            lease.remove_conditionally(ManagedEntry::transaction(), &transaction,),
+            Ok(ConditionalMutationResult::Applied)
+        );
+        exit_at(CrashStage::TransactionRemoved, stage);
+
+        lease
+            .sync_directory()
+            .expect("transaction removal process-crash barrier must succeed");
+        exit_at(CrashStage::TransactionRemovalBarrier, stage);
+        panic!("every validated crash stage must terminate the child");
     }
 
     #[test]

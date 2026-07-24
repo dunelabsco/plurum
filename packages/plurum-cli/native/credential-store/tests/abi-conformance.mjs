@@ -8,6 +8,7 @@ import {
   fchmodSync,
   fstatSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -16,7 +17,9 @@ import {
   readdirSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   rmSync,
+  unlinkSync,
   writeSync,
   writeFileSync,
 } from "node:fs";
@@ -180,6 +183,88 @@ function isStrictDescendant(parent, candidate) {
   );
 }
 
+function assertStrictContainedPath(root, candidate, label) {
+  assert.equal(isAbsolute(candidate), true, `${label} must be absolute`);
+  assert.equal(
+    resolve(candidate),
+    candidate,
+    `${label} must be lexically canonical`,
+  );
+  assert.equal(
+    isStrictDescendant(root, candidate),
+    true,
+    `${label} must stay beneath the disposable authority home`,
+  );
+}
+
+function cycleMissingDirectoryNamespace(path, label) {
+  const parent = dirname(path);
+  const before = lstatSync(parent, { bigint: true }).mtimeNs;
+  for (let attempt = 0; attempt < 128; attempt += 1) {
+    let created = false;
+    try {
+      mkdirSync(path, { mode: 0o700 });
+      created = true;
+      if (process.platform !== "win32") {
+        chmodSync(path, 0o700);
+      }
+    } finally {
+      if (created && pathExists(path)) {
+        rmdirSync(path);
+      }
+    }
+    if (lstatSync(parent, { bigint: true }).mtimeNs !== before) {
+      return;
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+  }
+  assert.fail(`${label} did not advance its parent namespace evidence`);
+}
+
+function cycleMissingFileNamespace(path, bytes, label) {
+  const parent = dirname(path);
+  const before = lstatSync(parent, { bigint: true }).mtimeNs;
+  for (let attempt = 0; attempt < 128; attempt += 1) {
+    let descriptor;
+    try {
+      descriptor = openSync(
+        path,
+        fsConstants.O_CREAT |
+          fsConstants.O_EXCL |
+          fsConstants.O_WRONLY |
+          (fsConstants.O_NOFOLLOW ?? 0),
+        0o600,
+      );
+      if (process.platform !== "win32") {
+        fchmodSync(descriptor, 0o600);
+      }
+      let offset = 0;
+      while (offset < bytes.byteLength) {
+        offset += writeSync(
+          descriptor,
+          bytes,
+          offset,
+          bytes.byteLength - offset,
+          null,
+        );
+      }
+      fsyncSync(descriptor);
+    } finally {
+      if (descriptor !== undefined) {
+        closeSync(descriptor);
+      }
+      if (pathExists(path)) {
+        unlinkSync(path);
+      }
+    }
+    if (lstatSync(parent, { bigint: true }).mtimeNs !== before) {
+      return;
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+  }
+  assert.fail(`${label} did not advance its parent namespace evidence`);
+}
+
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
@@ -311,6 +396,7 @@ function readBoundedDigest(path, maximumBytes, label) {
     path,
     fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
   );
+  let bytes;
   try {
     const openedBefore = fstatSync(descriptor, { bigint: true });
     assert.equal(openedBefore.isFile(), true, `${label} must stay a file`);
@@ -335,7 +421,7 @@ function readBoundedDigest(path, maximumBytes, label) {
     const openedBeforeIdentity = stableObjectEvidence(openedBefore);
     assertPathAndDescriptorIdentity(beforeIdentity, openedBeforeIdentity, label);
 
-    const bytes = Buffer.alloc(Number(openedBefore.size));
+    bytes = Buffer.alloc(Number(openedBefore.size));
     let offset = 0;
     while (offset < bytes.byteLength) {
       const count = readSync(
@@ -371,6 +457,9 @@ function readBoundedDigest(path, maximumBytes, label) {
       digest: sha256(bytes),
     });
   } finally {
+    if (bytes !== undefined) {
+      bytes.fill(0);
+    }
     closeSync(descriptor);
   }
 }
@@ -474,6 +563,20 @@ function boundedDigestTree(root) {
 
   visit(root, ".", 0);
   return Object.freeze(entries);
+}
+
+function assertExactTreeInventory(root, expected, label) {
+  const actual = boundedDigestTree(root)
+    .map((entry) => {
+      const path = entry.path.startsWith("./") ? entry.path.slice(2) : entry.path;
+      return `${entry.kind}:${path}`;
+    })
+    .sort();
+  assert.deepEqual(
+    actual,
+    [...expected].sort(),
+    `${label} contains an unexpected path or cleanup residue`,
+  );
 }
 
 function assertExactBoundedFile(
@@ -801,7 +904,11 @@ function lifecyclePathEnvironment(root) {
 }
 
 function createPrivateLifecyclePaths(environment) {
-  for (const path of new Set(Object.values(environment))) {
+  const deferredNativeRoots = new Set(["CODEX_HOME", "PLURUM_HOME"]);
+  const paths = Object.entries(environment).flatMap(([name, path]) =>
+    deferredNativeRoots.has(name) ? [] : [path],
+  );
+  for (const path of new Set(paths)) {
     mkdirSync(path, { recursive: true, mode: 0o700 });
     if (process.platform !== "win32") {
       chmodSync(path, 0o700);
@@ -1337,15 +1444,85 @@ async function runChild() {
   assert.equal(addon.packageVersion, CLI_VERSION);
   assert.equal(addon.target, expectedTarget);
   assert.equal(typeof addon.createAdapters, "function");
+  const disposableHome = realpathSync(requiredEnvironment("HOME"));
+  const configuredPlurumHome = resolve(requiredEnvironment("PLURUM_HOME"));
+  const configuredCodexHome = resolve(requiredEnvironment("CODEX_HOME"));
+  assert.equal(
+    pathExists(configuredPlurumHome),
+    false,
+    "the native Plurum home must begin absent",
+  );
+  assert.equal(
+    pathExists(configuredCodexHome),
+    false,
+    "the native Codex home must begin absent",
+  );
+  for (const [label, root] of [
+    ["native ABI disposable home", disposableHome],
+    ["native ABI configured Plurum home", configuredPlurumHome],
+    ["native ABI configured Codex home", configuredCodexHome],
+  ]) {
+    assert.equal(
+      root === runRoot || isStrictDescendant(runRoot, root),
+      true,
+      `${label} must stay beneath the lifecycle root`,
+    );
+  }
+  const authorityRoot = join(configuredPlurumHome, "native-abi-fixtures");
+  const legacyRoot = join(disposableHome, "plurum-native-legacy");
+  assertStrictContainedPath(
+    configuredPlurumHome,
+    authorityRoot,
+    "native ABI fixture root",
+  );
   const nativeConfiguration = Object.freeze({
-    codexHomeDirectory: join(runRoot, "codex-home"),
+    codexHomeDirectory: join(configuredCodexHome, "plurum-projection"),
     legacyPaths: Object.freeze({
-      hermes: join(runRoot, "legacy-hermes", "plurum.json"),
-      openclaw: join(runRoot, "legacy-openclaw", "plurum.json"),
-      removedCli: join(runRoot, "legacy-removed", "config.json"),
+      hermes: join(legacyRoot, "plurum.json"),
+      openclaw: join(disposableHome, "plurum-native-openclaw", "plurum.json"),
+      removedCli: join(disposableHome, "plurum-native-removed", "config.json"),
     }),
-    stateDirectory: join(runRoot, "credential-store"),
+    stateDirectory: join(configuredPlurumHome, "native-credential-state"),
   });
+  for (const [root, label, path] of [
+    [
+      configuredCodexHome,
+      "native ABI Codex home",
+      nativeConfiguration.codexHomeDirectory,
+    ],
+    [
+      configuredPlurumHome,
+      "native ABI state directory",
+      nativeConfiguration.stateDirectory,
+    ],
+    [disposableHome, "native ABI legacy root", legacyRoot],
+    [
+      legacyRoot,
+      "native ABI Hermes legacy path",
+      nativeConfiguration.legacyPaths.hermes,
+    ],
+    [
+      disposableHome,
+      "native ABI OpenClaw legacy path",
+      nativeConfiguration.legacyPaths.openclaw,
+    ],
+    [
+      disposableHome,
+      "native ABI removed CLI legacy path",
+      nativeConfiguration.legacyPaths.removedCli,
+    ],
+  ]) {
+    assertStrictContainedPath(root, path, label);
+  }
+  assert.equal(
+    new Set([
+      nativeConfiguration.codexHomeDirectory,
+      nativeConfiguration.stateDirectory,
+      ...Object.values(nativeConfiguration.legacyPaths),
+    ]).size,
+    5,
+    "native authority paths must remain disjoint",
+  );
   const rawAdapters = Reflect.apply(addon.createAdapters, addon, [
     nativeConfiguration,
   ]);
@@ -1406,7 +1583,74 @@ async function runChild() {
     );
   }
 
-  const rawObservedDirectory = join(runRoot, "raw-observed-store");
+  let previousUmask;
+  if (process.platform !== "win32") {
+    previousUmask = process.umask(0);
+  }
+  try {
+    for (const [path, label] of [
+      [configuredPlurumHome, "native ABI configured Plurum home"],
+      [configuredCodexHome, "native ABI configured Codex home"],
+      [authorityRoot, "native ABI fixture root"],
+    ]) {
+      const acquired = rawAdapters.mutation.acquireSetupLease(
+        path,
+        Object.freeze({
+          createDirectory: true,
+          noFollow: true,
+          nonce: randomUUID(),
+        }),
+      );
+      assert.equal(acquired.status, "acquired");
+      assert.equal(acquired.directory, "created");
+      if (acquired.status !== "acquired") {
+        assert.fail(`${label} must be created under hostile umask`);
+      }
+      acquired.lease.release();
+      exactObjectIdentity(path, "directory", label);
+      exactObjectIdentity(
+        join(path, "setup.lock"),
+        "file",
+        `${label} setup lock`,
+      );
+    }
+  } finally {
+    if (previousUmask !== undefined) {
+      process.umask(previousUmask);
+    }
+  }
+
+  const rawAbaDirectory = join(authorityRoot, "raw-aba-store");
+  assertStrictContainedPath(
+    authorityRoot,
+    rawAbaDirectory,
+    "raw missing-ABA directory",
+  );
+  const rawAbaObservation = rawAdapters.observation.openPrivateDirectory(
+    rawAbaDirectory,
+    Object.freeze({ noFollow: true }),
+  );
+  assert.equal(rawAbaObservation.status, "missing");
+  cycleMissingDirectoryNamespace(
+    rawAbaDirectory,
+    "raw missing-directory ABA fixture",
+  );
+  assert.deepEqual(
+    rawAdapters.mutation.acquireObservedSetupLease(
+      rawAbaDirectory,
+      Object.freeze({
+        createDirectory: true,
+        evidence: rawAbaObservation.evidence,
+        noFollow: true,
+        nonce: randomUUID(),
+      }),
+    ),
+    { status: "precondition-failed" },
+    "raw missing evidence must reject create-delete ABA",
+  );
+  assert.equal(pathExists(rawAbaDirectory), false);
+
+  const rawObservedDirectory = join(authorityRoot, "raw-observed-store");
   const rawMissing = rawAdapters.observation.openPrivateDirectory(
     rawObservedDirectory,
     Object.freeze({ noFollow: true }),
@@ -1427,6 +1671,16 @@ async function runChild() {
   assert.equal(rawObservedAcquired.directory, "created");
   rawObservedAcquired.lease.release();
   assert.deepEqual(readdirSync(rawObservedDirectory), ["setup.lock"]);
+  exactObjectIdentity(
+    rawObservedDirectory,
+    "directory",
+    "native ABI observed store",
+  );
+  exactObjectIdentity(
+    join(rawObservedDirectory, "setup.lock"),
+    "file",
+    "native ABI observed-store setup lock",
+  );
   assert.throws(
     () =>
       rawAdapters.mutation.acquireObservedSetupLease(
@@ -1442,7 +1696,7 @@ async function runChild() {
     "raw observation evidence must be one-shot",
   );
 
-  const rawMismatchDirectory = join(runRoot, "raw-mismatch-store");
+  const rawMismatchDirectory = join(authorityRoot, "raw-mismatch-store");
   const rawMismatchEvidence = rawAdapters.observation.openPrivateDirectory(
     rawMismatchDirectory,
     Object.freeze({ noFollow: true }),
@@ -1450,7 +1704,7 @@ async function runChild() {
   assert.equal(rawMismatchEvidence.status, "missing");
   const rawMismatchResult =
     rawAdapters.mutation.acquireObservedSetupLease(
-      join(runRoot, "raw-mismatch-other"),
+      join(authorityRoot, "raw-mismatch-other"),
       Object.freeze({
         createDirectory: true,
         evidence: rawMismatchEvidence.evidence,
@@ -1460,12 +1714,12 @@ async function runChild() {
     );
   assert.deepEqual(rawMismatchResult, { status: "precondition-failed" });
   assert.equal(pathExists(rawMismatchDirectory), false);
-  assert.equal(pathExists(join(runRoot, "raw-mismatch-other")), false);
+  assert.equal(pathExists(join(authorityRoot, "raw-mismatch-other")), false);
 
   const otherRawAdapters = Reflect.apply(addon.createAdapters, addon, [
     nativeConfiguration,
   ]);
-  const rawCrossPairDirectory = join(runRoot, "raw-cross-pair-store");
+  const rawCrossPairDirectory = join(authorityRoot, "raw-cross-pair-store");
   const rawCrossPairEvidence =
     rawAdapters.observation.openPrivateDirectory(
       rawCrossPairDirectory,
@@ -1517,7 +1771,7 @@ async function runChild() {
   assert.equal(resolverCalls, 1, "native resolution must be memoized");
   assert.equal(Object.isFrozen(provider), true);
 
-  const credentialDirectory = join(runRoot, "credential-store");
+  const credentialDirectory = nativeConfiguration.stateDirectory;
   const credentialKey = requiredEnvironment(
     "PLURUM_NATIVE_ABI_CREDENTIAL_SECRET",
   );
@@ -1559,6 +1813,42 @@ async function runChild() {
 
   const observationAuthority =
     createCredentialStoreObservationAuthority(first.observation);
+  const publicAbaDirectory = join(authorityRoot, "public-aba-store");
+  const publicAbaObservation = await observationAuthority.inspect(
+    Object.freeze({ directory: publicAbaDirectory }),
+  );
+  assert.equal(publicAbaObservation.status, "available");
+  assert.equal(publicAbaObservation.canonical, "missing");
+  const publicAbaRedeemed = observationAuthority.redeem(
+    Object.freeze({
+      directory: publicAbaDirectory,
+      identity: publicAbaObservation.identity,
+    }),
+  );
+  assert.equal(publicAbaRedeemed.status, "redeemed");
+  const publicAbaEvidence = claimCredentialStoreObservationEvidence(
+    observationAuthority,
+    publicAbaRedeemed.evidence,
+  );
+  assert.ok(publicAbaEvidence);
+  cycleMissingDirectoryNamespace(
+    publicAbaDirectory,
+    "public missing-directory ABA fixture",
+  );
+  assert.deepEqual(
+    await first.mutation.acquireObservedSetupLease(
+      publicAbaDirectory,
+      Object.freeze({
+        createDirectory: true,
+        evidence: publicAbaEvidence,
+        noFollow: true,
+      }),
+    ),
+    { status: "precondition-failed" },
+    "public missing evidence must reject create-delete ABA",
+  );
+  assert.equal(pathExists(publicAbaDirectory), false);
+
   const missingObservation = await observationAuthority.inspect(
     Object.freeze({ directory: credentialDirectory }),
   );
@@ -1594,7 +1884,7 @@ async function runChild() {
   await observedCreation.lease.release();
   assert.deepEqual(readdirSync(credentialDirectory), ["setup.lock"]);
 
-  const crossPairDirectory = join(runRoot, "public-cross-pair-store");
+  const crossPairDirectory = join(authorityRoot, "public-cross-pair-store");
   const crossPairObservation = await observationAuthority.inspect(
     Object.freeze({ directory: crossPairDirectory }),
   );
@@ -1662,7 +1952,7 @@ async function runChild() {
 
   const codexHomeDirectory = nativeConfiguration.codexHomeDirectory;
   const codexDotenvPath = join(codexHomeDirectory, ".env");
-  const excludedProjectDirectory = join(runRoot, "excluded-project");
+  const excludedProjectDirectory = join(authorityRoot, "excluded-project");
   mkdirSync(excludedProjectDirectory, { mode: 0o700 });
   if (process.platform !== "win32") {
     chmodSync(excludedProjectDirectory, 0o700);
@@ -1907,6 +2197,318 @@ async function runChild() {
     (await first.codexDotenv.observe(codexObserveRequest)).status,
     "exact",
   );
+
+  unlinkSync(codexDotenvPath);
+  const rawMissingCodex = rawAdapters.codexDotenv.observe(
+    Object.freeze({
+      excludedProjectDirectory,
+      maxBytes: 128 * 1024,
+      noFollow: true,
+      revisionNonce: "c".repeat(64),
+    }),
+  );
+  assert.equal(rawMissingCodex.status, "missing");
+  cycleMissingFileNamespace(
+    codexDotenvPath,
+    canonicalCodexBytes,
+    "raw Codex missing-file ABA fixture",
+  );
+  assert.deepEqual(
+    rawAdapters.codexDotenv.synchronize(
+      Object.freeze({
+        disposition: "unchanged",
+        excludedProjectDirectory,
+        expectedRevision: rawMissingCodex.revision,
+        maxBytes: 128 * 1024,
+        nextRevisionNonce: "d".repeat(64),
+        noFollow: true,
+        nonce: randomUUID(),
+      }),
+    ),
+    { status: "precondition-failed" },
+    "raw Codex missing evidence must reject create-delete ABA",
+  );
+  assert.equal(pathExists(codexDotenvPath), false);
+  const rawMissingAfterAba = rawAdapters.codexDotenv.observe(
+    Object.freeze({
+      excludedProjectDirectory,
+      maxBytes: 128 * 1024,
+      noFollow: true,
+      revisionNonce: "5".repeat(64),
+    }),
+  );
+  assert.equal(rawMissingAfterAba.status, "missing");
+  assert.notEqual(
+    rawMissingAfterAba.revision,
+    rawMissingCodex.revision,
+    "raw Codex missing revision must record create-delete ABA",
+  );
+
+  const publicMissingCodex = await first.codexDotenv.observe(
+    codexObserveRequest,
+  );
+  assert.equal(publicMissingCodex.status, "absent");
+  cycleMissingFileNamespace(
+    codexDotenvPath,
+    canonicalCodexBytes,
+    "public Codex missing-file ABA fixture",
+  );
+  assert.deepEqual(
+    await first.codexDotenv.synchronize(
+      Object.freeze({
+        kind: "codex-dotenv-synchronize",
+        scope: "user",
+        apiOrigin: "https://api.plurum.ai",
+        expectedRevision: publicMissingCodex.revision,
+        expectedStatus: "absent",
+        expectation: codexObserveRequest.expectation,
+        excludedProjectDirectory,
+      }),
+    ),
+    { status: "precondition-failed" },
+    "public Codex missing evidence must reject create-delete ABA",
+  );
+  assert.equal(pathExists(codexDotenvPath), false);
+
+  const freshMissingCodex = await first.codexDotenv.observe(
+    codexObserveRequest,
+  );
+  assert.equal(freshMissingCodex.status, "absent");
+  assert.notEqual(
+    freshMissingCodex.revision,
+    publicMissingCodex.revision,
+    "public Codex missing revision must record create-delete ABA",
+  );
+  assert.equal(
+    (
+      await first.codexDotenv.synchronize(
+        Object.freeze({
+          kind: "codex-dotenv-synchronize",
+          scope: "user",
+          apiOrigin: "https://api.plurum.ai",
+          expectedRevision: freshMissingCodex.revision,
+          expectedStatus: "absent",
+          expectation: codexObserveRequest.expectation,
+          excludedProjectDirectory,
+        }),
+      )
+    ).status,
+    "completed",
+  );
+  writeFileSync(codexDotenvPath, complexCodexBytes, { flag: "w" });
+  if (process.platform !== "win32") {
+    chmodSync(codexDotenvPath, 0o600);
+  }
+  const restoredComplexCodex = await first.codexDotenv.observe(
+    codexObserveRequest,
+  );
+  assert.equal(restoredComplexCodex.status, "mismatched");
+  assert.equal(
+    (
+      await first.codexDotenv.synchronize(
+        Object.freeze({
+          kind: "codex-dotenv-synchronize",
+          scope: "user",
+          apiOrigin: "https://api.plurum.ai",
+          expectedRevision: restoredComplexCodex.revision,
+          expectedStatus: "mismatched",
+          expectation: codexObserveRequest.expectation,
+          excludedProjectDirectory,
+        }),
+      )
+    ).status,
+    "completed",
+  );
+  const restoredCodexDigest = readBoundedDigest(
+    codexDotenvPath,
+    128 * 1024,
+    "native ABI restored Codex dotenv",
+  );
+  assert.equal(restoredCodexDigest.size, expectedComplexCodexBytes.byteLength);
+  assert.equal(
+    restoredCodexDigest.digest,
+    sha256(expectedComplexCodexBytes),
+  );
+
+  const codexHardLink = join(codexHomeDirectory, ".env-hard-link");
+  linkSync(codexDotenvPath, codexHardLink);
+  let rawUnsafeCodex;
+  try {
+    rawUnsafeCodex = rawAdapters.codexDotenv.observe(
+      Object.freeze({
+        excludedProjectDirectory,
+        maxBytes: 128 * 1024,
+        noFollow: true,
+        revisionNonce: "1".repeat(64),
+      }),
+    );
+    assert.equal(rawUnsafeCodex.status, "unsafe");
+    assert.deepEqual(
+      rawAdapters.codexDotenv.synchronize(
+        Object.freeze({
+          disposition: "unchanged",
+          excludedProjectDirectory,
+          expectedRevision: rawUnsafeCodex.revision,
+          maxBytes: 128 * 1024,
+          nextRevisionNonce: "2".repeat(64),
+          noFollow: true,
+          nonce: randomUUID(),
+        }),
+      ),
+      { status: "precondition-failed" },
+      "an unsafe Codex observation must never authorize mutation",
+    );
+    const publicUnsafeCodex =
+      await first.codexDotenv.observe(codexObserveRequest);
+    assert.equal(publicUnsafeCodex.status, "unsafe");
+    assert.deepEqual(
+      await first.codexDotenv.synchronize(
+        Object.freeze({
+          kind: "codex-dotenv-synchronize",
+          scope: "user",
+          apiOrigin: "https://api.plurum.ai",
+          expectedRevision: publicUnsafeCodex.revision,
+          expectedStatus: "mismatched",
+          expectation: codexObserveRequest.expectation,
+          excludedProjectDirectory,
+        }),
+      ),
+      { status: "precondition-failed" },
+      "the public Codex membrane must reject unsafe state through an allowed mutation shape",
+    );
+    assert.deepEqual(
+      await first.codexDotenv.synchronize(
+        Object.freeze({
+          kind: "codex-dotenv-synchronize",
+          scope: "user",
+          apiOrigin: "https://api.plurum.ai",
+          expectedRevision: publicUnsafeCodex.revision,
+          expectedStatus: "unsafe",
+          expectation: codexObserveRequest.expectation,
+          excludedProjectDirectory,
+        }),
+      ),
+      { status: "failed" },
+      "the public Codex membrane must refuse unsafe mutation requests",
+    );
+  } finally {
+    unlinkSync(codexHardLink);
+  }
+  const afterUnsafeCodexDigest = readBoundedDigest(
+    codexDotenvPath,
+    128 * 1024,
+    "native ABI Codex dotenv after unsafe refusal",
+  );
+  assert.equal(
+    afterUnsafeCodexDigest.digest,
+    sha256(expectedComplexCodexBytes),
+  );
+
+  const oversizedCodexBytes = Buffer.alloc(128 * 1024 + 1, 0x78);
+  writeFileSync(codexDotenvPath, oversizedCodexBytes, { flag: "w" });
+  if (process.platform !== "win32") {
+    chmodSync(codexDotenvPath, 0o600);
+  }
+  const oversizedCodexBefore = readBoundedDigest(
+    codexDotenvPath,
+    oversizedCodexBytes.byteLength,
+    "native ABI oversized Codex dotenv before refusal",
+  );
+  const rawOversizedCodex = rawAdapters.codexDotenv.observe(
+    Object.freeze({
+      excludedProjectDirectory,
+      maxBytes: 128 * 1024,
+      noFollow: true,
+      revisionNonce: "3".repeat(64),
+    }),
+  );
+  assert.equal(rawOversizedCodex.status, "oversized");
+  assert.deepEqual(
+    rawAdapters.codexDotenv.synchronize(
+      Object.freeze({
+        disposition: "unchanged",
+        excludedProjectDirectory,
+        expectedRevision: rawOversizedCodex.revision,
+        maxBytes: 128 * 1024,
+        nextRevisionNonce: "4".repeat(64),
+        noFollow: true,
+        nonce: randomUUID(),
+      }),
+    ),
+    { status: "precondition-failed" },
+    "an oversized Codex observation must never authorize mutation",
+  );
+  assert.equal(
+    lstatSync(codexDotenvPath, { bigint: true }).size,
+    BigInt(oversizedCodexBytes.byteLength),
+    "oversized Codex refusal must not change the target",
+  );
+  const publicOversizedCodex =
+    await first.codexDotenv.observe(codexObserveRequest);
+  assert.equal(publicOversizedCodex.status, "ambiguous");
+  assert.deepEqual(
+    await first.codexDotenv.synchronize(
+      Object.freeze({
+        kind: "codex-dotenv-synchronize",
+        scope: "user",
+        apiOrigin: "https://api.plurum.ai",
+        expectedRevision: publicOversizedCodex.revision,
+        expectedStatus: "mismatched",
+        expectation: codexObserveRequest.expectation,
+        excludedProjectDirectory,
+      }),
+    ),
+    { status: "precondition-failed" },
+    "the public Codex membrane must reject oversized state through an allowed mutation shape",
+  );
+  assert.deepEqual(
+    await first.codexDotenv.synchronize(
+      Object.freeze({
+        kind: "codex-dotenv-synchronize",
+        scope: "user",
+        apiOrigin: "https://api.plurum.ai",
+        expectedRevision: publicOversizedCodex.revision,
+        expectedStatus: "ambiguous",
+        expectation: codexObserveRequest.expectation,
+        excludedProjectDirectory,
+      }),
+    ),
+    { status: "failed" },
+    "the public Codex membrane must refuse oversized mutation requests",
+  );
+  const oversizedCodexAfter = readBoundedDigest(
+    codexDotenvPath,
+    oversizedCodexBytes.byteLength,
+    "native ABI oversized Codex dotenv after refusal",
+  );
+  assert.deepEqual(
+    oversizedCodexAfter.evidence,
+    oversizedCodexBefore.evidence,
+    "oversized Codex refusal must retain exact target evidence",
+  );
+  assert.equal(
+    oversizedCodexAfter.digest,
+    oversizedCodexBefore.digest,
+    "oversized Codex refusal must retain exact target content",
+  );
+  writeFileSync(codexDotenvPath, expectedComplexCodexBytes, { flag: "w" });
+  if (process.platform !== "win32") {
+    chmodSync(codexDotenvPath, 0o600);
+  }
+  oversizedCodexBytes.fill(0);
+  const afterOversizedCodexDigest = readBoundedDigest(
+    codexDotenvPath,
+    128 * 1024,
+    "native ABI Codex dotenv after oversized refusal",
+  );
+  assert.equal(
+    afterOversizedCodexDigest.digest,
+    sha256(expectedComplexCodexBytes),
+  );
+  assert.equal(
+    (await first.codexDotenv.observe(codexObserveRequest)).status,
+    "exact",
+  );
   canonicalCodexBytes.fill(0);
   complexCodexBytes.fill(0);
   expectedComplexCodexBytes.fill(0);
@@ -2008,6 +2610,18 @@ async function runChild() {
   if (nestedCredentialLease.status !== "acquired") {
     assert.fail("credential lease must be acquired for nested journal proof");
   }
+  assert.deepEqual(
+    await second.mutation.acquireSetupLease(
+      credentialDirectory,
+      Object.freeze({
+        createDirectory: true,
+        noFollow: true,
+        nonce: randomUUID(),
+      }),
+    ),
+    { status: "busy" },
+    "a second provider must observe live credential-store contention",
+  );
 
   const rawJournalAcquired = rawAdapters.journal.acquire(
     Object.freeze({ nonce: randomUUID() }),
@@ -2065,6 +2679,11 @@ async function runChild() {
   assert.deepEqual(
     rawAdapters.journal.acquire(Object.freeze({ nonce: randomUUID() })),
     { status: "busy" },
+  );
+  assert.deepEqual(
+    await second.journal.acquire(Object.freeze({ nonce: randomUUID() })),
+    { status: "busy" },
+    "a second provider must observe live journal contention",
   );
   rawJournalAcquired.lease.release();
   await nestedCredentialLease.lease.release();
@@ -2200,14 +2819,89 @@ async function runChild() {
     /invalid/iu,
     "raw legacy reads must remain bound to the configured source/path pair",
   );
-  if (process.platform === "win32") {
-    assert.deepEqual(
-      rawAdapters.legacy.read(
-        "hermes",
-        nativeConfiguration.legacyPaths.hermes,
-        legacyOptions,
-      ),
-      { status: "missing" },
+  const legacyDirectory = dirname(nativeConfiguration.legacyPaths.hermes);
+  const legacyDocument = Buffer.from(
+    JSON.stringify({
+      api_key: credentialKey,
+      api_url: "https://api.plurum.ai",
+    }),
+    "utf8",
+  );
+  const legacySetup = await first.mutation.acquireSetupLease(
+    legacyDirectory,
+    Object.freeze({
+      createDirectory: true,
+      noFollow: true,
+      nonce: randomUUID(),
+    }),
+  );
+  assert.equal(legacySetup.status, "acquired");
+  assert.equal(legacySetup.directory, "created");
+  if (legacySetup.status !== "acquired") {
+    assert.fail("native legacy fixture directory must be acquired");
+  }
+  const legacyTransactionId = randomUUID();
+  const legacyCandidateEntry = Object.freeze({
+    kind: "temporary",
+    role: "credential-candidate",
+    transactionId: legacyTransactionId,
+  });
+  const legacyCandidatePath = join(
+    legacyDirectory,
+    `.credentials-candidate-${legacyTransactionId}.tmp`,
+  );
+  try {
+    const missingLegacyCandidate =
+      await legacySetup.lease.observeEntry(legacyCandidateEntry);
+    assert.equal(missingLegacyCandidate.status, "missing");
+    if (missingLegacyCandidate.status !== "missing") {
+      assert.fail("native legacy candidate must begin missing");
+    }
+    const createdLegacyCandidate =
+      await legacySetup.lease.createTemporaryExclusive(
+        Object.freeze({
+          entry: legacyCandidateEntry,
+          expected: missingLegacyCandidate.snapshot,
+        }),
+      );
+    assert.equal(createdLegacyCandidate.status, "created");
+    if (createdLegacyCandidate.status !== "created") {
+      assert.fail("native legacy candidate must be created exclusively");
+    }
+    await createdLegacyCandidate.file.writeAll(legacyDocument);
+    await createdLegacyCandidate.file.sync();
+    await createdLegacyCandidate.file.close();
+    await legacySetup.lease.syncDirectory();
+    renameSync(
+      legacyCandidatePath,
+      nativeConfiguration.legacyPaths.hermes,
+    );
+    await legacySetup.lease.syncDirectory();
+  } finally {
+    await legacySetup.lease.release();
+  }
+  assert.equal(pathExists(legacyCandidatePath), false);
+  exactObjectIdentity(
+    legacyDirectory,
+    "directory",
+    "native ABI legacy directory",
+  );
+  exactObjectIdentity(
+    nativeConfiguration.legacyPaths.hermes,
+    "file",
+    "native ABI legacy credential",
+  );
+
+  const rawLegacy = rawAdapters.legacy.read(
+    "hermes",
+    nativeConfiguration.legacyPaths.hermes,
+    legacyOptions,
+  );
+  if (rawLegacy.status === "unsafe") {
+    assert.equal(
+      expectedTarget,
+      "darwin-arm64",
+      "only Darwin arm64 may inherit an unsafe host-managed temp ancestor",
     );
     assert.deepEqual(
       await first.legacy.read(
@@ -2215,127 +2909,225 @@ async function runChild() {
         nativeConfiguration.legacyPaths.hermes,
         legacyOptions,
       ),
-      { status: "missing" },
+      { status: "unsafe" },
     );
   } else {
-    const legacyDirectory = dirname(nativeConfiguration.legacyPaths.hermes);
-    mkdirSync(legacyDirectory, { mode: 0o700 });
-    chmodSync(legacyDirectory, 0o700);
-    const legacyDocument = Buffer.from(
-      JSON.stringify({
-        api_key: credentialKey,
-        api_url: "https://api.plurum.ai",
-      }),
-      "utf8",
-    );
-    writeFileSync(nativeConfiguration.legacyPaths.hermes, legacyDocument, {
-      flag: "wx",
-      mode: 0o600,
+    assert.equal(rawLegacy.status, "loaded");
+    assert.equal(sha256(rawLegacy.bytes), sha256(legacyDocument));
+    rawLegacy.bytes.fill(0);
+
+    let capturedRawLegacyBytes;
+    const capturingLegacyAdapter = Object.freeze({
+      read(...args) {
+        const result = Reflect.apply(
+          rawAdapters.legacy.read,
+          rawAdapters.legacy,
+          args,
+        );
+        if (result.status === "loaded") {
+          capturedRawLegacyBytes = result.bytes;
+        }
+        return result;
+      },
     });
-    chmodSync(nativeConfiguration.legacyPaths.hermes, 0o600);
-    const rawLegacy = rawAdapters.legacy.read(
+    const capturingModule = Object.freeze({
+      abiVersion: addon.abiVersion,
+      createAdapters(configuration) {
+        assert.deepEqual(configuration, nativeConfiguration);
+        return Object.freeze({
+          codexDotenv: rawAdapters.codexDotenv,
+          journal: rawAdapters.journal,
+          legacy: capturingLegacyAdapter,
+          mutation: rawAdapters.mutation,
+          observation: rawAdapters.observation,
+          read: rawAdapters.read,
+        });
+      },
+      magic: addon.magic,
+      nodeApiVersion: addon.nodeApiVersion,
+      packageVersion: addon.packageVersion,
+      target: addon.target,
+    });
+    const capturingProvider = createNativeCredentialStoreProvider(
+      expectedTarget,
+      () => capturingModule,
+      nativeConfiguration,
+    );
+    const capturingLoaded = capturingProvider.load();
+    assert.equal(capturingLoaded.status, "available");
+    const publicLegacy = await capturingLoaded.legacy.read(
       "hermes",
       nativeConfiguration.legacyPaths.hermes,
       legacyOptions,
     );
-    if (rawLegacy.status === "unsafe") {
-      assert.equal(
-        expectedTarget,
-        "darwin-arm64",
-        "only Darwin arm64 may inherit an unsafe host-managed temp ancestor",
-      );
-      assert.deepEqual(
+    assert.equal(publicLegacy.status, "loaded");
+    assert.equal(sha256(publicLegacy.bytes), sha256(legacyDocument));
+    assert.ok(capturedRawLegacyBytes instanceof Uint8Array);
+    assert.equal(
+      capturedRawLegacyBytes.every((byte) => byte === 0),
+      true,
+      "the native legacy buffer must be wiped by the public membrane",
+    );
+    publicLegacy.bytes.fill(0);
+
+    writeFileSync(nativeConfiguration.legacyPaths.hermes, Buffer.alloc(0));
+    assert.deepEqual(
+      rawAdapters.legacy.read(
+        "hermes",
+        nativeConfiguration.legacyPaths.hermes,
+        legacyOptions,
+      ),
+      { status: "malformed" },
+    );
+    assert.equal(
+      (
         await first.legacy.read(
           "hermes",
           nativeConfiguration.legacyPaths.hermes,
           legacyOptions,
-        ),
-        { status: "unsafe" },
-      );
-      legacyDocument.fill(0);
-    } else {
-      assert.equal(rawLegacy.status, "loaded");
-      assert.equal(sha256(rawLegacy.bytes), sha256(legacyDocument));
-      rawLegacy.bytes.fill(0);
-
-      let capturedRawLegacyBytes;
-      const capturingLegacyAdapter = Object.freeze({
-        read(...args) {
-          const result = Reflect.apply(
-            rawAdapters.legacy.read,
-            rawAdapters.legacy,
-            args,
-          );
-          if (result.status === "loaded") {
-            capturedRawLegacyBytes = result.bytes;
-          }
-          return result;
-        },
-      });
-      const capturingModule = Object.freeze({
-        abiVersion: addon.abiVersion,
-        createAdapters(configuration) {
-          assert.deepEqual(configuration, nativeConfiguration);
-          return Object.freeze({
-            codexDotenv: rawAdapters.codexDotenv,
-            journal: rawAdapters.journal,
-            legacy: capturingLegacyAdapter,
-            mutation: rawAdapters.mutation,
-            observation: rawAdapters.observation,
-            read: rawAdapters.read,
-          });
-        },
-        magic: addon.magic,
-        nodeApiVersion: addon.nodeApiVersion,
-        packageVersion: addon.packageVersion,
-        target: addon.target,
-      });
-      const capturingProvider = createNativeCredentialStoreProvider(
-        expectedTarget,
-        () => capturingModule,
-        nativeConfiguration,
-      );
-      const capturingLoaded = capturingProvider.load();
-      assert.equal(capturingLoaded.status, "available");
-      const publicLegacy = await capturingLoaded.legacy.read(
+        )
+      ).status,
+      "malformed",
+    );
+    const oversizedLegacyBytes = Buffer.alloc(16_385, 0x78);
+    writeFileSync(
+      nativeConfiguration.legacyPaths.hermes,
+      oversizedLegacyBytes,
+    );
+    assert.deepEqual(
+      rawAdapters.legacy.read(
         "hermes",
         nativeConfiguration.legacyPaths.hermes,
         legacyOptions,
-      );
-      assert.equal(publicLegacy.status, "loaded");
-      assert.equal(sha256(publicLegacy.bytes), sha256(legacyDocument));
-      assert.ok(capturedRawLegacyBytes instanceof Uint8Array);
-      assert.equal(
-        capturedRawLegacyBytes.every((byte) => byte === 0),
-        true,
-        "the native legacy buffer must be wiped by the public membrane",
-      );
-      publicLegacy.bytes.fill(0);
-      legacyDocument.fill(0);
-
-      writeFileSync(nativeConfiguration.legacyPaths.hermes, Buffer.alloc(0));
-      assert.deepEqual(
-        rawAdapters.legacy.read(
+      ),
+      { status: "malformed" },
+    );
+    assert.equal(
+      (
+        await first.legacy.read(
           "hermes",
           nativeConfiguration.legacyPaths.hermes,
           legacyOptions,
-        ),
-        { status: "malformed" },
-      );
-      writeFileSync(
-        nativeConfiguration.legacyPaths.hermes,
-        Buffer.alloc(16_385, 0x78),
-      );
-      assert.deepEqual(
-        rawAdapters.legacy.read(
-          "hermes",
-          nativeConfiguration.legacyPaths.hermes,
-          legacyOptions,
-        ),
-        { status: "malformed" },
-      );
+        )
+      ).status,
+      "malformed",
+    );
+    writeFileSync(
+      nativeConfiguration.legacyPaths.hermes,
+      legacyDocument,
+    );
+    oversizedLegacyBytes.fill(0);
+    const restoredLegacy = rawAdapters.legacy.read(
+      "hermes",
+      nativeConfiguration.legacyPaths.hermes,
+      legacyOptions,
+    );
+    assert.equal(restoredLegacy.status, "loaded");
+    if (restoredLegacy.status === "loaded") {
+      assert.equal(sha256(restoredLegacy.bytes), sha256(legacyDocument));
+      restoredLegacy.bytes.fill(0);
     }
   }
+  legacyDocument.fill(0);
+
+  const canonicalCredentialPath = join(
+    credentialDirectory,
+    "credentials.json",
+  );
+  const canonicalCredentialBytes = Buffer.from(
+    `${JSON.stringify(changedCredential, null, 2)}\n`,
+    "utf8",
+  );
+  const canonicalCredentialDigest = readBoundedDigest(
+    canonicalCredentialPath,
+    16_384,
+    "native ABI canonical credential before schema matrix",
+  );
+  assert.equal(
+    canonicalCredentialDigest.size,
+    canonicalCredentialBytes.byteLength,
+  );
+  assert.equal(
+    canonicalCredentialDigest.digest,
+    sha256(canonicalCredentialBytes),
+  );
+  const assertCanonicalReadFailure = async (bytes, code, label) => {
+    writeFileSync(canonicalCredentialPath, bytes, { flag: "w" });
+    if (process.platform !== "win32") {
+      chmodSync(canonicalCredentialPath, 0o600);
+    }
+    await assert.rejects(
+      () => readCredentialStore(first.read, locations),
+      (error) =>
+        error !== null &&
+        typeof error === "object" &&
+        "code" in error &&
+        error.code === code,
+      label,
+    );
+  };
+  const malformedCanonicalBytes = Buffer.from([0xc3, 0x28]);
+  await assertCanonicalReadFailure(
+    malformedCanonicalBytes,
+    "invalid_credential_document",
+    "malformed canonical credentials must fail closed",
+  );
+  malformedCanonicalBytes.fill(0);
+
+  const truncatedCanonicalBytes = Buffer.from(
+    canonicalCredentialBytes.subarray(
+      0,
+      Math.max(1, Math.floor(canonicalCredentialBytes.byteLength / 2)),
+    ),
+  );
+  await assertCanonicalReadFailure(
+    truncatedCanonicalBytes,
+    "invalid_credential_document",
+    "truncated canonical credentials must fail closed",
+  );
+  truncatedCanonicalBytes.fill(0);
+
+  const oversizedCanonicalBytes = Buffer.alloc(16_385, 0x78);
+  await assertCanonicalReadFailure(
+    oversizedCanonicalBytes,
+    "credential_document_too_large",
+    "oversized canonical credentials must fail before reading",
+  );
+  oversizedCanonicalBytes.fill(0);
+
+  const futureCanonicalBytes = Buffer.from(
+    `${JSON.stringify(
+      {
+        ...changedCredential,
+        schema_version: 2,
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  await assertCanonicalReadFailure(
+    futureCanonicalBytes,
+    "unsupported_credential_schema",
+    "future canonical credentials must remain unsupported",
+  );
+  futureCanonicalBytes.fill(0);
+
+  writeFileSync(canonicalCredentialPath, canonicalCredentialBytes, {
+    flag: "w",
+  });
+  if (process.platform !== "win32") {
+    chmodSync(canonicalCredentialPath, 0o600);
+  }
+  const restoredCanonicalDigest = readBoundedDigest(
+    canonicalCredentialPath,
+    16_384,
+    "native ABI restored canonical credential",
+  );
+  assert.equal(
+    restoredCanonicalDigest.digest,
+    sha256(canonicalCredentialBytes),
+  );
 
   const recovered = await recoverCredentialStore(
     Object.freeze({ storage: first.mutation, random }),
@@ -2356,12 +3148,62 @@ async function runChild() {
   assert.equal(loaded.credential.agent_id, credential.agent_id);
   assert.equal(loaded.credential.api_origin, credential.api_origin);
   assert.equal(loaded.credential.agent_name, changedCredential.agent_name);
+  canonicalCredentialBytes.fill(0);
   assert.deepEqual(readdirSync(credentialDirectory).sort(), [
     "codex-dotenv.lock",
     "credentials.json",
     "host-reconciliation.lock",
     "setup.lock",
   ]);
+  assertExactTreeInventory(
+    configuredPlurumHome,
+    [
+      "directory:.",
+      "directory:native-abi-fixtures",
+      "directory:native-abi-fixtures/excluded-project",
+      "directory:native-abi-fixtures/public-cross-pair-store",
+      "directory:native-abi-fixtures/raw-observed-store",
+      "directory:native-credential-state",
+      "file:native-abi-fixtures/public-cross-pair-store/setup.lock",
+      "file:native-abi-fixtures/raw-observed-store/setup.lock",
+      "file:native-abi-fixtures/setup.lock",
+      "file:native-credential-state/codex-dotenv.lock",
+      "file:native-credential-state/credentials.json",
+      "file:native-credential-state/host-reconciliation.lock",
+      "file:native-credential-state/setup.lock",
+      "file:setup.lock",
+    ],
+    "native ABI Plurum authority tree",
+  );
+  assertExactTreeInventory(
+    configuredCodexHome,
+    [
+      "directory:.",
+      "directory:plurum-projection",
+      "file:plurum-projection/.env",
+      "file:setup.lock",
+    ],
+    "native ABI Codex authority tree",
+  );
+  assertExactTreeInventory(
+    disposableHome,
+    [
+      "directory:.",
+      "directory:plurum-native-legacy",
+      "file:plurum-native-legacy/plurum.json",
+      "file:plurum-native-legacy/setup.lock",
+    ],
+    "native ABI disposable-home authority tree",
+  );
+  assertExactTreeInventory(
+    legacyRoot,
+    [
+      "directory:.",
+      "file:plurum.json",
+      "file:setup.lock",
+    ],
+    "native ABI legacy authority tree",
+  );
 }
 
 function binaryName() {
