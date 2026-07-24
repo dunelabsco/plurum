@@ -16,6 +16,11 @@ name = "plurum-medium-integrity-test-launcher"
 path = "src/bin/medium-integrity-test-launcher.rs"
 required-features = ["test-support"]
 
+[[bin]]
+name = "plurum-runtime-identity-test-probe"
+path = "src/bin/runtime-identity-test-probe.rs"
+required-features = ["test-support"]
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
   "Wdk_Storage_FileSystem",

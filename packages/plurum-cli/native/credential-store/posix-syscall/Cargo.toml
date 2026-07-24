@@ -1,0 +1,14 @@
+[package]
+name = "plurum-native-posix-syscall"
+version = "0.0.0-development"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+publish = false
+description = "Audited POSIX identity primitives for Plurum's native runtime"
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+libc = "=0.2.186"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

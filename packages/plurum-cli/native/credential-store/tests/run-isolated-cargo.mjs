@@ -336,8 +336,7 @@ const operationArguments = {
     "plurum-windows-syscall",
     "--features",
     "test-support",
-    "--bin",
-    "plurum-medium-integrity-test-launcher",
+    "--bins",
   ],
   msrv: [
     "check",

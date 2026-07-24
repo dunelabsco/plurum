@@ -28,6 +28,17 @@ const posixPlatformSourcePath = join(
 );
 const macosAclManifestPath = join(crateRoot, "macos-acl", "Cargo.toml");
 const macosAclSourcePath = join(crateRoot, "macos-acl", "src", "lib.rs");
+const posixSyscallManifestPath = join(
+  crateRoot,
+  "posix-syscall",
+  "Cargo.toml",
+);
+const posixSyscallSourcePath = join(
+  crateRoot,
+  "posix-syscall",
+  "src",
+  "lib.rs",
+);
 const secretMemoryManifestPath = join(
   crateRoot,
   "secret-memory",
@@ -64,7 +75,15 @@ const windowsMediumLauncherSourcePath = join(
   "bin",
   "medium-integrity-test-launcher.rs",
 );
+const windowsRuntimeProbeSourcePath = join(
+  crateRoot,
+  "windows-syscall",
+  "src",
+  "bin",
+  "runtime-identity-test-probe.rs",
+);
 const bridgeSourcePath = join(crateRoot, "src", "bridge.rs");
+const runtimeSourcePath = join(crateRoot, "src", "runtime.rs");
 const targetMapPath = join(crateRoot, "src", "target_map.rs");
 const isolationMarker = "plurum-native-isolation-v1\n";
 
@@ -179,6 +198,8 @@ for (const path of [
   posixPlatformSourcePath,
   macosAclManifestPath,
   macosAclSourcePath,
+  posixSyscallManifestPath,
+  posixSyscallSourcePath,
   secretMemoryManifestPath,
   secretMemorySourcePath,
   windowsSourcePath,
@@ -186,7 +207,9 @@ for (const path of [
   windowsSyscallManifestPath,
   windowsSyscallSourcePath,
   windowsMediumLauncherSourcePath,
+  windowsRuntimeProbeSourcePath,
   bridgeSourcePath,
+  runtimeSourcePath,
   targetMapPath,
 ]) {
   const metadata = lstatSync(path);
@@ -256,6 +279,7 @@ assert.deepEqual(
   [
     "plurum-native-credential-store",
     "plurum-native-macos-acl",
+    "plurum-native-posix-syscall",
     "plurum-native-secret-memory",
     "plurum-windows-syscall",
   ],
@@ -329,6 +353,15 @@ assert.deepEqual(dependencies, [
     target: 'cfg(target_os = "macos")',
   },
   {
+    name: "plurum-native-posix-syscall",
+    requirement: "*",
+    kind: null,
+    optional: false,
+    defaultFeatures: true,
+    features: [],
+    target: 'cfg(any(target_os = "macos", target_os = "linux"))',
+  },
+  {
     name: "plurum-native-secret-memory",
     requirement: "*",
     kind: null,
@@ -361,7 +394,7 @@ assert.deepEqual(dependencies, [
     kind: null,
     optional: false,
     defaultFeatures: false,
-    features: ["fs", "process", "std"],
+    features: ["fs", "process", "std", "thread"],
     target: 'cfg(any(target_os = "macos", target_os = "linux"))',
   },
   {
@@ -522,6 +555,83 @@ assert.ok(
   "secret-memory must resolve through the audited napi package",
 );
 
+const posixSyscallDependency = rootNode.deps.find(
+  ({ name }) => name === "plurum_native_posix_syscall",
+);
+assert.ok(
+  posixSyscallDependency,
+  "Cargo resolution must contain the POSIX identity syscall boundary",
+);
+const posixSyscallPackage = cargo.packages.find(
+  ({ id }) => id === posixSyscallDependency.pkg,
+);
+assert.ok(
+  posixSyscallPackage,
+  "Cargo metadata must describe the local POSIX syscall boundary",
+);
+assert.equal(
+  realpathSync(posixSyscallPackage.manifest_path),
+  realpathSync(posixSyscallManifestPath),
+);
+assert.equal(posixSyscallPackage.name, "plurum-native-posix-syscall");
+assert.equal(posixSyscallPackage.version, "0.0.0-development");
+assert.equal(posixSyscallPackage.edition, "2021");
+assert.equal(posixSyscallPackage.rust_version, "1.88");
+assert.equal(posixSyscallPackage.license, "Apache-2.0");
+assert.deepEqual(posixSyscallPackage.publish, []);
+assert.deepEqual(posixSyscallPackage.features, {});
+assert.deepEqual(
+  posixSyscallPackage.dependencies.map((dependency) => ({
+    name: dependency.name,
+    requirement: dependency.req,
+    kind: dependency.kind,
+    optional: dependency.optional,
+    defaultFeatures: dependency.uses_default_features,
+    features: [...dependency.features].sort(),
+    target: dependency.target,
+  })),
+  [
+    {
+      name: "libc",
+      requirement: "=0.2.186",
+      kind: null,
+      optional: false,
+      defaultFeatures: true,
+      features: [],
+      target: 'cfg(any(target_os = "macos", target_os = "linux"))',
+    },
+  ],
+);
+assert.equal(posixSyscallPackage.targets.length, 1);
+const posixSyscallLibrary = posixSyscallPackage.targets[0];
+assert.deepEqual(posixSyscallLibrary.kind, ["lib"]);
+assert.deepEqual(posixSyscallLibrary.crate_types, ["lib"]);
+assert.equal(
+  realpathSync(posixSyscallLibrary.src_path),
+  realpathSync(posixSyscallSourcePath),
+);
+const posixSyscallNode = cargo.resolve.nodes.find(
+  ({ id }) => id === posixSyscallPackage.id,
+);
+assert.ok(
+  posixSyscallNode,
+  "Cargo resolution must describe the POSIX syscall boundary",
+);
+assert.deepEqual(posixSyscallNode.features, []);
+const libcDependency = posixSyscallNode.deps.find(
+  ({ name }) => name === "libc",
+);
+assert.ok(
+  libcDependency,
+  "POSIX identity syscalls must resolve through the pinned libc package",
+);
+const libcPackage = cargo.packages.find(
+  ({ id }) => id === libcDependency.pkg,
+);
+assert.ok(libcPackage, "Cargo metadata must describe libc");
+assert.equal(libcPackage.version, "0.2.186");
+assert.equal(libcPackage.rust_version, "1.65");
+
 const windowsSyscallDependency = rootNode.deps.find(
   ({ name }) => name === "plurum_windows_syscall",
 );
@@ -594,9 +704,9 @@ assert.equal(
   realpathSync(windowsSyscallLibrary.src_path),
   realpathSync(windowsSyscallSourcePath),
 );
-assert.equal(windowsSyscallPackage.targets.length, 2);
-const windowsMediumLauncher = windowsSyscallPackage.targets.find(({ kind }) =>
-  kind.includes("bin"),
+assert.equal(windowsSyscallPackage.targets.length, 3);
+const windowsMediumLauncher = windowsSyscallPackage.targets.find(
+  ({ name }) => name === "plurum-medium-integrity-test-launcher",
 );
 assert.ok(
   windowsMediumLauncher,
@@ -612,6 +722,20 @@ assert.deepEqual(windowsMediumLauncher["required-features"], ["test-support"]);
 assert.equal(
   realpathSync(windowsMediumLauncher.src_path),
   realpathSync(windowsMediumLauncherSourcePath),
+);
+const windowsRuntimeProbe = windowsSyscallPackage.targets.find(
+  ({ name }) => name === "plurum-runtime-identity-test-probe",
+);
+assert.ok(
+  windowsRuntimeProbe,
+  "Windows syscall boundary must expose one runtime-identity test probe",
+);
+assert.deepEqual(windowsRuntimeProbe.kind, ["bin"]);
+assert.deepEqual(windowsRuntimeProbe.crate_types, ["bin"]);
+assert.deepEqual(windowsRuntimeProbe["required-features"], ["test-support"]);
+assert.equal(
+  realpathSync(windowsRuntimeProbe.src_path),
+  realpathSync(windowsRuntimeProbeSourcePath),
 );
 const windowsSyscallNode = cargo.resolve.nodes.find(
   ({ id }) => id === windowsSyscallPackage.id,
@@ -712,6 +836,7 @@ assert.deepEqual([...rustixNode.features].sort(), [
   "fs",
   "process",
   "std",
+  "thread",
 ]);
 
 const sha2Dependency = rootNode.deps.find(({ name }) => name === "sha2");

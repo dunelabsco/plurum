@@ -186,9 +186,92 @@ impl ProcessIdentity {
         )
     }
 
-    fn verify(self) -> Result<(), PosixStoreError> {
+    fn verify(&self) -> Result<(), PosixStoreError> {
         let current = Self::capture()?;
-        if current == self {
+        if current == *self {
+            Ok(())
+        } else {
+            Err(PosixStoreError::Lost)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct StandardUserProcessIdentity {
+    filesystem: ProcessIdentity,
+    pid: process::Pid,
+    #[cfg(target_os = "linux")]
+    thread_id: process::Pid,
+}
+
+impl StandardUserProcessIdentity {
+    fn validate(
+        saved_identity_unprivileged: bool,
+        capabilities_empty: bool,
+        privilege_environment_detected: bool,
+    ) -> Result<(), PosixStoreError> {
+        if !saved_identity_unprivileged || !capabilities_empty || privilege_environment_detected {
+            return Err(PosixStoreError::Unsafe);
+        }
+        Ok(())
+    }
+
+    fn capture_once() -> Result<Self, PosixStoreError> {
+        let filesystem = ProcessIdentity::capture()?;
+        let saved_identity_unprivileged =
+            plurum_native_posix_syscall::saved_identity_is_unprivileged(
+                filesystem.uid,
+                filesystem.gid,
+            )
+            .map_err(|_| PosixStoreError::Unsupported)?;
+        #[cfg(target_os = "linux")]
+        let thread_id = rustix::thread::gettid();
+        #[cfg(target_os = "linux")]
+        let capabilities_empty = {
+            let capabilities = rustix::thread::capabilities(Some(thread_id))
+                .map_err(|_| PosixStoreError::Unsupported)?;
+            capabilities.effective.is_empty()
+                && capabilities.permitted.is_empty()
+                && capabilities.inheritable.is_empty()
+        };
+        #[cfg(target_os = "macos")]
+        let capabilities_empty = true;
+        let privilege_environment_detected = [
+            "SUDO_UID",
+            "SUDO_GID",
+            "SUDO_USER",
+            "SUDO_COMMAND",
+            "DOAS_USER",
+            "PKEXEC_UID",
+        ]
+        .into_iter()
+        .any(|name| std::env::var_os(name).is_some());
+        Self::validate(
+            saved_identity_unprivileged,
+            capabilities_empty,
+            privilege_environment_detected,
+        )?;
+        Ok(Self {
+            filesystem,
+            pid: process::getpid(),
+            #[cfg(target_os = "linux")]
+            thread_id,
+        })
+    }
+
+    pub(crate) fn capture() -> Result<Self, PosixStoreError> {
+        let first = Self::capture_once()?;
+        let second = Self::capture_once()?;
+        if first == second {
+            Ok(first)
+        } else {
+            Err(PosixStoreError::Lost)
+        }
+    }
+
+    pub(crate) fn verify(&self) -> Result<(), PosixStoreError> {
+        let current = Self::capture()?;
+        if current == *self {
             Ok(())
         } else {
             Err(PosixStoreError::Lost)
@@ -3736,6 +3819,79 @@ mod tests {
                 Err(PosixStoreError::Unsafe)
             );
         }
+    }
+
+    #[test]
+    fn standard_user_process_identity_requires_saved_id_capability_and_environment_proof() {
+        let filesystem = ProcessIdentity::validate(501, 501, 20, 20, false, false)
+            .expect("base filesystem identity must be safe");
+        let pid = process::Pid::from_raw(4_242).expect("test pid must be valid");
+        let expected = StandardUserProcessIdentity {
+            filesystem,
+            pid,
+            #[cfg(target_os = "linux")]
+            thread_id: pid,
+        };
+        assert_eq!(
+            StandardUserProcessIdentity::validate(true, true, false),
+            Ok(()),
+        );
+        assert_eq!(expected.filesystem, filesystem);
+        assert_eq!(expected.pid, pid);
+
+        for (saved_identity_unprivileged, capabilities_empty, privilege_environment_detected) in [
+            (false, true, false),
+            (true, false, false),
+            (true, true, true),
+            (false, false, false),
+            (false, true, true),
+            (true, false, true),
+            (false, false, true),
+        ] {
+            assert_eq!(
+                StandardUserProcessIdentity::validate(
+                    saved_identity_unprivileged,
+                    capabilities_empty,
+                    privilege_environment_detected,
+                ),
+                Err(PosixStoreError::Unsafe),
+            );
+        }
+
+        let other_pid = process::Pid::from_raw(4_243).expect("second test pid must be valid");
+        assert_ne!(
+            expected,
+            StandardUserProcessIdentity {
+                filesystem,
+                pid: other_pid,
+                #[cfg(target_os = "linux")]
+                thread_id: pid,
+            },
+        );
+    }
+
+    #[test]
+    fn standard_user_process_identity_detects_pid_loss() {
+        let mut identity =
+            StandardUserProcessIdentity::capture().expect("test process must be a standard user");
+        let raw = identity.pid.as_raw_pid();
+        identity.pid =
+            process::Pid::from_raw(raw.checked_add(1).expect("test pid must be incrementable"))
+                .expect("changed test pid must be valid");
+        assert_eq!(identity.verify(), Err(PosixStoreError::Lost));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn standard_user_process_identity_is_bound_to_the_capturing_linux_thread() {
+        let identity =
+            StandardUserProcessIdentity::capture().expect("test process must be a standard user");
+        assert_eq!(
+            std::thread::spawn(move || identity.verify())
+                .join()
+                .expect("identity verification thread must not panic"),
+            Err(PosixStoreError::Lost),
+        );
     }
 
     #[test]

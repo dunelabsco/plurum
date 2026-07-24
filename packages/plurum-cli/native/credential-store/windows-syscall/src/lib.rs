@@ -19,27 +19,35 @@ use windows_sys::Win32::Foundation::GENERIC_WRITE;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, LocalFree, RtlNtStatusToDosError, ERROR_ALREADY_EXISTS,
     ERROR_FILE_EXISTS, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_LOCK_VIOLATION,
-    ERROR_NOT_SUPPORTED, ERROR_NO_TOKEN, HANDLE, INVALID_HANDLE_VALUE,
+    ERROR_NOT_SUPPORTED, ERROR_NO_TOKEN, HANDLE, INVALID_HANDLE_VALUE, LUID,
 };
 use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
 #[cfg(feature = "test-support")]
 use windows_sys::Win32::Security::Authorization::{SetSecurityInfo, SE_KERNEL_OBJECT};
+#[cfg(feature = "test-support")]
+use windows_sys::Win32::Security::SecurityImpersonation;
+#[cfg(any(test, feature = "test-support"))]
+use windows_sys::Win32::Security::TokenElevationTypeFull;
+#[cfg(test)]
+use windows_sys::Win32::Security::TokenImpersonation;
 use windows_sys::Win32::Security::{
     AclSizeInformation, AddAccessAllowedAceEx, EqualSid, GetAce, GetAclInformation, GetLengthSid,
     GetSecurityDescriptorControl, GetSecurityDescriptorLength, GetTokenInformation, InitializeAcl,
     InitializeSecurityDescriptor, IsValidAcl, IsValidSid, IsWellKnownSid,
     SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
-    TokenIntegrityLevel, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
-    WinMediumLabelSid, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION,
-    CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, INHERITED_ACE, INHERIT_ONLY_ACE,
-    LABEL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSID,
-    SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SE_DACL_PROTECTED, SID, SYSTEM_MANDATORY_LABEL_ACE,
-    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
+    TokenElevation, TokenElevationType, TokenElevationTypeDefault, TokenElevationTypeLimited,
+    TokenIntegrityLevel, TokenPrimary, TokenStatistics, TokenUser, WinBuiltinAdministratorsSid,
+    WinLocalSystemSid, WinMediumLabelSid, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION,
+    ACL_SIZE_INFORMATION, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, INHERITED_ACE,
+    INHERIT_ONLY_ACE, LABEL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
+    PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SE_DACL_PROTECTED, SID,
+    SYSTEM_MANDATORY_LABEL_ACE, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_MANDATORY_LABEL,
+    TOKEN_QUERY, TOKEN_STATISTICS, TOKEN_TYPE, TOKEN_USER,
 };
 #[cfg(feature = "test-support")]
 use windows_sys::Win32::Security::{
-    AddMandatoryAce, CreateWellKnownSid, SetTokenInformation, WinWorldSid,
-    PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES,
+    AddMandatoryAce, CreateWellKnownSid, ImpersonateSelf, RevertToSelf, SetTokenInformation,
+    WinWorldSid, PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES,
     TOKEN_ADJUST_DEFAULT, UNPROTECTED_DACL_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{
@@ -65,7 +73,7 @@ use windows_sys::Win32::System::SystemServices::{
     SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+    GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, OpenProcessToken, OpenThreadToken,
 };
 #[cfg(feature = "test-support")]
 use windows_sys::Win32::System::IO::DeviceIoControl;
@@ -164,10 +172,14 @@ impl ProcessIdentity {
     fn capture_with_integrity_requirement(require_exact_medium: bool) -> Result<Self> {
         ensure_no_impersonation()?;
         let token = OwnedHandle::current_process_token()?;
-        if require_exact_medium && !token_integrity_is_exact_medium(token.0)? {
+        Self::capture_from_token(token.0, require_exact_medium)
+    }
+
+    fn capture_from_token(token: HANDLE, require_exact_medium: bool) -> Result<Self> {
+        if require_exact_medium && !token_integrity_is_exact_medium(token)? {
             return Err(WinError::code(ErrorKind::Unsafe, 5));
         }
-        let (token_user, token_user_length) = token_information_storage(token.0, TokenUser)?;
+        let (token_user, token_user_length) = token_information_storage(token, TokenUser)?;
         if token_user_length < size_of::<TOKEN_USER>() {
             return Err(WinError::code(ErrorKind::Other, ERROR_INVALID_PARAMETER));
         }
@@ -234,6 +246,100 @@ impl ProcessIdentity {
             std::slice::from_raw_parts(self.sid_storage.as_ptr().cast::<u8>(), self.sid_length)
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LuidEvidence {
+    low_part: u32,
+    high_part: i32,
+}
+
+impl From<LUID> for LuidEvidence {
+    fn from(value: LUID) -> Self {
+        Self {
+            low_part: value.LowPart,
+            high_part: value.HighPart,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PrimaryTokenEvidence {
+    token_id: LuidEvidence,
+    modified_id: LuidEvidence,
+    authentication_id: LuidEvidence,
+    token_type: TOKEN_TYPE,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StandardUserTokenSnapshot {
+    process: ProcessIdentity,
+    token: PrimaryTokenEvidence,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StandardUserProcessIdentity {
+    pid: u32,
+    process: ProcessIdentity,
+    token: PrimaryTokenEvidence,
+}
+
+impl StandardUserProcessIdentity {
+    pub fn capture() -> Result<Self> {
+        ensure_no_impersonation()?;
+        // SAFETY: GetCurrentProcessId has no preconditions.
+        let pid = unsafe { GetCurrentProcessId() };
+        if pid == 0 {
+            return Err(WinError::code(ErrorKind::Other, ERROR_INVALID_PARAMETER));
+        }
+
+        let initial_token = OwnedHandle::current_process_token()?;
+        let initial = standard_user_token_snapshot(initial_token.0)?;
+        let final_token = OwnedHandle::current_process_token()?;
+        let final_snapshot = standard_user_token_snapshot(final_token.0)?;
+        ensure_no_impersonation()?;
+        if final_snapshot != initial {
+            return Err(WinError::code(ErrorKind::Conflict, 5));
+        }
+
+        Ok(Self {
+            pid,
+            process: initial.process,
+            token: initial.token,
+        })
+    }
+
+    pub fn verify(&self) -> Result<()> {
+        let current = Self::capture()?;
+        if current == *self {
+            Ok(())
+        } else {
+            Err(WinError::code(ErrorKind::Conflict, 5))
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn with_changed_token_generation_for_tests(mut self) -> Self {
+        self.token.modified_id.low_part = self.token.modified_id.low_part.wrapping_add(1);
+        self
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TestElevationType {
+    Default,
+    Full,
+    Limited,
+    Other,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TestProcessTokenClassification {
+    pub exact_medium_integrity: bool,
+    pub elevated: bool,
+    pub elevation_type: TestElevationType,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1125,6 +1231,69 @@ fn token_integrity_is_exact_medium(handle: HANDLE) -> Result<bool> {
     )
 }
 
+fn standard_elevation_values(token_is_elevated: u32, elevation_type: TOKEN_ELEVATION_TYPE) -> bool {
+    token_is_elevated == 0
+        && (elevation_type == TokenElevationTypeDefault
+            || elevation_type == TokenElevationTypeLimited)
+}
+
+fn token_elevation_values(handle: HANDLE) -> Result<(u32, TOKEN_ELEVATION_TYPE)> {
+    let (elevation_storage, elevation_length) = token_information_storage(handle, TokenElevation)?;
+    if elevation_length != size_of::<TOKEN_ELEVATION>() {
+        return Err(WinError::code(ErrorKind::Other, ERROR_INVALID_PARAMETER));
+    }
+    // SAFETY: storage is aligned and has the exact successful TokenElevation size.
+    let elevation = unsafe { &*(elevation_storage.as_ptr().cast::<TOKEN_ELEVATION>()) };
+
+    let (type_storage, type_length) = token_information_storage(handle, TokenElevationType)?;
+    if type_length != size_of::<TOKEN_ELEVATION_TYPE>() {
+        return Err(WinError::code(ErrorKind::Other, ERROR_INVALID_PARAMETER));
+    }
+    // SAFETY: storage is aligned and has the exact successful TokenElevationType size.
+    let elevation_type = unsafe { *(type_storage.as_ptr().cast::<TOKEN_ELEVATION_TYPE>()) };
+
+    Ok((elevation.TokenIsElevated, elevation_type))
+}
+
+fn token_elevation_is_standard(handle: HANDLE) -> Result<bool> {
+    let (token_is_elevated, elevation_type) = token_elevation_values(handle)?;
+    Ok(standard_elevation_values(token_is_elevated, elevation_type))
+}
+
+fn primary_token_evidence(handle: HANDLE) -> Result<PrimaryTokenEvidence> {
+    let (storage, length) = token_information_storage(handle, TokenStatistics)?;
+    if length != size_of::<TOKEN_STATISTICS>() {
+        return Err(WinError::code(ErrorKind::Other, ERROR_INVALID_PARAMETER));
+    }
+    // SAFETY: storage is aligned and has the exact successful TokenStatistics size.
+    let statistics = unsafe { &*(storage.as_ptr().cast::<TOKEN_STATISTICS>()) };
+    Ok(PrimaryTokenEvidence {
+        token_id: statistics.TokenId.into(),
+        modified_id: statistics.ModifiedId.into(),
+        authentication_id: statistics.AuthenticationId.into(),
+        token_type: statistics.TokenType,
+    })
+}
+
+fn standard_user_token_snapshot(handle: HANDLE) -> Result<StandardUserTokenSnapshot> {
+    let before = primary_token_evidence(handle)?;
+    if before.token_type != TokenPrimary
+        || !token_integrity_is_exact_medium(handle)?
+        || !token_elevation_is_standard(handle)?
+    {
+        return Err(WinError::code(ErrorKind::Unsafe, 5));
+    }
+    let process = ProcessIdentity::capture_from_token(handle, false)?;
+    let after = primary_token_evidence(handle)?;
+    if after != before {
+        return Err(WinError::code(ErrorKind::Conflict, 5));
+    }
+    Ok(StandardUserTokenSnapshot {
+        process,
+        token: before,
+    })
+}
+
 #[cfg(feature = "test-support")]
 pub fn lower_process_integrity_to_medium_for_tests() -> Result<()> {
     ensure_no_impersonation()?;
@@ -1176,6 +1345,71 @@ pub fn lower_process_integrity_to_medium_for_tests() -> Result<()> {
         Ok(())
     } else {
         Err(WinError::code(ErrorKind::Unsafe, 5))
+    }
+}
+
+#[cfg(feature = "test-support")]
+pub fn current_process_token_classification_for_tests() -> Result<TestProcessTokenClassification> {
+    ensure_no_impersonation()?;
+    let token = OwnedHandle::current_process_token()?;
+    let (token_is_elevated, elevation_type) = token_elevation_values(token.0)?;
+    let elevation_type = if elevation_type == TokenElevationTypeDefault {
+        TestElevationType::Default
+    } else if elevation_type == TokenElevationTypeFull {
+        TestElevationType::Full
+    } else if elevation_type == TokenElevationTypeLimited {
+        TestElevationType::Limited
+    } else {
+        TestElevationType::Other
+    };
+    Ok(TestProcessTokenClassification {
+        exact_medium_integrity: token_integrity_is_exact_medium(token.0)?,
+        elevated: token_is_elevated != 0,
+        elevation_type,
+    })
+}
+
+#[cfg(feature = "test-support")]
+pub struct TestImpersonationGuard {
+    active: bool,
+}
+
+#[cfg(feature = "test-support")]
+impl TestImpersonationGuard {
+    pub fn finish(mut self) -> Result<()> {
+        self.revert()?;
+        ensure_no_impersonation()
+    }
+
+    fn revert(&mut self) -> Result<()> {
+        if self.active {
+            // SAFETY: this guard is created only after ImpersonateSelf succeeds
+            // on the current thread.
+            if unsafe { RevertToSelf() } == 0 {
+                return Err(WinError::last(ErrorKind::Other));
+            }
+            self.active = false;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl Drop for TestImpersonationGuard {
+    fn drop(&mut self) {
+        let _ = self.revert();
+    }
+}
+
+#[cfg(feature = "test-support")]
+pub fn impersonate_self_for_tests() -> Result<TestImpersonationGuard> {
+    ensure_no_impersonation()?;
+    // SAFETY: the requested level is a documented impersonation level and the
+    // current thread is known not to hold a thread token.
+    if unsafe { ImpersonateSelf(SecurityImpersonation) } == 0 {
+        Err(WinError::last(ErrorKind::Other))
+    } else {
+        Ok(TestImpersonationGuard { active: true })
     }
 }
 
@@ -1696,4 +1930,73 @@ fn nul_terminated_path(path: &Path) -> Result<Vec<u16>> {
     }
     value.push(0);
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_luid(low_part: u32, high_part: i32) -> LuidEvidence {
+        LuidEvidence {
+            low_part,
+            high_part,
+        }
+    }
+
+    fn test_standard_user_process_identity() -> StandardUserProcessIdentity {
+        StandardUserProcessIdentity {
+            pid: 4_242,
+            process: ProcessIdentity {
+                sid_storage: vec![0x0403_0201],
+                sid_length: 4,
+            },
+            token: PrimaryTokenEvidence {
+                token_id: test_luid(11, 12),
+                modified_id: test_luid(21, 22),
+                authentication_id: test_luid(31, 32),
+                token_type: TokenPrimary,
+            },
+        }
+    }
+
+    #[test]
+    fn standard_user_elevation_policy_accepts_only_non_elevated_default_or_limited_tokens() {
+        assert!(standard_elevation_values(0, TokenElevationTypeDefault));
+        assert!(standard_elevation_values(0, TokenElevationTypeLimited));
+
+        for (elevated, elevation_type) in [
+            (1, TokenElevationTypeDefault),
+            (1, TokenElevationTypeLimited),
+            (0, TokenElevationTypeFull),
+            (1, TokenElevationTypeFull),
+            (u32::MAX, TokenElevationTypeDefault),
+            (0, 0),
+            (0, 4),
+            (0, i32::MAX),
+        ] {
+            assert!(!standard_elevation_values(elevated, elevation_type));
+        }
+    }
+
+    #[test]
+    fn standard_user_identity_binds_every_primary_token_evidence_field() {
+        let expected = test_standard_user_process_identity();
+        assert_eq!(expected, expected.clone());
+
+        let mut changed_token_id = expected.clone();
+        changed_token_id.token.token_id = test_luid(41, 42);
+        assert_ne!(changed_token_id, expected);
+
+        let mut changed_modified_id = expected.clone();
+        changed_modified_id.token.modified_id = test_luid(51, 52);
+        assert_ne!(changed_modified_id, expected);
+
+        let mut changed_authentication_id = expected.clone();
+        changed_authentication_id.token.authentication_id = test_luid(61, 62);
+        assert_ne!(changed_authentication_id, expected);
+
+        let mut changed_token_type = expected.clone();
+        changed_token_type.token.token_type = TokenImpersonation;
+        assert_ne!(changed_token_type, expected);
+    }
 }

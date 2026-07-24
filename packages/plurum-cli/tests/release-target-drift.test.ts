@@ -248,6 +248,14 @@ function parseWorkflowSteps(job: readonly string[]): NativeWorkflowStep[] {
       steps.push(current);
       continue;
     }
+    if (
+      line === "" &&
+      current !== undefined &&
+      current.lines.includes("        run: |")
+    ) {
+      current.lines.push(line);
+      continue;
+    }
     if (current === undefined || !/^ {8,}\S/u.test(line)) {
       throw new Error(`invalid native workflow step line: ${JSON.stringify(line)}`);
     }
@@ -524,6 +532,29 @@ describe("native release target drift", () => {
       "      - name: Build the native foundation",
       "        run: node native/credential-store/tests/run-isolated-cargo.mjs build",
     ]);
+    const windowsRuntimeEvidence = uniqueNamedStep(
+      workflowSteps,
+      "Verify native Windows runtime identity evidence",
+    );
+    for (const line of [
+      "        if: matrix.target == 'win32-x64-msvc' && runner.environment == 'github-hosted'",
+      "          PLURUM_WINDOWS_RUNTIME_EVIDENCE: github-windows-2025-x64-v1",
+      '            $env:RUNNER_ENVIRONMENT -cne "github-hosted" -or',
+      '            "ambient-elevated-rejected",',
+      '            "lowered-elevated-rejected"',
+      '              "standard-default-stable",',
+      '              "self-impersonation-rejected",',
+      '              "standard-token-change-conflict"',
+      "              if (-not $activeProcess.WaitForExit(60000)) {",
+      "              -AccountExpires $accountExpiration `",
+    ]) {
+      expect(windowsRuntimeEvidence.lines).toContain(line);
+    }
+    expect(
+      workflowSteps.filter((step) =>
+        step.lines.some((line) => line.includes("New-LocalUser")),
+      ),
+    ).toEqual([windowsRuntimeEvidence]);
     expect(
       uniqueNamedStep(workflowSteps, "Verify the Node 22.12 ABI floor").lines,
     ).toEqual([

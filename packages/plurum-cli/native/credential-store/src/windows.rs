@@ -18,6 +18,8 @@ mod dotenv;
 mod journal;
 mod mutation;
 
+pub(crate) type StandardUserProcessIdentity = plurum_windows_syscall::StandardUserProcessIdentity;
+
 pub(crate) use dotenv::{
     observe_codex_dotenv, synchronize_codex_dotenv, CodexDotenvObservation, CodexDotenvState,
     CodexDotenvSynchronizeDisposition, CodexDotenvSynchronizeResult,

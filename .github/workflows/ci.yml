@@ -191,9 +191,354 @@ jobs:
         run: node native/credential-store/tests/run-isolated-cargo.mjs clippy
       - name: Test the native foundation
         run: node native/credential-store/tests/run-isolated-cargo.mjs test
-      - name: Build the test-only Windows ABI launcher
+      - name: Build the test-only Windows launchers
         if: matrix.target == 'win32-x64-msvc'
         run: node native/credential-store/tests/run-isolated-cargo.mjs launcher
+      - name: Verify native Windows runtime identity evidence
+        if: matrix.target == 'win32-x64-msvc' && runner.environment == 'github-hosted'
+        shell: pwsh
+        env:
+          PLURUM_WINDOWS_RUNTIME_EVIDENCE: github-windows-2025-x64-v1
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (
+            $env:CI -cne "true" -or
+            $env:GITHUB_ACTIONS -cne "true" -or
+            $env:RUNNER_OS -cne "Windows" -or
+            $env:RUNNER_ENVIRONMENT -cne "github-hosted" -or
+            $env:PLURUM_NATIVE_RUST_HOST -cne "x86_64-pc-windows-msvc" -or
+            $env:PLURUM_WINDOWS_RUNTIME_EVIDENCE -cne "github-windows-2025-x64-v1"
+          ) {
+            throw "Windows runtime evidence is restricted to the exact GitHub Actions row"
+          }
+
+          $runnerTemporaryItem = Get-Item -LiteralPath $env:RUNNER_TEMP -Force
+          $isolationRootItem = Get-Item -LiteralPath $env:PLURUM_NATIVE_ISOLATION_ROOT -Force
+          if (
+            -not $runnerTemporaryItem.PSIsContainer -or
+            ($runnerTemporaryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            -not $isolationRootItem.PSIsContainer -or
+            ($isolationRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+          ) {
+            throw "Windows runtime evidence root directories are invalid"
+          }
+          $runnerTemporary = $runnerTemporaryItem.FullName
+          $isolationRoot = $isolationRootItem.FullName
+          if (
+            [IO.Path]::GetFileName($isolationRoot) -cne "plurum-native-isolation" -or
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+              [IO.Path]::GetDirectoryName($isolationRoot),
+              $runnerTemporary
+            )
+          ) {
+            throw "Windows runtime evidence isolation root is invalid"
+          }
+          $marker = Join-Path $isolationRoot ".plurum-native-isolation"
+          $markerItem = Get-Item -LiteralPath $marker -Force
+          if (
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+              [IO.Path]::GetDirectoryName($markerItem.FullName),
+              $isolationRoot
+            ) -or
+            ($markerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            [IO.File]::ReadAllText($markerItem.FullName) -cne "plurum-native-isolation-v1`n"
+          ) {
+            throw "Windows runtime evidence isolation marker is invalid"
+          }
+
+          $cargoTargetItem = Get-Item -LiteralPath $env:CARGO_TARGET_DIR -Force
+          if (
+            -not $cargoTargetItem.PSIsContainer -or
+            ($cargoTargetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+          ) {
+            throw "Windows runtime evidence Cargo target is invalid"
+          }
+          $cargoTarget = $cargoTargetItem.FullName
+          if (
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+              $cargoTarget,
+              (Join-Path $isolationRoot "cargo-target")
+            )
+          ) {
+            throw "Windows runtime evidence Cargo target is invalid"
+          }
+          $releaseDirectoryItem = Get-Item -LiteralPath (Join-Path $cargoTarget "release") -Force
+          if (
+            -not $releaseDirectoryItem.PSIsContainer -or
+            ($releaseDirectoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+              [IO.Path]::GetDirectoryName($releaseDirectoryItem.FullName),
+              $cargoTarget
+            )
+          ) {
+            throw "Windows runtime evidence release directory is invalid"
+          }
+          $probe = Join-Path $releaseDirectoryItem.FullName "plurum-runtime-identity-test-probe.exe"
+          $probeItem = Get-Item -LiteralPath $probe -Force
+          if (
+            $probeItem.PSIsContainer -or
+            ($probeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+          ) {
+            throw "Windows runtime evidence probe is invalid"
+          }
+
+          $neutralDirectoryItem = Get-Item -LiteralPath (Join-Path $isolationRoot "tmp") -Force
+          if (
+            -not $neutralDirectoryItem.PSIsContainer -or
+            ($neutralDirectoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+              [IO.Path]::GetDirectoryName($neutralDirectoryItem.FullName),
+              $isolationRoot
+            )
+          ) {
+            throw "Windows runtime evidence neutral directory is invalid"
+          }
+
+          foreach ($mode in @(
+            "ambient-elevated-rejected",
+            "lowered-elevated-rejected"
+          )) {
+            $probeProcess = $null
+            try {
+              $probeStartInfo = [Diagnostics.ProcessStartInfo]::new()
+              $probeStartInfo.FileName = $probeItem.FullName
+              $probeStartInfo.ArgumentList.Add($mode)
+              $probeStartInfo.WorkingDirectory = $neutralDirectoryItem.FullName
+              $probeStartInfo.UseShellExecute = $false
+              $probeStartInfo.CreateNoWindow = $true
+              $probeStartInfo.Environment.Clear()
+              $probeStartInfo.Environment["SystemRoot"] = $env:SystemRoot
+              $probeStartInfo.Environment["WINDIR"] = $env:WINDIR
+              $probeStartInfo.Environment["TEMP"] = $neutralDirectoryItem.FullName
+              $probeStartInfo.Environment["TMP"] = $neutralDirectoryItem.FullName
+              $probeProcess = [Diagnostics.Process]::Start($probeStartInfo)
+              if (-not $probeProcess.WaitForExit(60000)) {
+                $probeProcess.Kill($true)
+                $probeProcess.WaitForExit()
+                throw "elevated runtime evidence timed out"
+              }
+              if ($probeProcess.ExitCode -ne 0) {
+                throw "Windows runtime evidence probe failed"
+              }
+            }
+            finally {
+              if ($null -ne $probeProcess) {
+                if (-not $probeProcess.HasExited) {
+                  $probeProcess.Kill($true)
+                  $probeProcess.WaitForExit()
+                }
+                $probeProcess.Dispose()
+              }
+            }
+          }
+
+          $systemRootItem = Get-Item -LiteralPath $env:SystemRoot -Force
+          $system32Item = Get-Item `
+            -LiteralPath (Join-Path $systemRootItem.FullName "System32") `
+            -Force
+          $icaclsItem = Get-Item `
+            -LiteralPath (Join-Path $system32Item.FullName "icacls.exe") `
+            -Force
+          if (
+            -not $systemRootItem.PSIsContainer -or
+            ($systemRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            -not $system32Item.PSIsContainer -or
+            ($system32Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $icaclsItem.PSIsContainer -or
+            ($icaclsItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+          ) {
+            throw "Windows runtime evidence ACL tool is invalid"
+          }
+
+          $accountName = "plurum" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
+          $randomBytes = [byte[]]::new(32)
+          [Security.Cryptography.RandomNumberGenerator]::Fill($randomBytes)
+          $passwordText = "Aa1!" + [Convert]::ToBase64String($randomBytes)
+          $securePassword = ConvertTo-SecureString $passwordText -AsPlainText -Force
+          $securePassword.MakeReadOnly()
+          [Array]::Clear($randomBytes, 0, $randomBytes.Length)
+          $passwordText = $null
+
+          $accountCreated = $false
+          $evidenceDirectory = Join-Path $isolationRoot "windows-runtime-identity"
+          $accountSid = $null
+          $activeProcess = $null
+          $primaryFailure = $null
+          $cleanupFailures = [Collections.Generic.List[Exception]]::new()
+          try {
+            $accountExpiration = (Get-Date).AddHours(1)
+            $account = New-LocalUser `
+              -Name $accountName `
+              -Password $securePassword `
+              -AccountExpires $accountExpiration `
+              -PasswordNeverExpires `
+              -UserMayNotChangePassword
+            $accountCreated = $true
+            $accountSid = $account.SID.Value
+            $administratorGroup = Get-LocalGroup -SID "S-1-5-32-544"
+            $administratorSids = @(
+              Get-LocalGroupMember -Group $administratorGroup.Name |
+                ForEach-Object { $_.SID.Value }
+            )
+            if ($administratorSids -contains $accountSid) {
+              throw "disposable runtime-evidence account is unexpectedly an administrator"
+            }
+
+            $evidenceDirectoryItem = New-Item `
+              -ItemType Directory `
+              -Path $evidenceDirectory
+            if (
+              -not $evidenceDirectoryItem.PSIsContainer -or
+              ($evidenceDirectoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+              -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                [IO.Path]::GetDirectoryName($evidenceDirectoryItem.FullName),
+                $isolationRoot
+              )
+            ) {
+              throw "disposable runtime-evidence directory is invalid"
+            }
+            $stagedProbe = Join-Path $evidenceDirectory "runtime-identity-probe.exe"
+            Copy-Item -LiteralPath $probeItem.FullName -Destination $stagedProbe
+            $stagedProbeItem = Get-Item -LiteralPath $stagedProbe -Force
+            if (
+              $stagedProbeItem.PSIsContainer -or
+              ($stagedProbeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+              -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                [IO.Path]::GetDirectoryName($stagedProbeItem.FullName),
+                $evidenceDirectoryItem.FullName
+              )
+            ) {
+              throw "disposable runtime-evidence probe is invalid"
+            }
+            & $icaclsItem.FullName $isolationRoot /grant "*$accountSid`:(RX)" | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              throw "failed to grant disposable isolation-root traversal"
+            }
+            & $icaclsItem.FullName $evidenceDirectory /grant "*$accountSid`:(OI)(CI)(RX)" | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              throw "failed to grant disposable probe access"
+            }
+
+            foreach ($mode in @(
+              "standard-default-stable",
+              "self-impersonation-rejected",
+              "standard-token-change-conflict"
+            )) {
+              $startInfo = [Diagnostics.ProcessStartInfo]::new()
+              $startInfo.FileName = $stagedProbeItem.FullName
+              $startInfo.ArgumentList.Add($mode)
+              $startInfo.WorkingDirectory = $evidenceDirectory
+              $startInfo.UseShellExecute = $false
+              $startInfo.CreateNoWindow = $true
+              $startInfo.LoadUserProfile = $false
+              $startInfo.UserName = $accountName
+              $startInfo.Domain = $env:COMPUTERNAME
+              $startInfo.Password = $securePassword
+              $startInfo.Environment.Clear()
+              $startInfo.Environment["SystemRoot"] = $env:SystemRoot
+              $startInfo.Environment["WINDIR"] = $env:WINDIR
+              $startInfo.Environment["TEMP"] = $evidenceDirectory
+              $startInfo.Environment["TMP"] = $evidenceDirectory
+              $activeProcess = [Diagnostics.Process]::Start($startInfo)
+              if (-not $activeProcess.WaitForExit(60000)) {
+                $activeProcess.Kill($true)
+                $activeProcess.WaitForExit()
+                throw "standard-user runtime evidence timed out"
+              }
+              if ($activeProcess.ExitCode -ne 0) {
+                throw "genuine standard-user runtime evidence failed"
+              }
+              $activeProcess.Dispose()
+              $activeProcess = $null
+            }
+          }
+          catch {
+            $primaryFailure = $_.Exception
+          }
+          finally {
+            if ($null -ne $activeProcess) {
+              try {
+                if (-not $activeProcess.HasExited) {
+                  $activeProcess.Kill($true)
+                  $activeProcess.WaitForExit()
+                }
+                $activeProcess.Dispose()
+              }
+              catch {
+                $cleanupFailures.Add(
+                  [InvalidOperationException]::new(
+                    "standard-user probe cleanup failed",
+                    $_.Exception
+                  )
+                )
+              }
+            }
+            if ($null -ne $accountSid) {
+              try {
+                & $icaclsItem.FullName $isolationRoot /remove:g "*$accountSid" | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                  throw "icacls failed"
+                }
+              }
+              catch {
+                $cleanupFailures.Add(
+                  [InvalidOperationException]::new(
+                    "isolation-root ACL cleanup failed",
+                    $_.Exception
+                  )
+                )
+              }
+            }
+            try {
+              if (Test-Path -LiteralPath $evidenceDirectory) {
+                Remove-Item -LiteralPath $evidenceDirectory -Recurse -Force
+              }
+            }
+            catch {
+              $cleanupFailures.Add(
+                [InvalidOperationException]::new(
+                  "probe-directory cleanup failed",
+                  $_.Exception
+                )
+              )
+            }
+            if ($accountCreated) {
+              try {
+                Remove-LocalUser -Name $accountName
+              }
+              catch {
+                $cleanupFailures.Add(
+                  [InvalidOperationException]::new(
+                    "disposable-account cleanup failed",
+                    $_.Exception
+                  )
+                )
+              }
+            }
+            try {
+              $securePassword.Dispose()
+            }
+            catch {
+              $cleanupFailures.Add(
+                [InvalidOperationException]::new(
+                  "disposable password cleanup failed",
+                  $_.Exception
+                )
+              )
+            }
+          }
+          if ($null -ne $primaryFailure -and $cleanupFailures.Count -eq 0) {
+            throw $primaryFailure
+          }
+          if ($null -ne $primaryFailure) {
+            $cleanupFailures.Insert(0, $primaryFailure)
+          }
+          if ($cleanupFailures.Count -ne 0) {
+            throw [AggregateException]::new(
+              "Windows runtime evidence or cleanup failed",
+              [Exception[]]$cleanupFailures
+            )
+          }
       - name: Build the native foundation
         run: node native/credential-store/tests/run-isolated-cargo.mjs build
       - name: Verify the Node 22.12 ABI floor
