@@ -10,21 +10,13 @@ pub enum IdentityError {
 fn all_ids_match_expected(
     expected_uid: u32,
     expected_gid: u32,
-    real_uid: u32,
-    effective_uid: u32,
-    saved_uid: u32,
-    real_gid: u32,
-    effective_gid: u32,
-    saved_gid: u32,
+    user_ids: [u32; 3],
+    group_ids: [u32; 3],
 ) -> bool {
     expected_uid != 0
         && expected_gid != 0
-        && real_uid == expected_uid
-        && effective_uid == expected_uid
-        && saved_uid == expected_uid
-        && real_gid == expected_gid
-        && effective_gid == expected_gid
-        && saved_gid == expected_gid
+        && user_ids.into_iter().all(|id| id == expected_uid)
+        && group_ids.into_iter().all(|id| id == expected_gid)
 }
 
 #[cfg(target_os = "linux")]
@@ -51,12 +43,8 @@ pub fn saved_identity_is_unprivileged(
     Ok(all_ids_match_expected(
         expected_uid,
         expected_gid,
-        real_uid,
-        effective_uid,
-        saved_uid,
-        real_gid,
-        effective_gid,
-        saved_gid,
+        [real_uid, effective_uid, saved_uid],
+        [real_gid, effective_gid, saved_gid],
     ))
 }
 
@@ -93,7 +81,10 @@ mod tests {
     #[test]
     fn saved_identity_policy_requires_every_id_to_match_the_nonroot_user() {
         assert!(super::all_ids_match_expected(
-            501, 20, 501, 501, 501, 20, 20, 20,
+            501,
+            20,
+            [501, 501, 501],
+            [20, 20, 20],
         ));
         for ids in [
             (0, 20, 0, 0, 0, 20, 20, 20),
@@ -106,7 +97,10 @@ mod tests {
             (501, 20, 501, 501, 501, 20, 20, 0),
         ] {
             assert!(!super::all_ids_match_expected(
-                ids.0, ids.1, ids.2, ids.3, ids.4, ids.5, ids.6, ids.7,
+                ids.0,
+                ids.1,
+                [ids.2, ids.3, ids.4],
+                [ids.5, ids.6, ids.7],
             ));
         }
     }
