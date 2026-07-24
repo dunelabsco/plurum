@@ -1208,14 +1208,20 @@ pub fn prepare_medium_integrity_test_directory(path: &Path) -> Result<()> {
 pub fn prepare_medium_integrity_test_directory_handle(handle: BorrowedHandle<'_>) -> Result<()> {
     prepare_current_user_test_owner_handle(handle)?;
     let process = ProcessIdentity::capture_with_integrity_requirement(false)?;
-    set_and_attest_medium_label(
-        raw(handle),
-        SE_FILE_OBJECT,
-        OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
-        SecurityKind::Directory,
-    )?;
+    if !attest_handle_medium_label(raw(handle), SE_FILE_OBJECT, SecurityKind::Directory)? {
+        // Avoid rewriting already-valid medium semantics: SetSecurityInfo
+        // propagates SACL changes to descendants and advances NTFS ChangeTime.
+        set_and_attest_medium_label(
+            raw(handle),
+            SE_FILE_OBJECT,
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+            SecurityKind::Directory,
+        )?;
+    }
     process.verify_with_integrity_requirement(false)?;
-    if test_handle_owner_state(handle, &process)? == TestHandleOwner::Current {
+    if test_handle_owner_state(handle, &process)? == TestHandleOwner::Current
+        && attest_handle_medium_label(raw(handle), SE_FILE_OBJECT, SecurityKind::Directory)?
+    {
         Ok(())
     } else {
         Err(WinError::code(ErrorKind::Unsafe, 5))
