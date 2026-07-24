@@ -1,0 +1,1110 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  prepareSetupApplyPlan,
+  type SetupApplyPlan,
+} from "../src/commands/setup-apply-plan.js";
+import {
+  createSetupApprovalAuthority,
+  mintSetupApproval,
+  type SetupApprovalAuthority,
+  type SetupApprovalIdentity,
+  type SetupPreparedPlan,
+} from "../src/commands/setup-approval.js";
+import {
+  planSetupCodexProjection,
+  type SetupCodexProjectionResolvedPlan,
+} from "../src/commands/setup-codex-projection-plan.js";
+import {
+  planSetupCredential,
+  type SetupCredentialResolvedPlan,
+} from "../src/commands/setup-credential-plan.js";
+import {
+  claimSetupExecutionGrant,
+  claimSetupExecutionSidecar,
+  createSetupExecutionAuthority,
+  SetupExecutionAuthorityError,
+  type SetupExecutionAuthority,
+  type SetupExecutionGrant,
+  type SetupExecutionSidecarIdentity,
+} from "../src/commands/setup-execution-authority.js";
+import {
+  copySetupSecretLeaseBytes,
+  createSetupSecretLease,
+  discardSetupSecretLease,
+  type SetupSecretLease,
+} from "../src/commands/setup-secret-lease.js";
+import {
+  createSetupPreflightSnapshot,
+  type SetupPreflightSnapshot,
+} from "../src/commands/setup-preflight.js";
+import type { CredentialKeyFingerprint } from "../src/credentials/fingerprint.js";
+import { DEFAULT_API_ORIGIN } from "../src/credentials/origin.js";
+import type {
+  HostConfiguration,
+  HostExecutableAttestation,
+  HostInspection,
+  HostMutationAdapter,
+} from "../src/hosts/contracts.js";
+import {
+  CODEX_DESIRED_CONFIGURATION,
+  CODEX_MUTATION_SUPPORT,
+} from "../src/hosts/codex/configuration.js";
+import { setupPreflightScope } from "../src/system/scopes.js";
+import type { SystemCapabilities } from "../src/system/contracts.js";
+import { createTestSystem } from "./support/system.js";
+
+const OPERATION_ID = "123e4567-e89b-42d3-a456-426614174000";
+const SECOND_OPERATION_ID = "223e4567-e89b-42d3-a456-426614174000";
+const CREATED_AT = "2026-07-21T09:10:11.123Z";
+const AGENT_ID = "00000000-0000-4000-8000-000000000011";
+const FINGERPRINT =
+  "plurum-fp-v1:111111111111" as CredentialKeyFingerprint;
+const RAW_KEY_CANARY = "plrm_live_EXECUTION_SIDECAR_CANARY_123456";
+const REVISION_CANARY = "native-revision-execution-sidecar-canary";
+
+interface SetupFixture {
+  readonly approval: SetupApprovalAuthority;
+  readonly execution: SetupExecutionAuthority;
+  readonly credential: SetupCredentialResolvedPlan;
+  readonly projection: SetupCodexProjectionResolvedPlan;
+  readonly plan: SetupPreparedPlan<SetupApplyPlan>;
+  readonly snapshot: SetupPreflightSnapshot;
+}
+
+function absentConfiguration(): HostConfiguration {
+  return {
+    marketplace: { status: "absent" },
+    plugin: { status: "absent" },
+    pluginMcp: { status: "absent" },
+    directMcp: { status: "absent" },
+  };
+}
+
+function executable(): HostExecutableAttestation {
+  const path = "/trusted/bin/codex";
+  return {
+    sourcePath: path,
+    resolvedPath: path,
+    revision: "codex-executable-revision",
+    chain: [
+      {
+        path,
+        kind: "binary",
+        owner: "current-user",
+        access: "not-broadly-writable",
+        binding: "canonical",
+        link: "direct",
+        revision: "codex-chain-revision",
+      },
+    ],
+    launch: {
+      executable: path,
+      argumentPrefix: [],
+      shell: false,
+    },
+  };
+}
+
+function codexInspection(): HostInspection {
+  return {
+    host: "codex",
+    status: "available",
+    executable: executable(),
+    version: CODEX_DESIRED_CONFIGURATION.minimumHostVersion,
+    state: {
+      revision: "codex-state-revision",
+      configuration: absentConfiguration(),
+    },
+    mutationSupport: CODEX_MUTATION_SUPPORT,
+  };
+}
+
+function mutationAdapter(): HostMutationAdapter {
+  return Object.freeze({
+    inspect: async () => codexInspection(),
+    apply: async () => {
+      throw new Error("execution-authority tests must not mutate hosts");
+    },
+    rollback: async () => {
+      throw new Error("execution-authority tests must not mutate hosts");
+    },
+  });
+}
+
+function resolvedCredential(): SetupCredentialResolvedPlan {
+  const result = planSetupCredential({
+    observation: {
+      schemaVersion: 1,
+      transaction: "clean",
+      canonical: {
+        status: "active-valid",
+        candidateSelectionId: "credential-1",
+      },
+      candidates: [
+        {
+          selectionId: "credential-1",
+          apiOrigin: DEFAULT_API_ORIGIN,
+          fingerprint: FINGERPRINT,
+          agent: {
+            id: AGENT_ID,
+            name: "Codex",
+            username: "codex-agent",
+          },
+          sources: ["canonical"],
+        },
+      ],
+      blockers: [],
+      invalidSources: [],
+    },
+    decision: {
+      selectedCandidateId: null,
+      registration: null,
+    },
+  });
+  if (result.status !== "resolved") {
+    throw new Error("expected a resolved credential");
+  }
+  return result;
+}
+
+async function setupFixture(): Promise<SetupFixture> {
+  const base = createTestSystem();
+  const system: SystemCapabilities = Object.freeze({
+    ...base,
+    hosts: Object.freeze({
+      inspection: base.hosts.inspection,
+      mutation: Object.freeze({
+        "claude-code": base.hosts.mutation["claude-code"],
+        codex: mutationAdapter(),
+      }),
+    }),
+  });
+  const snapshot = await createSetupPreflightSnapshot(
+    "codex",
+    setupPreflightScope(system),
+  );
+  const credential = resolvedCredential();
+  const projection = planSetupCodexProjection(
+    credential,
+    "matches-selected",
+  );
+  if (projection.status !== "resolved") {
+    throw new Error("expected a resolved Codex projection");
+  }
+  const approval = createSetupApprovalAuthority();
+  const plan = prepareSetupApplyPlan(
+    approval,
+    snapshot,
+    credential,
+    projection,
+    OPERATION_ID,
+    CREATED_AT,
+  );
+  return {
+    approval,
+    execution: createSetupExecutionAuthority(approval),
+    credential,
+    projection,
+    plan,
+    snapshot,
+  };
+}
+
+function privateEvidence(): object {
+  return Object.freeze({
+    credential: Object.freeze({ key: RAW_KEY_CANARY }),
+    transaction: Object.freeze({ revision: REVISION_CANARY }),
+    projection: Object.freeze({ revision: REVISION_CANARY }),
+  });
+}
+
+function expectAuthorityError(callback: () => unknown): void {
+  let captured: unknown;
+  try {
+    callback();
+  } catch (error) {
+    captured = error;
+  }
+  expect(captured).toBeInstanceOf(SetupExecutionAuthorityError);
+  expect(String(captured)).toBe(
+    "SetupExecutionAuthorityError: The setup execution authority could not be used safely.",
+  );
+  expect(String(captured)).not.toContain(RAW_KEY_CANARY);
+  expect(String(captured)).not.toContain(REVISION_CANARY);
+}
+
+function approvedGrant(
+  fixture: SetupFixture,
+  evidence: object,
+  secretLease?: SetupSecretLease,
+): SetupExecutionGrant {
+  const sidecar = fixture.execution.bind(
+    fixture.plan,
+    fixture.credential,
+    fixture.projection,
+    fixture.execution.registerObservation(evidence, secretLease),
+  );
+  const approval = mintSetupApproval(fixture.approval, {
+    plan: fixture.plan,
+    source: "interactive",
+  });
+  const result = fixture.execution.consume(
+    fixture.plan,
+    approval,
+    sidecar,
+  );
+  if (result.status !== "approved") {
+    throw new Error("expected an execution grant");
+  }
+  return result.grant;
+}
+
+function secretLease(): SetupSecretLease {
+  return createSetupSecretLease(new TextEncoder().encode(RAW_KEY_CANARY));
+}
+
+function expectLeaseLive(lease: SetupSecretLease, expected: boolean): void {
+  const copied = copySetupSecretLeaseBytes(lease);
+  try {
+    expect(copied !== undefined).toBe(expected);
+    if (expected) {
+      expect(new TextDecoder().decode(copied)).toBe(RAW_KEY_CANARY);
+    }
+  } finally {
+    copied?.fill(0);
+  }
+}
+
+describe("setup execution authority", () => {
+  it("wipes secret leases on observation, sidecar, and grant abandonment", async () => {
+    const observationFixture = await setupFixture();
+    const observationLease = secretLease();
+    const observation = observationFixture.execution.registerObservation(
+      privateEvidence(),
+      observationLease,
+    );
+    expectLeaseLive(observationLease, true);
+    expect(observationFixture.execution.discard(observation)).toEqual({
+      status: "discarded",
+    });
+    expectLeaseLive(observationLease, false);
+
+    const sidecarFixture = await setupFixture();
+    const sidecarLease = secretLease();
+    const sidecar = sidecarFixture.execution.bind(
+      sidecarFixture.plan,
+      sidecarFixture.credential,
+      sidecarFixture.projection,
+      sidecarFixture.execution.registerObservation(
+        privateEvidence(),
+        sidecarLease,
+      ),
+    );
+    expect(sidecarFixture.execution.discard(sidecar)).toEqual({
+      status: "discarded",
+    });
+    expectLeaseLive(sidecarLease, false);
+
+    const grantFixture = await setupFixture();
+    const grantLease = secretLease();
+    const grant = approvedGrant(
+      grantFixture,
+      privateEvidence(),
+      grantLease,
+    );
+    expect(grantFixture.execution.discard(grant)).toEqual({
+      status: "discarded",
+    });
+    expectLeaseLive(grantLease, false);
+  });
+
+  it("wipes secrets on failed provenance and transfers them only on an exact grant claim", async () => {
+    const bindFixture = await setupFixture();
+    const bindLease = secretLease();
+    const foreignCredential = resolvedCredential();
+    const foreignProjection = planSetupCodexProjection(
+      foreignCredential,
+      "matches-selected",
+    );
+    if (foreignProjection.status !== "resolved") {
+      throw new Error("expected foreign projection");
+    }
+    const observation = bindFixture.execution.registerObservation(
+      privateEvidence(),
+      bindLease,
+    );
+    expectAuthorityError(() =>
+      bindFixture.execution.bind(
+        bindFixture.plan,
+        foreignCredential,
+        foreignProjection,
+        observation,
+      ),
+    );
+    expectLeaseLive(bindLease, false);
+
+    const claimFixture = await setupFixture();
+    const wrongClaimLease = secretLease();
+    const wrongClaimGrant = approvedGrant(
+      claimFixture,
+      privateEvidence(),
+      wrongClaimLease,
+    );
+    const secondPlan = prepareSetupApplyPlan(
+      claimFixture.approval,
+      claimFixture.snapshot,
+      claimFixture.credential,
+      claimFixture.projection,
+      SECOND_OPERATION_ID,
+      CREATED_AT,
+    );
+    expectAuthorityError(() =>
+      claimSetupExecutionGrant(
+        claimFixture.execution,
+        secondPlan,
+        wrongClaimGrant,
+      ),
+    );
+    expectLeaseLive(wrongClaimLease, false);
+
+    const exactFixture = await setupFixture();
+    const exactLease = secretLease();
+    const evidence = privateEvidence();
+    const exactGrant = approvedGrant(
+      exactFixture,
+      evidence,
+      exactLease,
+    );
+    expect(
+      claimSetupExecutionGrant(
+        exactFixture.execution,
+        exactFixture.plan,
+        exactGrant,
+      ),
+    ).toBe(evidence);
+    expectLeaseLive(exactLease, true);
+    expect(discardSetupSecretLease(exactLease)).toBe(true);
+  });
+
+  it("burns an exact grant while returning only its retained private evidence", async () => {
+    const fixture = await setupFixture();
+    const evidence = privateEvidence();
+    const grant = approvedGrant(fixture, evidence);
+
+    expect(Object.isFrozen(grant)).toBe(true);
+    expect(Object.keys(grant)).toEqual([]);
+    expect(JSON.stringify({ grant })).toBe("{}");
+    expect(
+      claimSetupExecutionGrant(
+        fixture.execution,
+        fixture.plan,
+        grant,
+      ),
+    ).toBe(evidence);
+    expect(fixture.execution.discard(grant)).toEqual({
+      status: "precondition-failed",
+    });
+    expectAuthorityError(() =>
+      claimSetupExecutionGrant(
+        fixture.execution,
+        fixture.plan,
+        grant,
+      ),
+    );
+  });
+
+  it("burns a grant before rejecting a wrong plan or foreign authority", async () => {
+    const wrongPlanFixture = await setupFixture();
+    const wrongPlanGrant = approvedGrant(
+      wrongPlanFixture,
+      privateEvidence(),
+    );
+    const secondPlan = prepareSetupApplyPlan(
+      wrongPlanFixture.approval,
+      wrongPlanFixture.snapshot,
+      wrongPlanFixture.credential,
+      wrongPlanFixture.projection,
+      SECOND_OPERATION_ID,
+      CREATED_AT,
+    );
+
+    expectAuthorityError(() =>
+      claimSetupExecutionGrant(
+        wrongPlanFixture.execution,
+        secondPlan,
+        wrongPlanGrant,
+      ),
+    );
+    expectAuthorityError(() =>
+      claimSetupExecutionGrant(
+        wrongPlanFixture.execution,
+        wrongPlanFixture.plan,
+        wrongPlanGrant,
+      ),
+    );
+    expect(wrongPlanFixture.execution.discard(wrongPlanGrant)).toEqual({
+      status: "precondition-failed",
+    });
+
+    const owner = await setupFixture();
+    const foreign = await setupFixture();
+    const foreignGrant = approvedGrant(owner, privateEvidence());
+    expectAuthorityError(() =>
+      claimSetupExecutionGrant(
+        foreign.execution,
+        owner.plan,
+        foreignGrant,
+      ),
+    );
+    expectAuthorityError(() =>
+      claimSetupExecutionGrant(
+        owner.execution,
+        owner.plan,
+        foreignGrant,
+      ),
+    );
+    expect(owner.execution.discard(foreignGrant)).toEqual({
+      status: "precondition-failed",
+    });
+  });
+
+  it("rejects grant and plan proxies without invoking traps or collateral-burning an exact grant", async () => {
+    const fixture = await setupFixture();
+    const exactGrant = approvedGrant(fixture, privateEvidence());
+    let traps = 0;
+    const handler: ProxyHandler<object> = {
+      get() {
+        traps += 1;
+        throw new Error("execution grant claims must not inspect proxies");
+      },
+      getOwnPropertyDescriptor() {
+        traps += 1;
+        throw new Error("execution grant claims must not inspect proxies");
+      },
+      ownKeys() {
+        traps += 1;
+        throw new Error("execution grant claims must not inspect proxies");
+      },
+    };
+    const grantProxy = new Proxy(exactGrant, handler);
+
+    expectAuthorityError(() =>
+      claimSetupExecutionGrant(
+        fixture.execution,
+        fixture.plan,
+        grantProxy as SetupExecutionGrant,
+      ),
+    );
+    expect(traps).toBe(0);
+    expect(
+      claimSetupExecutionGrant(
+        fixture.execution,
+        fixture.plan,
+        exactGrant,
+      ),
+    ).toMatchObject({ credential: { key: RAW_KEY_CANARY } });
+
+    const planFixture = await setupFixture();
+    const planGrant = approvedGrant(planFixture, privateEvidence());
+    const planProxy = new Proxy(planFixture.plan, handler);
+    expectAuthorityError(() =>
+      claimSetupExecutionGrant(
+        planFixture.execution,
+        planProxy as SetupPreparedPlan<SetupApplyPlan>,
+        planGrant,
+      ),
+    );
+    expectAuthorityError(() =>
+      claimSetupExecutionGrant(
+        planFixture.execution,
+        planFixture.plan,
+        planGrant,
+      ),
+    );
+    expect(traps).toBe(0);
+  });
+
+  it("removes grant ownership on discard and never invokes an extra caller callback", async () => {
+    const discardedFixture = await setupFixture();
+    const discardedGrant = approvedGrant(
+      discardedFixture,
+      privateEvidence(),
+    );
+    expect(discardedFixture.execution.discard(discardedGrant)).toEqual({
+      status: "discarded",
+    });
+    expectAuthorityError(() =>
+      claimSetupExecutionGrant(
+        discardedFixture.execution,
+        discardedFixture.plan,
+        discardedGrant,
+      ),
+    );
+
+    const claimedFixture = await setupFixture();
+    const evidence = privateEvidence();
+    const claimedGrant = approvedGrant(claimedFixture, evidence);
+    let callbackCalls = 0;
+    const claimWithExtraArgument = claimSetupExecutionGrant as unknown as (
+      authority: SetupExecutionAuthority,
+      plan: SetupPreparedPlan<SetupApplyPlan>,
+      grant: SetupExecutionGrant,
+      callback: () => void,
+    ) => object;
+    expect(
+      claimWithExtraArgument(
+        claimedFixture.execution,
+        claimedFixture.plan,
+        claimedGrant,
+        () => {
+          callbackCalls += 1;
+        },
+      ),
+    ).toBe(evidence);
+    expect(callbackCalls).toBe(0);
+  });
+
+  it("moves private evidence through opaque one-use identities into an opaque grant", async () => {
+    const fixture = await setupFixture();
+    const observation = fixture.execution.registerObservation(
+      privateEvidence(),
+    );
+    const sidecar = fixture.execution.bind(
+      fixture.plan,
+      fixture.credential,
+      fixture.projection,
+      observation,
+    );
+    const approval = mintSetupApproval(fixture.approval, {
+      plan: fixture.plan,
+      source: "interactive",
+    });
+    const result = fixture.execution.consume(
+      fixture.plan,
+      approval,
+      sidecar,
+    );
+
+    expect(Object.isFrozen(fixture.execution)).toBe(true);
+    expect(Object.isFrozen(observation)).toBe(true);
+    expect(Object.isFrozen(sidecar)).toBe(true);
+    expect(Object.keys(observation)).toEqual([]);
+    expect(Object.keys(sidecar)).toEqual([]);
+    expect(result.status).toBe("approved");
+    if (result.status !== "approved") {
+      throw new Error("expected an execution grant");
+    }
+    expect(result.source).toBe("interactive");
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.grant)).toBe(true);
+    expect(Object.keys(result.grant)).toEqual([]);
+
+    const serialized = JSON.stringify({ observation, sidecar, result });
+    expect(serialized).toBe(
+      '{"result":{"status":"approved","source":"interactive"}}',
+    );
+    expect(serialized).not.toContain(RAW_KEY_CANARY);
+    expect(serialized).not.toContain(REVISION_CANARY);
+    expect(
+      fixture.execution.consume(fixture.plan, approval, sidecar),
+    ).toEqual({ status: "precondition-failed" });
+    expect(fixture.execution.discard(observation)).toEqual({
+      status: "precondition-failed",
+    });
+    expect(fixture.execution.discard(sidecar)).toEqual({
+      status: "precondition-failed",
+    });
+    expect(fixture.execution.discard(result.grant)).toEqual({
+      status: "discarded",
+    });
+    expect(fixture.execution.discard(result.grant)).toEqual({
+      status: "precondition-failed",
+    });
+  });
+
+  it("binds only the exact plan and its original credential/projection provenance", async () => {
+    const fixture = await setupFixture();
+    const foreignCredential = resolvedCredential();
+    const foreignProjection = planSetupCodexProjection(
+      foreignCredential,
+      "matches-selected",
+    );
+    if (foreignProjection.status !== "resolved") {
+      throw new Error("expected a resolved foreign projection");
+    }
+
+    const wrongCredentialObservation =
+      fixture.execution.registerObservation(privateEvidence());
+    expectAuthorityError(() =>
+      fixture.execution.bind(
+        fixture.plan,
+        foreignCredential,
+        foreignProjection,
+        wrongCredentialObservation,
+      ),
+    );
+    expectAuthorityError(() =>
+      fixture.execution.bind(
+        fixture.plan,
+        fixture.credential,
+        fixture.projection,
+        wrongCredentialObservation,
+      ),
+    );
+
+    const cloned = structuredClone(fixture.plan) as SetupPreparedPlan<
+      SetupApplyPlan
+    >;
+    const clonedPlanObservation =
+      fixture.execution.registerObservation(privateEvidence());
+    expectAuthorityError(() =>
+      fixture.execution.bind(
+        cloned,
+        fixture.credential,
+        fixture.projection,
+        clonedPlanObservation,
+      ),
+    );
+
+    const foreignApproval = createSetupApprovalAuthority();
+    const foreignExecution = createSetupExecutionAuthority(foreignApproval);
+    const foreignObservation =
+      foreignExecution.registerObservation(privateEvidence());
+    expectAuthorityError(() =>
+      foreignExecution.bind(
+        fixture.plan,
+        fixture.credential,
+        fixture.projection,
+        foreignObservation,
+      ),
+    );
+  });
+
+  it("rejects plan proxies without invoking traps and burns supplied observation evidence", async () => {
+    const fixture = await setupFixture();
+    const observation = fixture.execution.registerObservation(
+      privateEvidence(),
+    );
+    let traps = 0;
+    const proxy = new Proxy(fixture.plan, {
+      get() {
+        traps += 1;
+        throw new Error("the plan proxy must not be read");
+      },
+      getOwnPropertyDescriptor() {
+        traps += 1;
+        throw new Error("the plan proxy must not be inspected");
+      },
+      ownKeys() {
+        traps += 1;
+        throw new Error("the plan proxy must not be inspected");
+      },
+    });
+
+    expectAuthorityError(() =>
+      fixture.execution.bind(
+        proxy,
+        fixture.credential,
+        fixture.projection,
+        observation,
+      ),
+    );
+    expectAuthorityError(() =>
+      fixture.execution.bind(
+        fixture.plan,
+        fixture.credential,
+        fixture.projection,
+        observation,
+      ),
+    );
+    expect(traps).toBe(0);
+  });
+
+  it("rejects credential and projection proxies without invoking traps", async () => {
+    const fixture = await setupFixture();
+    let traps = 0;
+    const proxyHandler: ProxyHandler<object> = {
+      get() {
+        traps += 1;
+        throw new Error("provenance proxies must not be read");
+      },
+      getOwnPropertyDescriptor() {
+        traps += 1;
+        throw new Error("provenance proxies must not be inspected");
+      },
+      ownKeys() {
+        traps += 1;
+        throw new Error("provenance proxies must not be inspected");
+      },
+    };
+    const credentialProxy = new Proxy(
+      fixture.credential,
+      proxyHandler,
+    );
+    const projectionProxy = new Proxy(
+      fixture.projection,
+      proxyHandler,
+    );
+
+    expectAuthorityError(() =>
+      fixture.execution.bind(
+        fixture.plan,
+        credentialProxy as SetupCredentialResolvedPlan,
+        fixture.projection,
+        fixture.execution.registerObservation(privateEvidence()),
+      ),
+    );
+    expectAuthorityError(() =>
+      fixture.execution.bind(
+        fixture.plan,
+        fixture.credential,
+        projectionProxy as SetupCodexProjectionResolvedPlan,
+        fixture.execution.registerObservation(privateEvidence()),
+      ),
+    );
+    expect(traps).toBe(0);
+  });
+
+  it("burns approvals but preserves bound sidecars on forged or proxied sidecar inputs", async () => {
+    const forgedFixture = await setupFixture();
+    const forgedSidecar = forgedFixture.execution.bind(
+      forgedFixture.plan,
+      forgedFixture.credential,
+      forgedFixture.projection,
+      forgedFixture.execution.registerObservation(privateEvidence()),
+    );
+    const forgedApproval = mintSetupApproval(forgedFixture.approval, {
+      plan: forgedFixture.plan,
+      source: "assume-yes",
+    });
+    const fakeSidecar = Object.freeze({}) as SetupExecutionSidecarIdentity;
+
+    expect(
+      forgedFixture.execution.consume(
+        forgedFixture.plan,
+        forgedApproval,
+        fakeSidecar,
+      ),
+    ).toEqual({ status: "precondition-failed" });
+    expect(forgedFixture.execution.discard(forgedSidecar)).toEqual({
+      status: "discarded",
+    });
+
+    const proxyFixture = await setupFixture();
+    const proxySidecar = proxyFixture.execution.bind(
+      proxyFixture.plan,
+      proxyFixture.credential,
+      proxyFixture.projection,
+      proxyFixture.execution.registerObservation(privateEvidence()),
+    );
+    const proxyApproval = mintSetupApproval(proxyFixture.approval, {
+      plan: proxyFixture.plan,
+      source: "interactive",
+    });
+    let traps = 0;
+    const sidecarProxy = new Proxy(proxySidecar, {
+      get() {
+        traps += 1;
+        throw new Error("the sidecar proxy must not be read");
+      },
+      getOwnPropertyDescriptor() {
+        traps += 1;
+        throw new Error("the sidecar proxy must not be inspected");
+      },
+      ownKeys() {
+        traps += 1;
+        throw new Error("the sidecar proxy must not be inspected");
+      },
+    });
+
+    expect(
+      proxyFixture.execution.consume(
+        proxyFixture.plan,
+        proxyApproval,
+        sidecarProxy,
+      ),
+    ).toEqual({ status: "precondition-failed" });
+    expect(proxyFixture.execution.discard(proxySidecar)).toEqual({
+      status: "discarded",
+    });
+    expect(traps).toBe(0);
+  });
+
+  it("prevents a stale pre-claim sidecar from releasing its private replacement", async () => {
+    const fixture = await setupFixture();
+    const publicSidecar = fixture.execution.bind(
+      fixture.plan,
+      fixture.credential,
+      fixture.projection,
+      fixture.execution.registerObservation(privateEvidence()),
+    );
+    const claimedSidecar = claimSetupExecutionSidecar(
+      fixture.execution,
+      fixture.plan,
+      publicSidecar,
+    );
+    const forgedApproval = Object.freeze({}) as SetupApprovalIdentity;
+
+    expect(
+      fixture.execution.consume(
+        fixture.plan,
+        forgedApproval,
+        publicSidecar,
+      ),
+    ).toEqual({ status: "precondition-failed" });
+    expect(fixture.execution.discard(publicSidecar)).toEqual({
+      status: "precondition-failed",
+    });
+    expect(fixture.execution.discard(claimedSidecar)).toEqual({
+      status: "discarded",
+    });
+  });
+
+  it("does not collateral-release another plan under the same execution authority", async () => {
+    const fixture = await setupFixture();
+    const secondPlan = prepareSetupApplyPlan(
+      fixture.approval,
+      fixture.snapshot,
+      fixture.credential,
+      fixture.projection,
+      SECOND_OPERATION_ID,
+      CREATED_AT,
+    );
+    const firstSidecar = fixture.execution.bind(
+      fixture.plan,
+      fixture.credential,
+      fixture.projection,
+      fixture.execution.registerObservation(privateEvidence()),
+    );
+    const secondSidecar = fixture.execution.bind(
+      secondPlan,
+      fixture.credential,
+      fixture.projection,
+      fixture.execution.registerObservation(privateEvidence()),
+    );
+    const forgedApproval = Object.freeze({}) as SetupApprovalIdentity;
+
+    expect(
+      fixture.execution.consume(
+        fixture.plan,
+        forgedApproval,
+        secondSidecar,
+      ),
+    ).toEqual({ status: "precondition-failed" });
+    expect(fixture.execution.discard(secondSidecar)).toEqual({
+      status: "precondition-failed",
+    });
+    expect(fixture.execution.discard(firstSidecar)).toEqual({
+      status: "discarded",
+    });
+  });
+
+  it("rejects plan and approval proxies during consume without invoking traps", async () => {
+    const planFixture = await setupFixture();
+    const planSidecar = planFixture.execution.bind(
+      planFixture.plan,
+      planFixture.credential,
+      planFixture.projection,
+      planFixture.execution.registerObservation(privateEvidence()),
+    );
+    const planApproval = mintSetupApproval(planFixture.approval, {
+      plan: planFixture.plan,
+      source: "interactive",
+    });
+    let traps = 0;
+    const proxyHandler: ProxyHandler<object> = {
+      get() {
+        traps += 1;
+        throw new Error("consume proxies must not be read");
+      },
+      getOwnPropertyDescriptor() {
+        traps += 1;
+        throw new Error("consume proxies must not be inspected");
+      },
+      ownKeys() {
+        traps += 1;
+        throw new Error("consume proxies must not be inspected");
+      },
+    };
+    const planProxy = new Proxy(planFixture.plan, proxyHandler);
+
+    expect(
+      planFixture.execution.consume(
+        planProxy as SetupPreparedPlan<SetupApplyPlan>,
+        planApproval,
+        planSidecar,
+      ),
+    ).toEqual({ status: "precondition-failed" });
+    expect(
+      planFixture.execution.consume(
+        planFixture.plan,
+        planApproval,
+        planSidecar,
+      ),
+    ).toEqual({ status: "precondition-failed" });
+
+    const approvalFixture = await setupFixture();
+    const approvalSidecar = approvalFixture.execution.bind(
+      approvalFixture.plan,
+      approvalFixture.credential,
+      approvalFixture.projection,
+      approvalFixture.execution.registerObservation(privateEvidence()),
+    );
+    const exactApproval = mintSetupApproval(approvalFixture.approval, {
+      plan: approvalFixture.plan,
+      source: "assume-yes",
+    });
+    const approvalProxy = new Proxy(exactApproval, proxyHandler);
+    expect(
+      approvalFixture.execution.consume(
+        approvalFixture.plan,
+        approvalProxy as SetupApprovalIdentity,
+        approvalSidecar,
+      ),
+    ).toEqual({ status: "precondition-failed" });
+    expect(approvalFixture.execution.discard(approvalSidecar)).toEqual({
+      status: "precondition-failed",
+    });
+    expect(traps).toBe(0);
+  });
+
+  it("burns sidecars on wrong plans and approvals and never grants execution", async () => {
+    const first = await setupFixture();
+    const second = await setupFixture();
+    const sidecar = first.execution.bind(
+      first.plan,
+      first.credential,
+      first.projection,
+      first.execution.registerObservation(privateEvidence()),
+    );
+    const approval = mintSetupApproval(first.approval, {
+      plan: first.plan,
+      source: "interactive",
+    });
+
+    expect(
+      first.execution.consume(
+        second.plan,
+        approval,
+        sidecar,
+      ),
+    ).toEqual({ status: "precondition-failed" });
+    expect(
+      first.execution.consume(first.plan, approval, sidecar),
+    ).toEqual({ status: "precondition-failed" });
+
+    const third = await setupFixture();
+    const thirdSidecar = third.execution.bind(
+      third.plan,
+      third.credential,
+      third.projection,
+      third.execution.registerObservation(privateEvidence()),
+    );
+    const foreignApproval = mintSetupApproval(second.approval, {
+      plan: second.plan,
+      source: "assume-yes",
+    });
+    expect(
+      third.execution.consume(
+        third.plan,
+        foreignApproval as SetupApprovalIdentity,
+        thirdSidecar,
+      ),
+    ).toEqual({ status: "precondition-failed" });
+    expect(third.execution.discard(thirdSidecar)).toEqual({
+      status: "precondition-failed",
+    });
+  });
+
+  it("explicitly discards observations and sidecars before approval", async () => {
+    const fixture = await setupFixture();
+    const observation = fixture.execution.registerObservation(
+      privateEvidence(),
+    );
+    expect(fixture.execution.discard(observation)).toEqual({
+      status: "discarded",
+    });
+    expectAuthorityError(() =>
+      fixture.execution.bind(
+        fixture.plan,
+        fixture.credential,
+        fixture.projection,
+        observation,
+      ),
+    );
+
+    const sidecar = fixture.execution.bind(
+      fixture.plan,
+      fixture.credential,
+      fixture.projection,
+      fixture.execution.registerObservation(privateEvidence()),
+    );
+    expect(fixture.execution.discard(sidecar)).toEqual({
+      status: "discarded",
+    });
+    const approval = mintSetupApproval(fixture.approval, {
+      plan: fixture.plan,
+      source: "interactive",
+    });
+    expect(
+      fixture.execution.consume(fixture.plan, approval, sidecar),
+    ).toEqual({ status: "precondition-failed" });
+  });
+
+  it("rejects duplicate binding while preserving the original sidecar", async () => {
+    const fixture = await setupFixture();
+    const first = fixture.execution.bind(
+      fixture.plan,
+      fixture.credential,
+      fixture.projection,
+      fixture.execution.registerObservation(privateEvidence()),
+    );
+    const duplicateObservation =
+      fixture.execution.registerObservation(privateEvidence());
+
+    expectAuthorityError(() =>
+      fixture.execution.bind(
+        fixture.plan,
+        fixture.credential,
+        fixture.projection,
+        duplicateObservation,
+      ),
+    );
+    expect(fixture.execution.discard(duplicateObservation)).toEqual({
+      status: "precondition-failed",
+    });
+
+    const approval = mintSetupApproval(fixture.approval, {
+      plan: fixture.plan,
+      source: "assume-yes",
+    });
+    expect(
+      fixture.execution.consume(fixture.plan, approval, first),
+    ).toMatchObject({
+      status: "approved",
+      source: "assume-yes",
+    });
+  });
+
+  it("rejects foreign approval authorities without invoking traps", () => {
+    let traps = 0;
+    const proxy = new Proxy(Object.freeze({}), {
+      get() {
+        traps += 1;
+        throw new Error("an unowned approval authority must not be read");
+      },
+      getOwnPropertyDescriptor() {
+        traps += 1;
+        throw new Error("an unowned approval authority must not be inspected");
+      },
+      ownKeys() {
+        traps += 1;
+        throw new Error("an unowned approval authority must not be inspected");
+      },
+    }) as unknown as SetupApprovalAuthority;
+
+    expectAuthorityError(() => createSetupExecutionAuthority(proxy));
+    expect(traps).toBe(0);
+  });
+});

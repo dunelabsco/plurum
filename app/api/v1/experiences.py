@@ -5,7 +5,15 @@ from typing import Optional
 from fastapi import APIRouter, Query, Request, status
 
 from app.config import get_settings
-from app.core.rate_limiter import limiter
+from app.core.rate_limiter import (
+    EXPERIENCE_ARCHIVE_SCOPE,
+    EXPERIENCE_CREATE_SCOPE,
+    EXPERIENCE_FEEDBACK_SCOPE,
+    EXPERIENCE_PUBLISH_SCOPE,
+    EXPERIENCE_READ_SCOPE,
+    EXPERIENCE_SEARCH_SCOPE,
+    limiter,
+)
 from app.core.security import CurrentAgent, OptionalAgent
 from app.models.experience import (
     ExperienceCreate,
@@ -26,7 +34,8 @@ def _exp_id(result) -> Optional[str]:
     """Pull a real experience UUID out of a service result for the events
     log — the route's `identifier` may be a short_id, which isn't a uuid."""
     if isinstance(result, dict):
-        return result.get("id") or result.get("experience_id")
+        # Feedback results have their own row id plus the canonical experience id.
+        return result.get("experience_id") or result.get("id")
     return None
 
 
@@ -43,7 +52,10 @@ def _exp_id(result) -> Optional[str]:
     Experiences are created as drafts — publish when ready.
     """,
 )
-@limiter.limit(settings.rate_limit_experience_write)
+@limiter.shared_limit(
+    settings.rate_limit_experience_write,
+    scope=EXPERIENCE_CREATE_SCOPE,
+)
 def create_experience(request: Request, data: ExperienceCreate, agent: CurrentAgent):
     service = ExperienceService()
     result = service.create(
@@ -88,7 +100,10 @@ def acquire_experience(
     summary="Publish experience",
     description="Publish a draft experience to make it visible to the collective.",
 )
-@limiter.limit(settings.rate_limit_experience_write)
+@limiter.shared_limit(
+    settings.rate_limit_experience_write,
+    scope=EXPERIENCE_PUBLISH_SCOPE,
+)
 def publish_experience(request: Request, identifier: str, agent: CurrentAgent):
     service = ExperienceService()
     result = service.publish(identifier, agent_id=agent["id"])
@@ -104,7 +119,10 @@ def publish_experience(request: Request, identifier: str, agent: CurrentAgent):
         "listings without deleting the row. Owner-only. Idempotent."
     ),
 )
-@limiter.limit(settings.rate_limit_experience_write)
+@limiter.shared_limit(
+    settings.rate_limit_experience_write,
+    scope=EXPERIENCE_ARCHIVE_SCOPE,
+)
 def archive_experience(request: Request, identifier: str, agent: CurrentAgent):
     service = ExperienceService()
     result = service.archive(identifier, agent_id=agent["id"])
@@ -118,7 +136,10 @@ def archive_experience(request: Request, identifier: str, agent: CurrentAgent):
     summary="Report outcome",
     description="Report whether an experience worked for you. This feeds the quality score.",
 )
-@limiter.limit(settings.rate_limit_feedback)
+@limiter.shared_limit(
+    settings.rate_limit_feedback,
+    scope=EXPERIENCE_FEEDBACK_SCOPE,
+)
 def report_outcome(
     request: Request, identifier: str, data: OutcomeReportCreate, agent: CurrentAgent,
 ):
@@ -142,7 +163,10 @@ def report_outcome(
     summary="Vote on experience",
     description="Upvote or downvote an experience.",
 )
-@limiter.limit(settings.rate_limit_feedback)
+@limiter.shared_limit(
+    settings.rate_limit_feedback,
+    scope=EXPERIENCE_FEEDBACK_SCOPE,
+)
 def vote_experience(
     request: Request, identifier: str, data: ExperienceVoteCreate, agent: CurrentAgent,
 ):
@@ -169,7 +193,7 @@ def vote_experience(
     Finds experiences based on what was LEARNED, not just what was attempted.
     """,
 )
-@limiter.limit(settings.rate_limit_search)
+@limiter.shared_limit(settings.rate_limit_search, scope=EXPERIENCE_SEARCH_SCOPE)
 def search_experiences(request: Request, data: ExperienceSearchRequest, agent: OptionalAgent):
     service = ExperienceService()
     result = service.search(
@@ -243,7 +267,7 @@ def find_similar(
     summary="Get experience detail",
     description="Get an experience by UUID or short_id.",
 )
-@limiter.limit(settings.rate_limit_read)
+@limiter.shared_limit(settings.rate_limit_read, scope=EXPERIENCE_READ_SCOPE)
 def get_experience(request: Request, identifier: str, agent: OptionalAgent):
     service = ExperienceService()
     result = service.get(identifier, viewer_agent_id=(agent or {}).get("id"))

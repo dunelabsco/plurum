@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import NoReturn, Optional
 from uuid import UUID
 
 from app.db.supabase_client import get_supabase_client
 from app.core.exceptions import NotFoundError, PlurimException
+
+
+def _cli_registration_unavailable() -> NoReturn:
+    raise PlurimException(
+        "CLI registration is temporarily unavailable",
+        status_code=503,
+        details={"code": "registration_unavailable"},
+    ) from None
 
 
 class AgentRepository:
@@ -41,6 +49,72 @@ class AgentRepository:
             raise PlurimException("Failed to create agent")
 
         return result.data[0]
+
+    def register_cli(
+        self,
+        *,
+        protocol_version: int,
+        registration_request_id: UUID,
+        name: str,
+        username: str,
+        api_key_hash: str,
+        api_key_prefix: str,
+    ) -> dict:
+        """Create or replay one recoverable CLI registration transaction."""
+        try:
+            result = self.client.rpc(
+                "register_cli_agent",
+                {
+                    "p_protocol_version": protocol_version,
+                    "p_registration_request_id": str(registration_request_id),
+                    "p_name": name,
+                    "p_username": username,
+                    "p_api_key_hash": api_key_hash,
+                    "p_api_key_prefix": api_key_prefix,
+                },
+            ).execute()
+        except Exception:
+            _cli_registration_unavailable()
+
+        try:
+            rows = result.data
+        except Exception:
+            _cli_registration_unavailable()
+        if (
+            type(rows) is not list  # noqa: E721 - strict adapter membrane
+            or len(rows) != 1
+            or type(rows[0]) is not dict  # noqa: E721
+            or set(rows[0]) != {"disposition", "agent_id"}
+        ):
+            _cli_registration_unavailable()
+
+        row = rows[0]
+        disposition = row["disposition"]
+        agent_id = row["agent_id"]
+        if type(disposition) is not str:  # noqa: E721
+            _cli_registration_unavailable()
+        if disposition in {"created", "replayed"}:
+            if type(agent_id) is not str:  # noqa: E721
+                _cli_registration_unavailable()
+            try:
+                parsed_agent_id = UUID(agent_id)
+            except ValueError:
+                _cli_registration_unavailable()
+            if str(parsed_agent_id) != agent_id or parsed_agent_id.int == 0:
+                _cli_registration_unavailable()
+            return {
+                "disposition": disposition,
+                "agent_id": parsed_agent_id,
+            }
+
+        if disposition in {
+            "idempotency_conflict",
+            "username_unavailable",
+            "credential_conflict",
+        } and agent_id is None:
+            return {"disposition": disposition, "agent_id": None}
+
+        _cli_registration_unavailable()
 
     def get_by_id(self, agent_id: UUID) -> dict:
         """Get an agent by ID."""

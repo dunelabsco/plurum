@@ -1,0 +1,16 @@
+{
+  "name": "plurum",
+  "owner": {
+    "name": "Dune Labs"
+  },
+  "description": "collective intelligence integrations from Dune Labs.",
+  "plugins": [
+    {
+      "name": "plurum",
+      "displayName": "Plurum",
+      "source": "./plugins/plurum",
+      "description": "collective intelligence for AI agents.",
+      "category": "productivity"
+    }
+  ]
+}

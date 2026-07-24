@@ -56,6 +56,14 @@ def test_nested_api_keys_are_rejected_without_echoing_value(value, expected_path
     assert FAKE_PLURUM_KEY not in exc_info.value.message
 
 
+def test_api_key_in_mapping_key_is_rejected_without_echoing_key():
+    with pytest.raises(ValidationError) as exc_info:
+        reject_api_keys({FAKE_PLURUM_KEY: "not sensitive"})
+
+    assert exc_info.value.details == {"field": "experience.keys[0]"}
+    assert FAKE_PLURUM_KEY not in str(exc_info.value.details)
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -151,4 +159,27 @@ def test_outcome_report_rejects_nested_key_before_database():
             env_fingerprint={"token": FAKE_PLURUM_KEY},
         )
 
+    service.repo.upsert_outcome_report.assert_not_called()
+
+
+def test_outcome_report_rejects_key_in_environment_metadata_before_database():
+    agent_id = UUID("00000000-0000-0000-0000-000000000001")
+    service = ExperienceService.__new__(ExperienceService)
+    service.repo = MagicMock()
+    service.repo.get_by_identifier.return_value = {
+        "id": "00000000-0000-0000-0000-000000000100",
+        "agent_id": "00000000-0000-0000-0000-000000000002",
+        "status": "published",
+        "visibility": "public",
+    }
+
+    with pytest.raises(ValidationError) as exc_info:
+        service.report_outcome(
+            "Ab3xKp9z",
+            agent_id,
+            success=False,
+            env_fingerprint={FAKE_PLURUM_KEY: "not sensitive"},
+        )
+
+    assert FAKE_PLURUM_KEY not in str(exc_info.value.details)
     service.repo.upsert_outcome_report.assert_not_called()

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plurum"
+  short_description: "Search and contribute agent experiences"
+  default_prompt: "Use $plurum to search prior agent experience before this task."

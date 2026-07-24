@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from ipaddress import ip_network
 from typing import Literal
 
+from limits import parse
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,9 +38,9 @@ class Settings(BaseSettings):
     api_key_length: int = 32
 
     # Rate Limiting (requests per minute)
-    rate_limit_standard: int = 100
-    rate_limit_premium: int = 1000
-    rate_limit_unlimited: int = 10000
+    rate_limit_standard: int = Field(default=100, gt=0)
+    rate_limit_premium: int = Field(default=1000, gt=0)
+    rate_limit_unlimited: int = Field(default=10000, gt=0)
 
     # Per-agent write limits (slowapi limit strings, keyed by
     # get_agent_identifier). Embedding-backed writes cost money per call.
@@ -50,6 +53,7 @@ class Settings(BaseSettings):
     rate_limit_register: str = "60/hour"           # open self-registration (sybil surface; env-overridable)
     rate_limit_search: str = "30/minute"           # public; each search triggers a paid embedding call
     rate_limit_read: str = "120/minute"            # public reads: list / get / similar
+    rate_limit_trusted_proxy_networks: list[str] = ["100.0.0.0/8"]
 
     # Usage analytics
     events_enabled: bool = True                    # best-effort event logging to the events table
@@ -67,6 +71,19 @@ class Settings(BaseSettings):
     # Request limits
     max_request_body_bytes: int = 5 * 1024 * 1024  # 5 MB cap on request bodies
 
+    # Hosted MCP transport security. Host validation is enabled explicitly in
+    # the MCP SDK; these defaults cover production plus local/test clients.
+    mcp_allowed_hosts: list[str] = [
+        "mcp.plurum.ai",
+        "mcp.plurum.ai:*",
+        "api.plurum.ai",
+        "api.plurum.ai:*",
+        "localhost:*",
+        "127.0.0.1:*",
+        "testserver",
+    ]
+    mcp_allowed_origins: list[str] = []
+
     # CORS
     allowed_origins: list[str] = ["http://localhost:3000"]
 
@@ -78,6 +95,31 @@ class Settings(BaseSettings):
     pulse_auth_timeout_seconds: float = 10.0
     pulse_max_message_bytes: int = 256 * 1024
     pulse_max_messages_per_minute: int = 60
+
+    @field_validator(
+        "rate_limit_experience_write",
+        "rate_limit_feedback",
+        "rate_limit_acquire",
+        "rate_limit_session_write",
+        "rate_limit_session_entry",
+        "rate_limit_check_username",
+        "rate_limit_register",
+        "rate_limit_search",
+        "rate_limit_read",
+    )
+    @classmethod
+    def validate_rate_limit(cls, value: str) -> str:
+        """Reject invalid limits at startup instead of silently disabling REST limits."""
+        parse(value)
+        return value
+
+    @field_validator("rate_limit_trusted_proxy_networks")
+    @classmethod
+    def validate_trusted_proxy_networks(cls, values: list[str]) -> list[str]:
+        """Reject invalid trusted-proxy CIDRs at startup."""
+        for value in values:
+            ip_network(value, strict=False)
+        return values
 
     @property
     def is_development(self) -> bool:

@@ -3,8 +3,9 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Install poetry
-RUN pip install poetry==1.7.1
+# Keep the builder aligned with the Poetry version that generated poetry.lock.
+# Poetry 2 ships export as a separate plugin.
+RUN pip install poetry==2.4.1 poetry-plugin-export==1.10.0
 
 # Copy dependency files
 COPY pyproject.toml poetry.lock* ./
@@ -42,5 +43,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
-# Run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "262144"]
+# The application validates Railway's X-Real-IP itself; do not let forwarded
+# headers rewrite request.client before the trusted-proxy check.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-proxy-headers", "--ws-max-size", "262144"]
