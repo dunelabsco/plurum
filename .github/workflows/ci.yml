@@ -177,6 +177,12 @@ jobs:
         run: npm run check
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
+      - name: Install the opposite macOS Rust target on arm64
+        if: matrix.target == 'darwin-arm64' && runner.os == 'macOS' && runner.arch == 'ARM64'
+        run: rustup target add --toolchain 1.97.1-aarch64-apple-darwin x86_64-apple-darwin
+      - name: Install the opposite macOS Rust target on x64
+        if: matrix.target == 'darwin-x64' && runner.os == 'macOS' && runner.arch == 'X64'
+        run: rustup target add --toolchain 1.97.1-x86_64-apple-darwin aarch64-apple-darwin
       - name: Fetch locked Rust dependencies
         run: node native/credential-store/tests/run-isolated-cargo.mjs fetch
       - name: Verify locked Rust metadata and features
@@ -191,25 +197,666 @@ jobs:
         run: node native/credential-store/tests/run-isolated-cargo.mjs clippy
       - name: Test the native foundation
         run: node native/credential-store/tests/run-isolated-cargo.mjs test
+      - name: Build the disposable native process evidence
+        run: node native/credential-store/tests/run-isolated-cargo.mjs process-evidence-build
+        env:
+          PLURUM_NATIVE_PROCESS_EVIDENCE: github-five-row-universal-macos-build-v1
+      - name: Verify disposable native process evidence on POSIX
+        if: matrix.target != 'win32-x64-msvc'
+        run: node native/credential-store/tests/run-isolated-cargo.mjs process-evidence-run
+        env:
+          PLURUM_NATIVE_PROCESS_EVIDENCE: github-posix-universal-macos-run-v1
       - name: Build the test-only Windows launchers
         if: matrix.target == 'win32-x64-msvc'
         run: node native/credential-store/tests/run-isolated-cargo.mjs launcher
-      - name: Verify native Windows runtime identity evidence
+      - name: Verify native Windows runtime and process evidence
         if: matrix.target == 'win32-x64-msvc' && runner.environment == 'github-hosted'
         shell: pwsh
         env:
+          PLURUM_WINDOWS_PROCESS_EVIDENCE: github-windows-process-run-v1
           PLURUM_WINDOWS_RUNTIME_EVIDENCE: github-windows-2025-x64-v1
         run: |
           $ErrorActionPreference = "Stop"
           if (
             $env:CI -cne "true" -or
             $env:GITHUB_ACTIONS -cne "true" -or
+            $env:GITHUB_REPOSITORY -cne "dunelabsco/plurum" -or
             $env:RUNNER_OS -cne "Windows" -or
+            $env:RUNNER_ARCH -cne "X64" -or
             $env:RUNNER_ENVIRONMENT -cne "github-hosted" -or
             $env:PLURUM_NATIVE_RUST_HOST -cne "x86_64-pc-windows-msvc" -or
+            $env:PLURUM_WINDOWS_PROCESS_EVIDENCE -cne "github-windows-process-run-v1" -or
+            $env:PLURUM_NATIVE_PROCESS_EVIDENCE_SENTINEL -cne "plurum-native-process-evidence-run-v1" -or
             $env:PLURUM_WINDOWS_RUNTIME_EVIDENCE -cne "github-windows-2025-x64-v1"
           ) {
             throw "Windows runtime evidence is restricted to the exact GitHub Actions row"
+          }
+
+          function Get-ValidatedDescendantItem {
+            param(
+              [Parameter(Mandatory = $true)][string]$Root,
+              [Parameter(Mandatory = $true)][string]$Candidate,
+              [Parameter(Mandatory = $true)][bool]$Directory,
+              [Parameter(Mandatory = $true)][string]$Label
+            )
+
+            $rootItem = Get-Item -LiteralPath $Root -Force
+            if (
+              -not $rootItem.PSIsContainer -or
+              ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+            ) {
+              throw "$Label root is invalid"
+            }
+            $candidateFullPath = [IO.Path]::GetFullPath($Candidate)
+            $relativePath = [IO.Path]::GetRelativePath(
+              $rootItem.FullName,
+              $candidateFullPath
+            )
+            if (
+              [IO.Path]::IsPathRooted($relativePath) -or
+              $relativePath -eq "." -or
+              $relativePath -eq ".." -or
+              $relativePath.StartsWith("..\", [StringComparison]::Ordinal) -or
+              $relativePath.StartsWith("../", [StringComparison]::Ordinal)
+            ) {
+              throw "$Label escaped its required root"
+            }
+
+            $current = $rootItem.FullName
+            $components = $relativePath.Split(
+              [char[]]@("\", "/"),
+              [StringSplitOptions]::RemoveEmptyEntries
+            )
+            if ($components.Count -eq 0) {
+              throw "$Label has no descendant components"
+            }
+            $item = $null
+            foreach ($component in $components) {
+              if ($component -eq "." -or $component -eq "..") {
+                throw "$Label contains a traversal component"
+              }
+              $current = Join-Path $current $component
+              $item = Get-Item -LiteralPath $current -Force
+              if (
+                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+              ) {
+                throw "$Label contains a reparse point"
+              }
+            }
+            if (
+              -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                $item.FullName,
+                $candidateFullPath
+              ) -or
+              $item.PSIsContainer -ne $Directory
+            ) {
+              throw "$Label has the wrong object kind or path"
+            }
+            return $item
+          }
+
+          function Assert-ArtifactHash {
+            param(
+              [Parameter(Mandatory = $true)]$Item,
+              [Parameter(Mandatory = $true)][string]$Expected,
+              [Parameter(Mandatory = $true)][string]$Label
+            )
+
+            if ($Expected -cnotmatch "^[0-9a-f]{64}$") {
+              throw "$Label expected hash is invalid"
+            }
+            $actual = (Get-FileHash `
+              -LiteralPath $Item.FullName `
+              -Algorithm SHA256).Hash
+            if (
+              -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                $actual,
+                $Expected
+              )
+            ) {
+              throw "$Label hash changed"
+            }
+          }
+
+          function Assert-TrustedProcessEvidenceAcl {
+            param(
+              [Parameter(Mandatory = $true)][string]$Path,
+              [Parameter(Mandatory = $true)][string]$AccountSid
+            )
+
+            $acl = Get-Acl -LiteralPath $Path
+            $ownerSid = ([Security.Principal.NTAccount]::new(
+              $acl.Owner
+            )).Translate(
+              [Security.Principal.SecurityIdentifier]
+            ).Value
+            if ($ownerSid -cne $AccountSid -or -not $acl.AreAccessRulesProtected) {
+              throw "protected process-evidence ownership is invalid"
+            }
+
+            $allowedSids = [Collections.Generic.HashSet[string]]::new(
+              [StringComparer]::Ordinal
+            )
+            [void]$allowedSids.Add($AccountSid)
+            [void]$allowedSids.Add("S-1-5-18")
+            [void]$allowedSids.Add("S-1-5-32-544")
+            $observedSids = [Collections.Generic.HashSet[string]]::new(
+              [StringComparer]::Ordinal
+            )
+            $rules = $acl.GetAccessRules(
+              $true,
+              $true,
+              [Security.Principal.SecurityIdentifier]
+            )
+            foreach ($rule in $rules) {
+              $sid = $rule.IdentityReference.Value
+              if (
+                $rule.IsInherited -or
+                $rule.AccessControlType -ne
+                  [Security.AccessControl.AccessControlType]::Allow -or
+                ($rule.FileSystemRights -band
+                  [Security.AccessControl.FileSystemRights]::FullControl) -ne
+                  [Security.AccessControl.FileSystemRights]::FullControl -or
+                -not $allowedSids.Contains($sid)
+              ) {
+                throw "protected process-evidence ACL grants an unexpected principal"
+              }
+              [void]$observedSids.Add($sid)
+            }
+            if (
+              $observedSids.Count -ne $allowedSids.Count -or
+              $allowedSids.Where({ -not $observedSids.Contains($_) }).Count -ne 0
+            ) {
+              throw "protected process-evidence ACL is incomplete"
+            }
+          }
+
+          function Assert-RuntimeIdentityEvidenceAcl {
+            param(
+              [Parameter(Mandatory = $true)][string]$Path,
+              [Parameter(Mandatory = $true)][string]$AccountSid
+            )
+
+            $acl = Get-Acl -LiteralPath $Path
+            $ownerSid = ([Security.Principal.NTAccount]::new(
+              $acl.Owner
+            )).Translate(
+              [Security.Principal.SecurityIdentifier]
+            ).Value
+            if (
+              $ownerSid -cne "S-1-5-32-544" -or
+              -not $acl.AreAccessRulesProtected
+            ) {
+              throw "runtime-identity evidence ownership is invalid"
+            }
+
+            $rules = @(
+              $acl.GetAccessRules(
+                $true,
+                $true,
+                [Security.Principal.SecurityIdentifier]
+              )
+            )
+            if ($rules.Count -ne 3) {
+              throw "runtime-identity evidence ACL has an unexpected rule count"
+            }
+            $allowedSids = [Collections.Generic.HashSet[string]]::new(
+              [StringComparer]::Ordinal
+            )
+            [void]$allowedSids.Add($AccountSid)
+            [void]$allowedSids.Add("S-1-5-18")
+            [void]$allowedSids.Add("S-1-5-32-544")
+            $observedSids = [Collections.Generic.HashSet[string]]::new(
+              [StringComparer]::Ordinal
+            )
+            $mutatingRights =
+              [Security.AccessControl.FileSystemRights]::WriteData -bor
+              [Security.AccessControl.FileSystemRights]::AppendData -bor
+              [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+              [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+              [Security.AccessControl.FileSystemRights]::Delete -bor
+              [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+              [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+              [Security.AccessControl.FileSystemRights]::TakeOwnership
+            foreach ($rule in $rules) {
+              $sid = $rule.IdentityReference.Value
+              if (
+                $rule.IsInherited -or
+                $rule.AccessControlType -ne
+                  [Security.AccessControl.AccessControlType]::Allow -or
+                -not $allowedSids.Contains($sid)
+              ) {
+                throw "runtime-identity evidence ACL grants an unexpected principal"
+              }
+              if ($sid -ceq $AccountSid) {
+                if (
+                  ($rule.FileSystemRights -band
+                    [Security.AccessControl.FileSystemRights]::ReadAndExecute) -ne
+                    [Security.AccessControl.FileSystemRights]::ReadAndExecute -or
+                  ($rule.FileSystemRights -band $mutatingRights) -ne 0
+                ) {
+                  throw "runtime-identity evidence account rights are unsafe"
+                }
+              }
+              elseif (
+                ($rule.FileSystemRights -band
+                  [Security.AccessControl.FileSystemRights]::FullControl) -ne
+                  [Security.AccessControl.FileSystemRights]::FullControl
+              ) {
+                throw "runtime-identity evidence administrator rights are incomplete"
+              }
+              [void]$observedSids.Add($sid)
+            }
+            if (
+              $observedSids.Count -ne $allowedSids.Count -or
+              $allowedSids.Where({ -not $observedSids.Contains($_) }).Count -ne 0
+            ) {
+              throw "runtime-identity evidence ACL is incomplete"
+            }
+          }
+
+          function Get-RuntimeIdentityEvidenceCleanupTree {
+            param(
+              [Parameter(Mandatory = $true)][string]$Path,
+              [Parameter(Mandatory = $true)][string]$IsolationRoot,
+              [Parameter(Mandatory = $true)][string]$CleanupToken,
+              [Parameter(Mandatory = $true)][string]$ExpectedProbeHash,
+              [Parameter(Mandatory = $true)][long]$ExpectedProbeSize,
+              [Parameter(Mandatory = $true)][string]$AccountSid
+            )
+
+            $rootItem = Get-ValidatedDescendantItem `
+              -Root $IsolationRoot `
+              -Candidate $Path `
+              -Directory $true `
+              -Label "runtime-identity evidence cleanup root"
+            if (
+              [IO.Path]::GetFileName($rootItem.FullName) -cne
+                "windows-runtime-identity" -or
+              -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                [IO.Path]::GetDirectoryName($rootItem.FullName),
+                $IsolationRoot
+              )
+            ) {
+              throw "runtime-identity evidence cleanup root is invalid"
+            }
+
+            $expectedNames = [Collections.Generic.HashSet[string]]::new(
+              [StringComparer]::OrdinalIgnoreCase
+            )
+            [void]$expectedNames.Add("runtime-identity-probe.exe")
+            [void]$expectedNames.Add(
+              ".plurum-windows-runtime-identity-cleanup"
+            )
+            $children = @(
+              Get-ChildItem `
+                -LiteralPath $rootItem.FullName `
+                -Force `
+                -ErrorAction Stop
+            )
+            if ($children.Count -ne $expectedNames.Count) {
+              throw "runtime-identity evidence tree contains unexpected entries"
+            }
+            foreach ($child in $children) {
+              if (
+                $child.PSIsContainer -or
+                ($child.Attributes -band
+                  [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                -not $expectedNames.Contains($child.Name)
+              ) {
+                throw "runtime-identity evidence tree contains an unsafe entry"
+              }
+            }
+
+            $probeItem = Get-ValidatedDescendantItem `
+              -Root $rootItem.FullName `
+              -Candidate (Join-Path `
+                $rootItem.FullName `
+                "runtime-identity-probe.exe") `
+              -Directory $false `
+              -Label "runtime-identity evidence cleanup probe"
+            $markerItem = Get-ValidatedDescendantItem `
+              -Root $rootItem.FullName `
+              -Candidate (Join-Path `
+                $rootItem.FullName `
+                ".plurum-windows-runtime-identity-cleanup") `
+              -Directory $false `
+              -Label "runtime-identity evidence cleanup marker"
+            if ($probeItem.Length -ne $ExpectedProbeSize) {
+              throw "runtime-identity evidence probe size changed"
+            }
+            Assert-ArtifactHash `
+              -Item $probeItem `
+              -Expected $ExpectedProbeHash `
+              -Label "runtime-identity evidence cleanup probe"
+            $expectedMarker =
+              "plurum-windows-runtime-identity-cleanup-v1`n$CleanupToken`n"
+            if (
+              [IO.File]::ReadAllText($markerItem.FullName) -cne
+                $expectedMarker
+            ) {
+              throw "runtime-identity evidence cleanup marker changed"
+            }
+            foreach ($item in @($rootItem, $probeItem, $markerItem)) {
+              Assert-RuntimeIdentityEvidenceAcl `
+                -Path $item.FullName `
+                -AccountSid $AccountSid
+            }
+
+            return [PSCustomObject]@{
+              Root = $rootItem
+              Probe = $probeItem
+              Marker = $markerItem
+            }
+          }
+
+          function Get-ExactCimProcess {
+            param(
+              [Parameter(Mandatory = $true)][uint32]$ProcessId,
+              [Parameter(Mandatory = $true)][datetime]$CreationDate
+            )
+
+            $matches = @(
+              Get-CimInstance `
+                -ClassName Win32_Process `
+                -Filter "ProcessId = $ProcessId" `
+                -Property ProcessId,CreationDate,Name `
+                -OperationTimeoutSec 2 `
+                -ErrorAction Stop |
+                  Where-Object { $_.CreationDate -eq $CreationDate }
+            )
+            if ($matches.Count -gt 1) {
+              throw "CIM returned duplicate process identities"
+            }
+            if ($matches.Count -eq 1) {
+              return $matches[0]
+            }
+            return $null
+          }
+
+          function Get-DisposableAccountProcessScan {
+            param(
+              [Parameter(Mandatory = $true)][string]$AccountSid,
+              [Parameter(Mandatory = $true)]$Clock,
+              [Parameter(Mandatory = $true)][int]$TimeoutMilliseconds
+            )
+
+            $expectedOwnerSid =
+              [Security.Principal.SecurityIdentifier]::new($AccountSid)
+            if ($Clock.ElapsedMilliseconds -ge $TimeoutMilliseconds) {
+              throw "disposable-account process scan exceeded its bound"
+            }
+            $snapshot = @(
+              Get-CimInstance `
+                -ClassName Win32_Process `
+                -Property ProcessId,CreationDate,Name `
+                -OperationTimeoutSec 2 `
+                -ErrorAction Stop
+            )
+            $stable = $true
+            $ownedCount = 0
+            foreach ($candidate in $snapshot) {
+              if ($candidate.ProcessId -eq 0) {
+                continue
+              }
+              if ($Clock.ElapsedMilliseconds -ge $TimeoutMilliseconds) {
+                throw "disposable-account process scan exceeded its bound"
+              }
+              $exact = Get-ExactCimProcess `
+                -ProcessId $candidate.ProcessId `
+                -CreationDate $candidate.CreationDate
+              if ($null -eq $exact) {
+                $stable = $false
+                continue
+              }
+              try {
+                $owner = Invoke-CimMethod `
+                  -InputObject $exact `
+                  -MethodName GetOwnerSid `
+                  -OperationTimeoutSec 2 `
+                  -ErrorAction Stop
+              }
+              catch {
+                if (
+                  $null -ne (
+                    Get-ExactCimProcess `
+                      -ProcessId $candidate.ProcessId `
+                      -CreationDate $candidate.CreationDate
+                  )
+                ) {
+                  throw
+                }
+                $stable = $false
+                continue
+              }
+              if ($owner.ReturnValue -ne 0) {
+                if (
+                  $null -ne (
+                    Get-ExactCimProcess `
+                      -ProcessId $candidate.ProcessId `
+                      -CreationDate $candidate.CreationDate
+                  )
+                ) {
+                  throw "GetOwnerSid failed for a live process"
+                }
+                $stable = $false
+                continue
+              }
+              if (
+                $null -eq (
+                  Get-ExactCimProcess `
+                    -ProcessId $candidate.ProcessId `
+                    -CreationDate $candidate.CreationDate
+                )
+              ) {
+                $stable = $false
+                continue
+              }
+              try {
+                if ([string]::IsNullOrWhiteSpace([string]$owner.Sid)) {
+                  throw "GetOwnerSid returned an empty SID"
+                }
+                $ownerSid =
+                  [Security.Principal.SecurityIdentifier]::new(
+                    [string]$owner.Sid
+                  )
+              }
+              catch {
+                if (
+                  $null -ne (
+                    Get-ExactCimProcess `
+                      -ProcessId $candidate.ProcessId `
+                      -CreationDate $candidate.CreationDate
+                  )
+                ) {
+                  throw "GetOwnerSid returned an invalid SID for a live process"
+                }
+                $stable = $false
+                continue
+              }
+              if ($ownerSid.Equals($expectedOwnerSid)) {
+                $ownedCount++
+              }
+            }
+            return [PSCustomObject]@{
+              Stable = $stable
+              OwnedCount = $ownedCount
+            }
+          }
+
+          function Disable-And-ProveDisposableAccountQuiescent {
+            param(
+              [Parameter(Mandatory = $true)][string]$AccountSid,
+              [Parameter(Mandatory = $true)][string]$AccountName,
+              [int]$TimeoutMilliseconds = 60000
+            )
+
+            $sid = [Security.Principal.SecurityIdentifier]::new($AccountSid)
+            $account = Get-LocalUser -SID $sid -ErrorAction Stop
+            if ($account.Name -cne $AccountName) {
+              throw "disposable-account SID no longer names the expected user"
+            }
+            if ($account.Enabled) {
+              Disable-LocalUser -SID $sid -ErrorAction Stop
+            }
+            $disabled = Get-LocalUser -SID $sid -ErrorAction Stop
+            if ($disabled.Name -cne $AccountName -or $disabled.Enabled) {
+              throw "disposable account did not become disabled"
+            }
+
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $stableEmptyScans = 0
+            while ($clock.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+              $scan = Get-DisposableAccountProcessScan `
+                -AccountSid $AccountSid `
+                -Clock $clock `
+                -TimeoutMilliseconds $TimeoutMilliseconds
+              if ($scan.Stable -and $scan.OwnedCount -eq 0) {
+                $stableEmptyScans++
+                if ($stableEmptyScans -eq 2) {
+                  return
+                }
+              }
+              else {
+                $stableEmptyScans = 0
+              }
+              Start-Sleep -Milliseconds 100
+            }
+            throw "disposable-account processes did not quiesce within the bound"
+          }
+
+          function Assert-ProcessEvidenceCleanupRoot {
+            param(
+              [Parameter(Mandatory = $true)][string]$Path,
+              [Parameter(Mandatory = $true)][string]$FixedDriveRoot,
+              [Parameter(Mandatory = $true)][string]$CleanupToken
+            )
+
+            $item = Get-Item -LiteralPath $Path -Force
+            if (
+              -not $item.PSIsContainer -or
+              ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+              [IO.Path]::GetFileName($item.FullName) -cne "plurum-native-isolation" -or
+              -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                [IO.Path]::GetDirectoryName($item.FullName),
+                $FixedDriveRoot
+              )
+            ) {
+              throw "protected process-evidence cleanup root is invalid"
+            }
+            $isolationMarkerItem = Get-ValidatedDescendantItem `
+              -Root $item.FullName `
+              -Candidate (Join-Path $item.FullName ".plurum-native-isolation") `
+              -Directory $false `
+              -Label "protected isolation marker"
+            if (
+              [IO.File]::ReadAllText($isolationMarkerItem.FullName) -cne
+                "plurum-native-isolation-v1`n"
+            ) {
+              throw "protected isolation marker changed"
+            }
+            $cleanupMarkerItem = Get-ValidatedDescendantItem `
+              -Root $item.FullName `
+              -Candidate (Join-Path $item.FullName ".plurum-native-process-evidence-cleanup") `
+              -Directory $false `
+              -Label "protected cleanup marker"
+            $expectedCleanupMarker =
+              "plurum-native-process-evidence-cleanup-v1`n$CleanupToken`n"
+            if (
+              [IO.File]::ReadAllText($cleanupMarkerItem.FullName) -cne
+                $expectedCleanupMarker
+            ) {
+              throw "protected process-evidence cleanup marker changed"
+            }
+          }
+
+          function Get-ExpectedProcessEvidenceTree {
+            param(
+              [Parameter(Mandatory = $true)][string]$Path
+            )
+
+            $rootItem = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+            if (
+              -not $rootItem.PSIsContainer -or
+              ($rootItem.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0
+            ) {
+              throw "protected process-evidence tree root is invalid"
+            }
+
+            $expectedNames = [Collections.Generic.HashSet[string]]::new(
+              [StringComparer]::OrdinalIgnoreCase
+            )
+            foreach ($name in @(
+              "tmp",
+              ".plurum-native-isolation",
+              ".plurum-native-process-evidence-cleanup",
+              "plurum-native-process-test-probe.exe",
+              "plurum-native-process-evidence-harness.exe"
+            )) {
+              [void]$expectedNames.Add($name)
+            }
+
+            $children = @(
+              Get-ChildItem `
+                -LiteralPath $rootItem.FullName `
+                -Force `
+                -ErrorAction Stop
+            )
+            if ($children.Count -ne $expectedNames.Count) {
+              throw "protected process-evidence tree contains unexpected entries"
+            }
+            foreach ($child in $children) {
+              if (
+                -not $expectedNames.Contains($child.Name) -or
+                ($child.Attributes -band
+                  [IO.FileAttributes]::ReparsePoint) -ne 0
+              ) {
+                throw "protected process-evidence tree contains an unsafe entry"
+              }
+            }
+
+            $temporaryItem = Get-Item `
+              -LiteralPath (Join-Path $rootItem.FullName "tmp") `
+              -Force `
+              -ErrorAction Stop
+            if (
+              -not $temporaryItem.PSIsContainer -or
+              @(
+                Get-ChildItem `
+                  -LiteralPath $temporaryItem.FullName `
+                  -Force `
+                  -ErrorAction Stop
+              ).Count -ne 0
+            ) {
+              throw "protected process-evidence temporary directory is not empty"
+            }
+
+            return @($rootItem) + $children
+          }
+
+          function Assert-AccountSidAbsentFromAcl {
+            param(
+              [Parameter(Mandatory = $true)][string]$Path,
+              [Parameter(Mandatory = $true)][string]$AccountSid
+            )
+
+            $acl = Get-Acl -LiteralPath $Path
+            $rules = $acl.GetAccessRules(
+              $true,
+              $true,
+              [Security.Principal.SecurityIdentifier]
+            )
+            if (
+              @(
+                $rules |
+                  Where-Object {
+                    $_.IdentityReference.Value -ceq $AccountSid
+                  }
+              ).Count -ne 0
+            ) {
+              throw "disposable account SID survived ACL cleanup"
+            }
           }
 
           $runnerTemporaryItem = Get-Item -LiteralPath $env:RUNNER_TEMP -Force
@@ -294,6 +941,91 @@ jobs:
             throw "Windows runtime evidence neutral directory is invalid"
           }
 
+          $processEvidenceManifestItem = Get-ValidatedDescendantItem `
+            -Root $isolationRoot `
+            -Candidate $env:PLURUM_NATIVE_PROCESS_EVIDENCE_MANIFEST `
+            -Directory $false `
+            -Label "native process evidence manifest"
+          if (
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+              $processEvidenceManifestItem.FullName,
+              (Join-Path `
+                $neutralDirectoryItem.FullName `
+                ".plurum-native-process-evidence-manifest-v1.json")
+            )
+          ) {
+            throw "native process evidence manifest path is invalid"
+          }
+          $processEvidenceManifest = Get-Content `
+            -LiteralPath $processEvidenceManifestItem.FullName `
+            -Raw |
+              ConvertFrom-Json -Depth 16
+          if (
+            $processEvidenceManifest.version -ne 1 -or
+            $processEvidenceManifest.marker -cne
+              "plurum-native-process-evidence-manifest-v1" -or
+            $processEvidenceManifest.platform -cne "win32" -or
+            $processEvidenceManifest.arch -cne "x64" -or
+            $processEvidenceManifest.rustHost -cne
+              "x86_64-pc-windows-msvc" -or
+            $processEvidenceManifest.toolchain -cne "1.97.1" -or
+            $processEvidenceManifest.probeLayout.kind -cne "thin" -or
+            @($processEvidenceManifest.probeLayout.rustTargets).Count -ne 1 -or
+            $processEvidenceManifest.probeLayout.rustTargets[0] -cne
+              "x86_64-pc-windows-msvc" -or
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+              $processEvidenceManifest.cargoTarget,
+              $cargoTarget
+            ) -or
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+              $processEvidenceManifest.probe.path,
+              $env:PLURUM_NATIVE_PROCESS_PROBE_PATH
+            ) -or
+            $processEvidenceManifest.probe.sha256 -cne
+              $env:PLURUM_NATIVE_PROCESS_PROBE_SHA256 -or
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+              $processEvidenceManifest.harness.path,
+              $env:PLURUM_NATIVE_PROCESS_HARNESS_PATH
+            ) -or
+            $processEvidenceManifest.harness.sha256 -cne
+              $env:PLURUM_NATIVE_PROCESS_HARNESS_SHA256
+          ) {
+            throw "native process evidence manifest did not survive GITHUB_ENV"
+          }
+
+          $sourceProcessProbeItem = Get-ValidatedDescendantItem `
+            -Root $cargoTarget `
+            -Candidate $env:PLURUM_NATIVE_PROCESS_PROBE_PATH `
+            -Directory $false `
+            -Label "native process evidence probe"
+          $sourceProcessHarnessItem = Get-ValidatedDescendantItem `
+            -Root $cargoTarget `
+            -Candidate $env:PLURUM_NATIVE_PROCESS_HARNESS_PATH `
+            -Directory $false `
+            -Label "native process evidence harness"
+          if (
+            [StringComparer]::OrdinalIgnoreCase.Equals(
+              $sourceProcessProbeItem.FullName,
+              $sourceProcessHarnessItem.FullName
+            ) -or
+            $sourceProcessProbeItem.Length -le 0 -or
+            $sourceProcessHarnessItem.Length -le 0 -or
+            $sourceProcessProbeItem.Length.ToString() -cne
+              $processEvidenceManifest.probe.size -or
+            $sourceProcessHarnessItem.Length.ToString() -cne
+              $processEvidenceManifest.harness.size
+          ) {
+            throw "native process evidence artifacts are invalid"
+          }
+          Assert-ArtifactHash `
+            -Item $sourceProcessProbeItem `
+            -Expected $env:PLURUM_NATIVE_PROCESS_PROBE_SHA256 `
+            -Label "native process evidence probe"
+          Assert-ArtifactHash `
+            -Item $sourceProcessHarnessItem `
+            -Expected $env:PLURUM_NATIVE_PROCESS_HARNESS_SHA256 `
+            -Label "native process evidence harness"
+
           foreach ($mode in @(
             "ambient-elevated-rejected",
             "lowered-elevated-rejected"
@@ -314,7 +1046,9 @@ jobs:
               $probeProcess = [Diagnostics.Process]::Start($probeStartInfo)
               if (-not $probeProcess.WaitForExit(60000)) {
                 $probeProcess.Kill($true)
-                $probeProcess.WaitForExit()
+                if (-not $probeProcess.WaitForExit(15000)) {
+                  throw "elevated runtime evidence did not terminate after its bound"
+                }
                 throw "elevated runtime evidence timed out"
               }
               if ($probeProcess.ExitCode -ne 0) {
@@ -325,7 +1059,9 @@ jobs:
               if ($null -ne $probeProcess) {
                 if (-not $probeProcess.HasExited) {
                   $probeProcess.Kill($true)
-                  $probeProcess.WaitForExit()
+                  if (-not $probeProcess.WaitForExit(15000)) {
+                    throw "elevated runtime evidence cleanup timed out"
+                  }
                 }
                 $probeProcess.Dispose()
               }
@@ -350,6 +1086,24 @@ jobs:
             throw "Windows runtime evidence ACL tool is invalid"
           }
 
+          $fixedDriveRoot = [IO.Path]::GetPathRoot($systemRootItem.FullName)
+          $fixedDriveRootItem = Get-Item -LiteralPath $fixedDriveRoot -Force
+          $fixedDrive = [IO.DriveInfo]::new($fixedDriveRoot)
+          if (
+            -not $fixedDriveRootItem.PSIsContainer -or
+            ($fixedDriveRootItem.Attributes -band
+              [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            -not $fixedDrive.IsReady -or
+            $fixedDrive.DriveType -ne [IO.DriveType]::Fixed -or
+            $fixedDrive.DriveFormat -cne "NTFS" -or
+            -not [StringComparer]::OrdinalIgnoreCase.Equals(
+              $fixedDrive.RootDirectory.FullName,
+              $fixedDriveRootItem.FullName
+            )
+          ) {
+            throw "Windows process evidence requires the local fixed NTFS system drive"
+          }
+
           $accountName = "plurum" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
           $randomBytes = [byte[]]::new(32)
           [Security.Cryptography.RandomNumberGenerator]::Fill($randomBytes)
@@ -361,8 +1115,15 @@ jobs:
 
           $accountCreated = $false
           $evidenceDirectory = Join-Path $isolationRoot "windows-runtime-identity"
+          $runtimeEvidenceCleanupToken = [Guid]::NewGuid().ToString("N")
+          $runtimeEvidenceProbeHash = $null
+          $runtimeEvidenceProbeSize = 0
+          $processEvidenceRoot = Join-Path $fixedDriveRoot "plurum-native-isolation"
+          $processEvidenceRootCreated = $false
+          $processEvidenceCleanupToken = [Guid]::NewGuid().ToString("N")
           $accountSid = $null
           $activeProcess = $null
+          $processEvidenceQuiescent = $true
           $primaryFailure = $null
           $cleanupFailures = [Collections.Generic.List[Exception]]::new()
           try {
@@ -410,14 +1171,62 @@ jobs:
             ) {
               throw "disposable runtime-evidence probe is invalid"
             }
+            $runtimeEvidenceProbeHash = (
+              Get-FileHash `
+                -LiteralPath $probeItem.FullName `
+                -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            $runtimeEvidenceProbeSize = $probeItem.Length
+            Assert-ArtifactHash `
+              -Item $stagedProbeItem `
+              -Expected $runtimeEvidenceProbeHash `
+              -Label "staged runtime-identity evidence probe"
+            if ($stagedProbeItem.Length -ne $runtimeEvidenceProbeSize) {
+              throw "staged runtime-identity evidence probe size changed"
+            }
+            $runtimeEvidenceCleanupMarker = Join-Path `
+              $evidenceDirectory `
+              ".plurum-windows-runtime-identity-cleanup"
+            $utf8WithoutBom = [Text.UTF8Encoding]::new($false, $true)
+            [IO.File]::WriteAllText(
+              $runtimeEvidenceCleanupMarker,
+              "plurum-windows-runtime-identity-cleanup-v1`n$runtimeEvidenceCleanupToken`n",
+              $utf8WithoutBom
+            )
             & $icaclsItem.FullName $isolationRoot /grant "*$accountSid`:(RX)" | Out-Null
             if ($LASTEXITCODE -ne 0) {
               throw "failed to grant disposable isolation-root traversal"
             }
-            & $icaclsItem.FullName $evidenceDirectory /grant "*$accountSid`:(OI)(CI)(RX)" | Out-Null
+            $runtimeEvidenceAclArguments = @(
+              $evidenceDirectory,
+              "/inheritance:r",
+              "/grant:r",
+              "*$accountSid`:(OI)(CI)(RX)",
+              "*S-1-5-18:(OI)(CI)(F)",
+              "*S-1-5-32-544:(OI)(CI)(F)",
+              "/T",
+              "/L"
+            )
+            & $icaclsItem.FullName @runtimeEvidenceAclArguments | Out-Null
             if ($LASTEXITCODE -ne 0) {
-              throw "failed to grant disposable probe access"
+              throw "failed to protect runtime-identity evidence ACLs"
             }
+            & $icaclsItem.FullName `
+              $evidenceDirectory `
+              /setowner "*S-1-5-32-544" `
+              /T `
+              /L |
+                Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              throw "failed to bind runtime-identity evidence ownership"
+            }
+            [void](Get-RuntimeIdentityEvidenceCleanupTree `
+              -Path $evidenceDirectory `
+              -IsolationRoot $isolationRoot `
+              -CleanupToken $runtimeEvidenceCleanupToken `
+              -ExpectedProbeHash $runtimeEvidenceProbeHash `
+              -ExpectedProbeSize $runtimeEvidenceProbeSize `
+              -AccountSid $accountSid)
 
             foreach ($mode in @(
               "standard-default-stable",
@@ -442,7 +1251,9 @@ jobs:
               $activeProcess = [Diagnostics.Process]::Start($startInfo)
               if (-not $activeProcess.WaitForExit(60000)) {
                 $activeProcess.Kill($true)
-                $activeProcess.WaitForExit()
+                if (-not $activeProcess.WaitForExit(15000)) {
+                  throw "standard-user runtime evidence did not terminate after its bound"
+                }
                 throw "standard-user runtime evidence timed out"
               }
               if ($activeProcess.ExitCode -ne 0) {
@@ -451,6 +1262,212 @@ jobs:
               $activeProcess.Dispose()
               $activeProcess = $null
             }
+
+            if (Test-Path -LiteralPath $processEvidenceRoot) {
+              throw "protected process-evidence root already exists"
+            }
+            $processEvidenceRootItem = New-Item `
+              -ItemType Directory `
+              -Path $processEvidenceRoot
+            $processEvidenceRootCreated = $true
+            if (
+              -not $processEvidenceRootItem.PSIsContainer -or
+              ($processEvidenceRootItem.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+              -not [StringComparer]::OrdinalIgnoreCase.Equals(
+                [IO.Path]::GetDirectoryName(
+                  $processEvidenceRootItem.FullName
+                ),
+                $fixedDriveRoot
+              ) -or
+              [IO.Path]::GetFileName(
+                $processEvidenceRootItem.FullName
+              ) -cne "plurum-native-isolation"
+            ) {
+              throw "protected process-evidence root was not a direct drive child"
+            }
+
+            $processEvidenceTemporaryItem = New-Item `
+              -ItemType Directory `
+              -Path (Join-Path $processEvidenceRoot "tmp")
+            $isolationMarkerPath = Join-Path `
+              $processEvidenceRoot `
+              ".plurum-native-isolation"
+            $cleanupMarkerPath = Join-Path `
+              $processEvidenceRoot `
+              ".plurum-native-process-evidence-cleanup"
+            $utf8WithoutBom = [Text.UTF8Encoding]::new($false, $true)
+            [IO.File]::WriteAllText(
+              $isolationMarkerPath,
+              "plurum-native-isolation-v1`n",
+              $utf8WithoutBom
+            )
+            [IO.File]::WriteAllText(
+              $cleanupMarkerPath,
+              "plurum-native-process-evidence-cleanup-v1`n$processEvidenceCleanupToken`n",
+              $utf8WithoutBom
+            )
+
+            Assert-ArtifactHash `
+              -Item $sourceProcessProbeItem `
+              -Expected $env:PLURUM_NATIVE_PROCESS_PROBE_SHA256 `
+              -Label "source native process evidence probe"
+            Assert-ArtifactHash `
+              -Item $sourceProcessHarnessItem `
+              -Expected $env:PLURUM_NATIVE_PROCESS_HARNESS_SHA256 `
+              -Label "source native process evidence harness"
+            $stagedProcessProbe = Join-Path `
+              $processEvidenceRoot `
+              "plurum-native-process-test-probe.exe"
+            $stagedProcessHarness = Join-Path `
+              $processEvidenceRoot `
+              "plurum-native-process-evidence-harness.exe"
+            Copy-Item `
+              -LiteralPath $sourceProcessProbeItem.FullName `
+              -Destination $stagedProcessProbe
+            Copy-Item `
+              -LiteralPath $sourceProcessHarnessItem.FullName `
+              -Destination $stagedProcessHarness
+
+            $stagedProcessProbeItem = Get-ValidatedDescendantItem `
+              -Root $processEvidenceRoot `
+              -Candidate $stagedProcessProbe `
+              -Directory $false `
+              -Label "staged native process evidence probe"
+            $stagedProcessHarnessItem = Get-ValidatedDescendantItem `
+              -Root $processEvidenceRoot `
+              -Candidate $stagedProcessHarness `
+              -Directory $false `
+              -Label "staged native process evidence harness"
+            if (
+              $stagedProcessProbeItem.Length -ne
+                $sourceProcessProbeItem.Length -or
+              $stagedProcessHarnessItem.Length -ne
+                $sourceProcessHarnessItem.Length
+            ) {
+              throw "staged native process evidence artifact sizes changed"
+            }
+            Assert-ArtifactHash `
+              -Item $stagedProcessProbeItem `
+              -Expected $env:PLURUM_NATIVE_PROCESS_PROBE_SHA256 `
+              -Label "staged native process evidence probe"
+            Assert-ArtifactHash `
+              -Item $stagedProcessHarnessItem `
+              -Expected $env:PLURUM_NATIVE_PROCESS_HARNESS_SHA256 `
+              -Label "staged native process evidence harness"
+
+            $processEvidenceAclArguments = @(
+              $processEvidenceRoot,
+              "/inheritance:r",
+              "/grant:r",
+              "*$accountSid`:(OI)(CI)(F)",
+              "*S-1-5-18:(OI)(CI)(F)",
+              "*S-1-5-32-544:(OI)(CI)(F)",
+              "/T",
+              "/L"
+            )
+            [void](Get-ExpectedProcessEvidenceTree -Path $processEvidenceRoot)
+            & $icaclsItem.FullName @processEvidenceAclArguments | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              throw "failed to protect native process evidence ACLs"
+            }
+            & $icaclsItem.FullName `
+              $processEvidenceRoot `
+              /setowner "*$accountSid" `
+              /T `
+              /L |
+                Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              throw "failed to bind native process evidence ownership"
+            }
+
+            foreach ($protectedPath in @(
+              $processEvidenceRoot,
+              $processEvidenceTemporaryItem.FullName,
+              $isolationMarkerPath,
+              $cleanupMarkerPath,
+              $stagedProcessProbeItem.FullName,
+              $stagedProcessHarnessItem.FullName
+            )) {
+              Assert-TrustedProcessEvidenceAcl `
+                -Path $protectedPath `
+                -AccountSid $accountSid
+            }
+            Assert-ProcessEvidenceCleanupRoot `
+              -Path $processEvidenceRoot `
+              -FixedDriveRoot $fixedDriveRoot `
+              -CleanupToken $processEvidenceCleanupToken
+
+            $startInfo = [Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = $stagedProcessHarnessItem.FullName
+            $startInfo.ArgumentList.Add(
+              "runtime::supervisor::tests::native_process_evidence"
+            )
+            $startInfo.ArgumentList.Add("--exact")
+            $startInfo.ArgumentList.Add("--ignored")
+            $startInfo.ArgumentList.Add("--test-threads=1")
+            $startInfo.WorkingDirectory = $processEvidenceRoot
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.LoadUserProfile = $false
+            $startInfo.UserName = $accountName
+            $startInfo.Domain = $env:COMPUTERNAME
+            $startInfo.Password = $securePassword
+            $startInfo.Environment.Clear()
+            $startInfo.Environment["SystemRoot"] = $env:SystemRoot
+            $startInfo.Environment["WINDIR"] = $env:WINDIR
+            $startInfo.Environment["TEMP"] =
+              $processEvidenceTemporaryItem.FullName
+            $startInfo.Environment["TMP"] =
+              $processEvidenceTemporaryItem.FullName
+            $startInfo.Environment["NO_COLOR"] = "1"
+            $startInfo.Environment["PLURUM_NATIVE_ISOLATION_ROOT"] =
+              $processEvidenceRoot
+            $startInfo.Environment["PLURUM_NATIVE_PROCESS_TEST_PROBE"] =
+              $stagedProcessProbeItem.FullName
+            $startInfo.Environment[
+              "PLURUM_NATIVE_PROCESS_EVIDENCE_SENTINEL"
+            ] = "plurum-native-process-evidence-run-v1"
+            $activeProcess = [Diagnostics.Process]::Start($startInfo)
+            $processEvidenceQuiescent = $false
+            if (-not $activeProcess.WaitForExit(300000)) {
+              $activeProcess.Kill($true)
+              if (-not $activeProcess.WaitForExit(15000)) {
+                throw "native process evidence did not terminate after its bound"
+              }
+              throw "native process evidence timed out"
+            }
+            $processEvidenceExitCode = $activeProcess.ExitCode
+            $activeProcess.Dispose()
+            $activeProcess = $null
+            Disable-And-ProveDisposableAccountQuiescent `
+              -AccountSid $accountSid `
+              -AccountName $accountName
+            $processEvidenceQuiescent = $true
+            if ($processEvidenceExitCode -ne 0) {
+              throw "genuine standard-user native process evidence failed"
+            }
+
+            Assert-ArtifactHash `
+              -Item $sourceProcessProbeItem `
+              -Expected $env:PLURUM_NATIVE_PROCESS_PROBE_SHA256 `
+              -Label "source native process evidence probe after execution"
+            Assert-ArtifactHash `
+              -Item $sourceProcessHarnessItem `
+              -Expected $env:PLURUM_NATIVE_PROCESS_HARNESS_SHA256 `
+              -Label "source native process evidence harness after execution"
+            Assert-ArtifactHash `
+              -Item $stagedProcessProbeItem `
+              -Expected $env:PLURUM_NATIVE_PROCESS_PROBE_SHA256 `
+              -Label "staged native process evidence probe after execution"
+            Assert-ArtifactHash `
+              -Item $stagedProcessHarnessItem `
+              -Expected $env:PLURUM_NATIVE_PROCESS_HARNESS_SHA256 `
+              -Label "staged native process evidence harness after execution"
+            Assert-ProcessEvidenceCleanupRoot `
+              -Path $processEvidenceRoot `
+              -FixedDriveRoot $fixedDriveRoot `
+              -CleanupToken $processEvidenceCleanupToken
           }
           catch {
             $primaryFailure = $_.Exception
@@ -460,9 +1477,10 @@ jobs:
               try {
                 if (-not $activeProcess.HasExited) {
                   $activeProcess.Kill($true)
-                  $activeProcess.WaitForExit()
+                  if (-not $activeProcess.WaitForExit(15000)) {
+                    throw "evidence process did not terminate during bounded cleanup"
+                  }
                 }
-                $activeProcess.Dispose()
               }
               catch {
                 $cleanupFailures.Add(
@@ -472,47 +1490,246 @@ jobs:
                   )
                 )
               }
+              finally {
+                try {
+                  $activeProcess.Dispose()
+                }
+                catch {
+                  $cleanupFailures.Add(
+                    [InvalidOperationException]::new(
+                      "standard-user process handle cleanup failed",
+                      $_.Exception
+                    )
+                  )
+                }
+                $activeProcess = $null
+              }
             }
             if ($null -ne $accountSid) {
+              $processEvidenceQuiescent = $false
               try {
-                & $icaclsItem.FullName $isolationRoot /remove:g "*$accountSid" | Out-Null
-                if ($LASTEXITCODE -ne 0) {
-                  throw "icacls failed"
+                Disable-And-ProveDisposableAccountQuiescent `
+                  -AccountSid $accountSid `
+                  -AccountName $accountName
+                $processEvidenceQuiescent = $true
+              }
+              catch {
+                $cleanupFailures.Add(
+                  [InvalidOperationException]::new(
+                    "disposable-account quiescence proof failed",
+                    $_.Exception
+                  )
+                )
+              }
+            }
+            if ($processEvidenceRootCreated) {
+              if (-not $processEvidenceQuiescent) {
+                $cleanupFailures.Add(
+                  [InvalidOperationException]::new(
+                    "protected process-evidence cleanup was refused because the process did not stop"
+                  )
+                )
+              }
+              else {
+                try {
+                  Assert-ProcessEvidenceCleanupRoot `
+                    -Path $processEvidenceRoot `
+                    -FixedDriveRoot $fixedDriveRoot `
+                    -CleanupToken $processEvidenceCleanupToken
+                  $cleanupTree = @(
+                    Get-ExpectedProcessEvidenceTree -Path $processEvidenceRoot
+                  )
+                  foreach ($cleanupItem in $cleanupTree) {
+                    Assert-TrustedProcessEvidenceAcl `
+                      -Path $cleanupItem.FullName `
+                      -AccountSid $accountSid
+                  }
+
+                  $cleanupProbeItem = Get-ValidatedDescendantItem `
+                    -Root $processEvidenceRoot `
+                    -Candidate (Join-Path `
+                      $processEvidenceRoot `
+                      "plurum-native-process-test-probe.exe") `
+                    -Directory $false `
+                    -Label "cleanup native process evidence probe"
+                  $cleanupHarnessItem = Get-ValidatedDescendantItem `
+                    -Root $processEvidenceRoot `
+                    -Candidate (Join-Path `
+                      $processEvidenceRoot `
+                      "plurum-native-process-evidence-harness.exe") `
+                    -Directory $false `
+                    -Label "cleanup native process evidence harness"
+                  Assert-ArtifactHash `
+                    -Item $cleanupProbeItem `
+                    -Expected $env:PLURUM_NATIVE_PROCESS_PROBE_SHA256 `
+                    -Label "cleanup native process evidence probe"
+                  Assert-ArtifactHash `
+                    -Item $cleanupHarnessItem `
+                    -Expected $env:PLURUM_NATIVE_PROCESS_HARNESS_SHA256 `
+                    -Label "cleanup native process evidence harness"
+
+                  foreach ($cleanupPath in @(
+                    $cleanupProbeItem.FullName,
+                    $cleanupHarnessItem.FullName,
+                    (Join-Path $processEvidenceRoot ".plurum-native-isolation"),
+                    (Join-Path `
+                      $processEvidenceRoot `
+                      ".plurum-native-process-evidence-cleanup")
+                  )) {
+                    Remove-Item -LiteralPath $cleanupPath -Force
+                    if (Test-Path -LiteralPath $cleanupPath) {
+                      throw "protected process-evidence file survived cleanup"
+                    }
+                  }
+                  $cleanupTemporary = Join-Path $processEvidenceRoot "tmp"
+                  Remove-Item -LiteralPath $cleanupTemporary -Force
+                  if (Test-Path -LiteralPath $cleanupTemporary) {
+                    throw "protected process-evidence temporary directory survived cleanup"
+                  }
+                  Remove-Item -LiteralPath $processEvidenceRoot -Force
+                  if (Test-Path -LiteralPath $processEvidenceRoot) {
+                    throw "protected process-evidence root survived cleanup"
+                  }
+                }
+                catch {
+                  $cleanupFailures.Add(
+                    [InvalidOperationException]::new(
+                      "protected process-evidence cleanup failed",
+                      $_.Exception
+                    )
+                  )
                 }
               }
-              catch {
+            }
+            if (Test-Path -LiteralPath $evidenceDirectory) {
+              if (-not $processEvidenceQuiescent) {
                 $cleanupFailures.Add(
                   [InvalidOperationException]::new(
-                    "isolation-root ACL cleanup failed",
-                    $_.Exception
+                    "runtime-identity evidence cleanup was refused because account quiescence was not proved"
                   )
                 )
               }
-            }
-            try {
-              if (Test-Path -LiteralPath $evidenceDirectory) {
-                Remove-Item -LiteralPath $evidenceDirectory -Recurse -Force
+              else {
+                try {
+                  $runtimeCleanup =
+                    Get-RuntimeIdentityEvidenceCleanupTree `
+                      -Path $evidenceDirectory `
+                      -IsolationRoot $isolationRoot `
+                      -CleanupToken $runtimeEvidenceCleanupToken `
+                      -ExpectedProbeHash $runtimeEvidenceProbeHash `
+                      -ExpectedProbeSize $runtimeEvidenceProbeSize `
+                      -AccountSid $accountSid
+                  Remove-Item `
+                    -LiteralPath $runtimeCleanup.Probe.FullName `
+                    -Force
+                  if (
+                    Test-Path -LiteralPath $runtimeCleanup.Probe.FullName
+                  ) {
+                    throw "runtime-identity evidence probe survived cleanup"
+                  }
+                  Remove-Item `
+                    -LiteralPath $runtimeCleanup.Marker.FullName `
+                    -Force
+                  if (
+                    Test-Path -LiteralPath $runtimeCleanup.Marker.FullName
+                  ) {
+                    throw "runtime-identity evidence marker survived cleanup"
+                  }
+                  if (
+                    @(
+                      Get-ChildItem `
+                        -LiteralPath $runtimeCleanup.Root.FullName `
+                        -Force `
+                        -ErrorAction Stop
+                    ).Count -ne 0
+                  ) {
+                    throw "runtime-identity evidence root was not empty"
+                  }
+                  Remove-Item `
+                    -LiteralPath $runtimeCleanup.Root.FullName `
+                    -Force
+                  if (
+                    Test-Path -LiteralPath $runtimeCleanup.Root.FullName
+                  ) {
+                    throw "runtime-identity evidence root survived cleanup"
+                  }
+                }
+                catch {
+                  $cleanupFailures.Add(
+                    [InvalidOperationException]::new(
+                      "runtime-identity evidence cleanup failed",
+                      $_.Exception
+                    )
+                  )
+                }
               }
             }
-            catch {
-              $cleanupFailures.Add(
-                [InvalidOperationException]::new(
-                  "probe-directory cleanup failed",
-                  $_.Exception
+            if ($null -ne $accountSid) {
+              if (-not $processEvidenceQuiescent) {
+                $cleanupFailures.Add(
+                  [InvalidOperationException]::new(
+                    "isolation-root ACL cleanup was refused because account quiescence was not proved"
+                  )
                 )
-              )
+              }
+              else {
+                try {
+                  & $icaclsItem.FullName `
+                    $isolationRoot `
+                    /remove:g "*$accountSid" |
+                      Out-Null
+                  if ($LASTEXITCODE -ne 0) {
+                    throw "icacls failed"
+                  }
+                  Assert-AccountSidAbsentFromAcl `
+                    -Path $isolationRoot `
+                    -AccountSid $accountSid
+                }
+                catch {
+                  $cleanupFailures.Add(
+                    [InvalidOperationException]::new(
+                      "isolation-root ACL cleanup failed",
+                      $_.Exception
+                    )
+                  )
+                }
+              }
             }
             if ($accountCreated) {
-              try {
-                Remove-LocalUser -Name $accountName
-              }
-              catch {
+              if (-not $processEvidenceQuiescent) {
                 $cleanupFailures.Add(
                   [InvalidOperationException]::new(
-                    "disposable-account cleanup failed",
-                    $_.Exception
+                    "disposable-account removal was refused because quiescence was not proved"
                   )
                 )
+              }
+              else {
+                try {
+                  Disable-And-ProveDisposableAccountQuiescent `
+                    -AccountSid $accountSid `
+                    -AccountName $accountName
+                  $accountSidObject =
+                    [Security.Principal.SecurityIdentifier]::new($accountSid)
+                  Remove-LocalUser -SID $accountSidObject
+                  $remainingAccounts = @(
+                    Get-LocalUser -ErrorAction Stop |
+                      Where-Object {
+                        $null -ne $_.SID -and
+                        $_.SID.Equals($accountSidObject)
+                      }
+                  )
+                  if ($remainingAccounts.Count -ne 0) {
+                    throw "disposable account survived removal"
+                  }
+                }
+                catch {
+                  $cleanupFailures.Add(
+                    [InvalidOperationException]::new(
+                      "disposable-account cleanup failed",
+                      $_.Exception
+                    )
+                  )
+                }
               }
             }
             try {

@@ -5,6 +5,10 @@ use crate::windows::StandardUserProcessIdentity;
 #[cfg(target_os = "windows")]
 use plurum_windows_syscall::{ErrorKind as WindowsErrorKind, WinError};
 
+mod executable;
+mod redaction;
+mod supervisor;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeRuntimeAuthorityError {
     Unsafe,
@@ -36,6 +40,11 @@ impl NativeRuntimeAuthority {
 
     pub(crate) fn target(&self) -> &'static str {
         self.target
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_process_identity(&self) -> &StandardUserProcessIdentity {
+        &self.process
     }
 }
 

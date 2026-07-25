@@ -1,9 +1,71 @@
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd, BorrowedFd};
+
+mod process;
+
+#[cfg(feature = "test-support")]
+pub use process::ignore_termination_for_test;
+pub use process::{
+    spawn_direct, ChildStreamRead, DirectChild, DirectSpawnRequest, ProcessError, ProcessErrorKind,
+    RootExitStatus,
+};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdentityError {
     Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FilesystemError {
+    Unavailable,
+}
+
+/// Reports whether a retained descriptor is backed by a supported local
+/// filesystem rather than a network or userspace-controlled mount.
+pub fn local_filesystem_is_supported(descriptor: BorrowedFd<'_>) -> Result<bool, FilesystemError> {
+    let mut facts = MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `facts` is aligned output storage and the descriptor remains live.
+    if unsafe { libc::fstatfs(descriptor.as_raw_fd(), facts.as_mut_ptr()) } != 0 {
+        return Err(FilesystemError::Unavailable);
+    }
+    // SAFETY: successful fstatfs initialized the complete structure.
+    let facts = unsafe { facts.assume_init() };
+
+    #[cfg(target_os = "macos")]
+    {
+        let filesystem_name_end = facts
+            .f_fstypename
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(facts.f_fstypename.len());
+        let filesystem_name_is = |expected: &[u8]| {
+            filesystem_name_end == expected.len()
+                && facts.f_fstypename[..filesystem_name_end]
+                    .iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| *actual as u8 == *expected)
+        };
+        Ok(facts.f_flags & libc::MNT_LOCAL as u32 != 0
+            && (filesystem_name_is(b"apfs") || filesystem_name_is(b"hfs")))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let filesystem_type = facts.f_type as u64 & 0xffff_ffff;
+        Ok(matches!(
+            filesystem_type,
+            0x0000_ef53 // ext2/3/4
+                | 0x0102_1994 // tmpfs
+                | 0x2fc1_2fc1 // ZFS
+                | 0x5846_5342 // XFS
+                | 0x7371_7368 // SquashFS
+                | 0x794c_7630 // overlayfs
+                | 0x9123_683e // Btrfs
+                | 0xf2f5_2010 // F2FS
+        ))
+    }
 }
 
 #[cfg(target_os = "linux")]

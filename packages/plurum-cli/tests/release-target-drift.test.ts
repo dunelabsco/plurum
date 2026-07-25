@@ -34,6 +34,15 @@ const prepareIsolation = source(
 const isolatedCargoRunner = source(
   "../native/credential-store/tests/run-isolated-cargo.mjs",
 );
+const nativeCargoManifest = source(
+  "../native/credential-store/Cargo.toml",
+);
+const posixSyscallCargoManifest = source(
+  "../native/credential-store/posix-syscall/Cargo.toml",
+);
+const nativeArtifactConformance = source(
+  "../native/credential-store/tests/artifact-conformance.mjs",
+);
 const nativePackageAssembler = source(
   "../native/credential-store/tests/assemble-native-package.mjs",
 );
@@ -293,6 +302,49 @@ function uniqueStepContaining(
   return matches[0];
 }
 
+function removeItemInvocations(
+  lines: readonly string[],
+): readonly (readonly string[])[] {
+  const invocations: string[][] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const first = (lines[index] as string).trim();
+    if (
+      !/^(?:Microsoft\.PowerShell\.Management\\)?Remove-Item(?:\s|$)/iu.test(
+        first,
+      )
+    ) {
+      continue;
+    }
+    const invocation = [first];
+    while ((invocation.at(-1) as string).endsWith("`")) {
+      index += 1;
+      const continuation = lines[index];
+      if (continuation === undefined) {
+        throw new Error("Remove-Item continuation is truncated");
+      }
+      invocation.push(continuation.trim());
+    }
+    invocations.push(invocation);
+  }
+  return invocations;
+}
+
+function normalizedPowerShellInvocation(lines: readonly string[]): string {
+  return lines
+    .map((line) =>
+      line.endsWith("`") ? line.slice(0, -1).trimEnd() : line,
+    )
+    .join(" ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function isExactNonrecursiveRemoveItem(lines: readonly string[]): boolean {
+  return /^Remove-Item -LiteralPath \$[A-Za-z][A-Za-z0-9_.]* -Force$/iu.test(
+    normalizedPowerShellInvocation(lines),
+  );
+}
+
 function parseRustTargetMap(
   lines: readonly string[],
 ): ReadonlyMap<string, string> {
@@ -378,14 +430,6 @@ function runtimeTarget(target: string): string {
   return target.replace(/-(?:gnu|musl|msvc)$/u, "");
 }
 
-function targetOsMatchesRunner(target: string, os: string): boolean {
-  return (
-    (target.startsWith("darwin-") && os.startsWith("macos-")) ||
-    (target.startsWith("linux-") && os.startsWith("ubuntu-")) ||
-    (target.startsWith("win32-") && os.startsWith("windows-"))
-  );
-}
-
 describe("native release target drift", () => {
   const nativeWorkflowJob = parseNativeWorkflowJob(workflow);
   const workflowRows = parseWorkflowRows(nativeWorkflowJob);
@@ -415,7 +459,38 @@ describe("native release target drift", () => {
 
   it("keeps released runtime targets equal to the five native CI rows", () => {
     expect(RELEASED_RUNTIME_TARGETS).toHaveLength(5);
-    expect(workflowRows).toHaveLength(5);
+    expect(workflowRows).toEqual([
+      {
+        os: "macos-15",
+        architecture: "arm64",
+        target: "darwin-arm64",
+        rustHost: "aarch64-apple-darwin",
+      },
+      {
+        os: "macos-15-intel",
+        architecture: "x64",
+        target: "darwin-x64",
+        rustHost: "x86_64-apple-darwin",
+      },
+      {
+        os: "ubuntu-24.04-arm",
+        architecture: "arm64",
+        target: "linux-arm64-gnu",
+        rustHost: "aarch64-unknown-linux-gnu",
+      },
+      {
+        os: "ubuntu-24.04",
+        architecture: "x64",
+        target: "linux-x64-gnu",
+        rustHost: "x86_64-unknown-linux-gnu",
+      },
+      {
+        os: "windows-2025",
+        architecture: "x64",
+        target: "win32-x64-msvc",
+        rustHost: "x86_64-pc-windows-msvc",
+      },
+    ]);
     expect(
       exactUnique(
         Object.keys(NATIVE_CREDENTIAL_PACKAGE_BY_TARGET),
@@ -448,10 +523,6 @@ describe("native release target drift", () => {
       ),
     ).toBe(true);
 
-    for (const row of workflowRows) {
-      expect(row.target).toContain(`-${row.architecture}`);
-      expect(targetOsMatchesRunner(row.target, row.os)).toBe(true);
-    }
   });
 
   it("keeps every native optional dependency represented in the npm lock", () => {
@@ -532,29 +603,141 @@ describe("native release target drift", () => {
       "      - name: Build the native foundation",
       "        run: node native/credential-store/tests/run-isolated-cargo.mjs build",
     ]);
-    const windowsRuntimeEvidence = uniqueNamedStep(
+    expect(
+      uniqueNamedStep(
+        workflowSteps,
+        "Install the opposite macOS Rust target on arm64",
+      ).lines,
+    ).toEqual([
+      "      - name: Install the opposite macOS Rust target on arm64",
+      "        if: matrix.target == 'darwin-arm64' && runner.os == 'macOS' && runner.arch == 'ARM64'",
+      "        run: rustup target add --toolchain 1.97.1-aarch64-apple-darwin x86_64-apple-darwin",
+    ]);
+    expect(
+      uniqueNamedStep(
+        workflowSteps,
+        "Install the opposite macOS Rust target on x64",
+      ).lines,
+    ).toEqual([
+      "      - name: Install the opposite macOS Rust target on x64",
+      "        if: matrix.target == 'darwin-x64' && runner.os == 'macOS' && runner.arch == 'X64'",
+      "        run: rustup target add --toolchain 1.97.1-x86_64-apple-darwin aarch64-apple-darwin",
+    ]);
+    const fetchLockedRustDependencies = uniqueNamedStep(
       workflowSteps,
-      "Verify native Windows runtime identity evidence",
+      "Fetch locked Rust dependencies",
+    );
+    for (const name of [
+      "Install the opposite macOS Rust target on arm64",
+      "Install the opposite macOS Rust target on x64",
+    ]) {
+      expect(
+        workflowSteps.indexOf(uniqueNamedStep(workflowSteps, name)),
+      ).toBeLessThan(workflowSteps.indexOf(fetchLockedRustDependencies));
+    }
+    expect(
+      uniqueNamedStep(
+        workflowSteps,
+        "Build the disposable native process evidence",
+      ).lines,
+    ).toEqual([
+      "      - name: Build the disposable native process evidence",
+      "        run: node native/credential-store/tests/run-isolated-cargo.mjs process-evidence-build",
+      "        env:",
+      "          PLURUM_NATIVE_PROCESS_EVIDENCE: github-five-row-universal-macos-build-v1",
+    ]);
+    expect(
+      uniqueNamedStep(
+        workflowSteps,
+        "Verify disposable native process evidence on POSIX",
+      ).lines,
+    ).toEqual([
+      "      - name: Verify disposable native process evidence on POSIX",
+      "        if: matrix.target != 'win32-x64-msvc'",
+      "        run: node native/credential-store/tests/run-isolated-cargo.mjs process-evidence-run",
+      "        env:",
+      "          PLURUM_NATIVE_PROCESS_EVIDENCE: github-posix-universal-macos-run-v1",
+    ]);
+    const windowsRuntimeAndProcessEvidence = uniqueNamedStep(
+      workflowSteps,
+      "Verify native Windows runtime and process evidence",
     );
     for (const line of [
       "        if: matrix.target == 'win32-x64-msvc' && runner.environment == 'github-hosted'",
+      "          PLURUM_WINDOWS_PROCESS_EVIDENCE: github-windows-process-run-v1",
       "          PLURUM_WINDOWS_RUNTIME_EVIDENCE: github-windows-2025-x64-v1",
+      '            $env:GITHUB_REPOSITORY -cne "dunelabsco/plurum" -or',
+      '            $env:RUNNER_ARCH -cne "X64" -or',
       '            $env:RUNNER_ENVIRONMENT -cne "github-hosted" -or',
+      '            $env:PLURUM_NATIVE_PROCESS_EVIDENCE_SENTINEL -cne "plurum-native-process-evidence-run-v1" -or',
+      '            $processEvidenceManifest.probeLayout.kind -cne "thin" -or',
+      "            @($processEvidenceManifest.probeLayout.rustTargets).Count -ne 1 -or",
+      "            $processEvidenceManifest.probeLayout.rustTargets[0] -cne",
+      '              "x86_64-pc-windows-msvc" -or',
       '            "ambient-elevated-rejected",',
       '            "lowered-elevated-rejected"',
       '              "standard-default-stable",',
       '              "self-impersonation-rejected",',
       '              "standard-token-change-conflict"',
+      '              "runtime::supervisor::tests::native_process_evidence"',
       "              if (-not $activeProcess.WaitForExit(60000)) {",
+      "            if (-not $activeProcess.WaitForExit(300000)) {",
+      "              if (-not $activeProcess.WaitForExit(15000)) {",
+      "            $processEvidenceQuiescent = $false",
+      "              if (-not $processEvidenceQuiescent) {",
+      "          function Disable-And-ProveDisposableAccountQuiescent {",
+      "                  -MethodName GetOwnerSid `",
+      '                  throw "GetOwnerSid returned an invalid SID for a live process"',
+      "              Disable-LocalUser -SID $sid -ErrorAction Stop",
+      "            $stableEmptyScans = 0",
+      "            ).Hash.ToLowerInvariant()",
+      "                    Get-RuntimeIdentityEvidenceCleanupTree `",
+      "                    Get-ExpectedProcessEvidenceTree -Path $processEvidenceRoot",
+      "                    Assert-TrustedProcessEvidenceAcl `",
+      "                    Remove-Item -LiteralPath $cleanupPath -Force",
+      "                  Remove-Item -LiteralPath $processEvidenceRoot -Force",
       "              -AccountExpires $accountExpiration `",
     ]) {
-      expect(windowsRuntimeEvidence.lines).toContain(line);
+      expect(windowsRuntimeAndProcessEvidence.lines).toContain(line);
     }
+    expect(
+      windowsRuntimeAndProcessEvidence.lines.filter(
+        (line) => line.trim() === '"/L"' || line.trim() === "/L |",
+      ).length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(windowsRuntimeAndProcessEvidence.lines.join("\n")).not.toMatch(
+      /(?:^|[\s"'\\/])(?:takeown(?:\.exe)?|skipsl)(?:[\s"'`]|$)/iu,
+    );
+    const cleanupInvocations = removeItemInvocations(
+      windowsRuntimeAndProcessEvidence.lines,
+    );
+    expect(cleanupInvocations).toHaveLength(6);
+    expect(cleanupInvocations.every(isExactNonrecursiveRemoveItem)).toBe(true);
+    expect(windowsRuntimeAndProcessEvidence.lines.join("\n")).not.toMatch(
+      /^\s*(?:del|erase|ri|rm|rmdir)\b/imu,
+    );
+    expect(windowsRuntimeAndProcessEvidence.lines.join("\n")).not.toMatch(
+      /-ErrorAction\s+SilentlyContinue/iu,
+    );
     expect(
       workflowSteps.filter((step) =>
         step.lines.some((line) => line.includes("New-LocalUser")),
       ),
-    ).toEqual([windowsRuntimeEvidence]);
+    ).toEqual([windowsRuntimeAndProcessEvidence]);
+    expect(
+      workflowSteps.filter((step) =>
+        step.lines.some((line) =>
+          line.includes("run-isolated-cargo.mjs process-evidence-build"),
+        ),
+      ),
+    ).toHaveLength(1);
+    expect(
+      workflowSteps.filter((step) =>
+        step.lines.some((line) =>
+          line.includes("run-isolated-cargo.mjs process-evidence-run"),
+        ),
+      ),
+    ).toHaveLength(1);
     expect(
       uniqueNamedStep(workflowSteps, "Verify the Node 22.12 ABI floor").lines,
     ).toEqual([
@@ -618,6 +801,213 @@ describe("native release target drift", () => {
       "      - name: Verify no native artifact entered the package tree",
       "        run: node native/credential-store/tests/artifact-conformance.mjs",
     ]);
+  });
+
+  it("accepts only exact nonrecursive Windows cleanup invocations", () => {
+    const exactNonrecursiveCleanup = [
+      ["          Remove-Item -LiteralPath $cleanupPath -Force"],
+      [
+        "          Remove-Item `",
+        "            -LiteralPath $cleanup.Root.FullName `",
+        "            -Force",
+      ],
+    ];
+    const unsafeLayouts = [
+      ["          Remove-Item -LiteralPath $cleanupPath -Recurse -Force"],
+      [
+        "          Remove-Item `",
+        "            -LiteralPath $cleanupPath `",
+        "            -Recurse `",
+        "            -Force",
+      ],
+      [
+        "          Remove-Item -LiteralPath $cleanupPath `",
+        "            -Force -Recurse",
+      ],
+      ["          Remove-Item -LiteralPath $cleanupPath -Recurse:$true"],
+      ["          Remove-Item -LiteralPath $cleanupPath -Force -Recurse;"],
+      ["          Remove-Item -LiteralPath $cleanupPath -Rec -Force"],
+      ["          Microsoft.PowerShell.Management\\Remove-Item @cleanup"],
+      [
+        "          Remove-Item -LiteralPath (",
+        "            Join-Path $root $child",
+        "          ) -Recurse -Force",
+      ],
+    ];
+
+    for (const layout of exactNonrecursiveCleanup) {
+      const [invocation] = removeItemInvocations(layout);
+      expect(invocation).toBeDefined();
+      expect(isExactNonrecursiveRemoveItem(invocation as readonly string[])).toBe(
+        true,
+      );
+    }
+    for (const layout of unsafeLayouts) {
+      const [invocation] = removeItemInvocations(layout);
+      expect(invocation).toBeDefined();
+      expect(isExactNonrecursiveRemoveItem(invocation as readonly string[])).toBe(
+        false,
+      );
+    }
+  });
+
+  it("keeps process evidence feature-gated and outside production artifacts", () => {
+    const rootFeatures = uniqueLine(nativeCargoManifest, "[features]");
+    expect(nativeCargoManifest.slice(rootFeatures, rootFeatures + 4)).toEqual([
+      "[features]",
+      "default = []",
+      'test-support = ["plurum-native-posix-syscall/test-support"]',
+      "",
+    ]);
+    const probeTarget = uniqueLine(nativeCargoManifest, "[[bin]]");
+    expect(nativeCargoManifest.slice(probeTarget, probeTarget + 7)).toEqual([
+      "[[bin]]",
+      'name = "plurum-native-process-test-probe"',
+      'path = "src/bin/native-process-test-probe.rs"',
+      'required-features = ["test-support"]',
+      "test = false",
+      "bench = false",
+      "",
+    ]);
+
+    const posixFeatures = uniqueLine(posixSyscallCargoManifest, "[features]");
+    expect(
+      posixSyscallCargoManifest.slice(posixFeatures, posixFeatures + 4),
+    ).toEqual(["[features]", "default = []", "test-support = []", ""]);
+
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        '  build: ["build", "--frozen", "--manifest-path", manifestPath, "--release"],',
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        "function retainPrivateProcessEvidenceExecutionDirectory(execution) {",
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        '  "plurum-native-process-test-probe-universal";',
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(isolatedCargoRunner, '    "probeLayout",'),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        '      "github-five-row-universal-macos-build-v1",',
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        '    "github-posix-universal-macos-run-v1",',
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        '  assert.equal(lipo.path, "/usr/bin/lipo", "the trusted lipo path drifted");',
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        "function createUniversalMacProcessEvidenceProbe(",
+      ),
+    ).toBe(1);
+    const universalTargets = uniqueLine(
+      isolatedCargoRunner,
+      "const macProcessEvidenceRustTargets = Object.freeze([",
+    );
+    expect(
+      isolatedCargoRunner.slice(universalTargets, universalTargets + 5),
+    ).toEqual([
+      "const macProcessEvidenceRustTargets = Object.freeze([",
+      '  "aarch64-apple-darwin",',
+      '  "x86_64-apple-darwin",',
+      "]);",
+      "const macProcessEvidenceArchitectureByRustTarget = Object.freeze({",
+    ]);
+    expect(
+      isolatedCargoRunner.slice(universalTargets + 4, universalTargets + 8),
+    ).toEqual([
+      "const macProcessEvidenceArchitectureByRustTarget = Object.freeze({",
+      '  "aarch64-apple-darwin": "arm64",',
+      '  "x86_64-apple-darwin": "x86_64",',
+      "});",
+    ]);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        '      kind: "mach-o-universal",',
+      ),
+    ).toBe(2);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        "    probeLayout,",
+      ),
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        '        stdio: ["ignore", "inherit", "inherit"],',
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        "    if (!processAttempted || processCompletedSafely) {",
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        nativePackageAssembler,
+        '    files: Object.freeze(["credential-store.node"]),',
+      ),
+    ).toBe(1);
+
+    for (const prefix of [
+      "plurum-medium-integrity-test-launcher",
+      "plurum-native-process-test-probe",
+      "plurum-runtime-identity-test-probe",
+      "plurum_native_credential_store-",
+    ]) {
+      expect(
+        exactLineCount(nativeArtifactConformance, `  "${prefix}",`),
+      ).toBe(1);
+    }
+
+    const lipoRunner = isolatedCargoRunner.join("\n");
+    expect(lipoRunner).toContain(
+      '    ...(rustTarget === undefined ? [] : ["--target", rustTarget]),',
+    );
+    expect(lipoRunner).toContain(
+      "    expectedProcessEvidenceProbeLayout(rustHost),",
+    );
+    expect(lipoRunner).toContain(
+      "      assertMacProcessEvidenceProbeLayout(",
+    );
+    expect(lipoRunner).toContain(
+      '    [before.path, "-verify_arch", ...expectedArchitectures],',
+    );
+    expect(lipoRunner).toContain(
+      "      ...slicesBefore.map(({ path }) => path),",
+    );
+    expect(lipoRunner).toContain(
+      "    captureTrustedSystemLipo(),",
+    );
+    expect(lipoRunner).toContain(
+      "      CFFIXED_USER_HOME: canonicalStateDirectory,",
+    );
+    expect(lipoRunner).toContain(
+      '  environment.CARGO_NET_OFFLINE = "true";',
+    );
   });
 
   it("keeps the CI release build path-remapped before package assembly", () => {

@@ -17,6 +17,17 @@ build = "build.rs"
 name = "plurum_native_credential_store"
 crate-type = ["cdylib"]
 
+[features]
+default = []
+test-support = ["plurum-native-posix-syscall/test-support"]
+
+[[bin]]
+name = "plurum-native-process-test-probe"
+path = "src/bin/native-process-test-probe.rs"
+required-features = ["test-support"]
+test = false
+bench = false
+
 [dependencies]
 napi = { version = "=3.10.5", default-features = false, features = ["dyn-symbols", "napi8"] }
 napi-derive = "=3.5.9"

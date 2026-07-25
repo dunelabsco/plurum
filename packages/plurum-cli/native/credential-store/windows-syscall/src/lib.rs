@@ -1,6 +1,8 @@
 #![cfg(target_os = "windows")]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod process;
+
 use std::ffi::c_void;
 use std::fs::File;
 use std::io;

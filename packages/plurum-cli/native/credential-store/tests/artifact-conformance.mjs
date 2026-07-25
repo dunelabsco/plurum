@@ -19,6 +19,12 @@ const nativeExtensions = new Set([
   ".rmeta",
   ".so",
 ]);
+const testOnlyNativeArtifactPrefixes = Object.freeze([
+  "plurum-medium-integrity-test-launcher",
+  "plurum-native-process-test-probe",
+  "plurum-runtime-identity-test-probe",
+  "plurum_native_credential_store-",
+]);
 
 assert.equal(
   existsSync(join(crateRoot, "target")),
@@ -42,6 +48,13 @@ function inspect(directory) {
     if (entry.isDirectory()) {
       inspect(path);
     } else {
+      assert.equal(
+        testOnlyNativeArtifactPrefixes.some((prefix) =>
+          entry.name.startsWith(prefix),
+        ),
+        false,
+        `test-only native artifact must not enter the package tree: ${displayPath}`,
+      );
       assert.equal(
         nativeExtensions.has(extname(entry.name).toLowerCase()),
         false,

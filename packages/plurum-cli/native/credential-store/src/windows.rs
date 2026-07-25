@@ -245,7 +245,7 @@ impl NormalizedAbsolutePath {
     }
 }
 
-fn valid_component(component: &OsStr) -> bool {
+pub(crate) fn valid_component(component: &OsStr) -> bool {
     let Some(value) = component.to_str() else {
         return false;
     };
@@ -2300,6 +2300,64 @@ impl Drop for WindowsSetupLease {
         if runtime.status != LeaseStatus::Terminal {
             let _ = LeaseCore::finish_locked(&mut runtime, false);
         }
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+pub(crate) struct ProcessEvidenceRoot {
+    inner: tests::TestRoot,
+}
+
+#[cfg(all(test, feature = "test-support"))]
+impl ProcessEvidenceRoot {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: tests::TestRoot::new(),
+        }
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.inner.root
+    }
+
+    pub(crate) fn create_private_child(&self, name: &str) -> PathBuf {
+        let bytes = name.as_bytes();
+        assert!(
+            !bytes.is_empty()
+                && bytes.len() <= 64
+                && bytes[0].is_ascii_lowercase()
+                && bytes.iter().all(|byte| byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(*byte, b'-' | b'_'))
+                && is_single_entry_name(OsStr::new(name)),
+            "process evidence child name must be a simple portable entry"
+        );
+        self.create_private_child_exact(name)
+    }
+
+    pub(crate) fn create_hostile_private_child(&self) -> PathBuf {
+        let name = "work ; dollar$ parens() amp& quote' space";
+        assert!(
+            is_single_entry_name(OsStr::new(name)),
+            "the fixed hostile process-evidence name must remain one entry"
+        );
+        self.create_private_child_exact(name)
+    }
+
+    fn create_private_child_exact(&self, name: &str) -> PathBuf {
+        let path = self.inner.root.join(name);
+        let ensured =
+            ensure_private_directory(&path).expect("process evidence child must be secured");
+        assert_eq!(
+            ensured.disposition,
+            DirectoryDisposition::Created,
+            "process evidence child must be newly created"
+        );
+        ensured
+            .directory
+            .attest()
+            .expect("process evidence child must remain private and bound");
+        path
     }
 }
 

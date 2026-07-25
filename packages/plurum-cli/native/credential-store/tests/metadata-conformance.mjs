@@ -39,6 +39,12 @@ const posixSyscallSourcePath = join(
   "src",
   "lib.rs",
 );
+const posixSyscallProcessSourcePath = join(
+  crateRoot,
+  "posix-syscall",
+  "src",
+  "process.rs",
+);
 const secretMemoryManifestPath = join(
   crateRoot,
   "secret-memory",
@@ -68,6 +74,12 @@ const windowsSyscallSourcePath = join(
   "src",
   "lib.rs",
 );
+const windowsSyscallProcessSourcePath = join(
+  crateRoot,
+  "windows-syscall",
+  "src",
+  "process.rs",
+);
 const windowsMediumLauncherSourcePath = join(
   crateRoot,
   "windows-syscall",
@@ -84,6 +96,58 @@ const windowsRuntimeProbeSourcePath = join(
 );
 const bridgeSourcePath = join(crateRoot, "src", "bridge.rs");
 const runtimeSourcePath = join(crateRoot, "src", "runtime.rs");
+const runtimeExecutableSourcePath = join(
+  crateRoot,
+  "src",
+  "runtime",
+  "executable.rs",
+);
+const runtimeImageSourcePath = join(
+  crateRoot,
+  "src",
+  "runtime",
+  "executable",
+  "image.rs",
+);
+const runtimePosixExecutableSourcePath = join(
+  crateRoot,
+  "src",
+  "runtime",
+  "executable",
+  "posix.rs",
+);
+const runtimeWindowsExecutableSourcePath = join(
+  crateRoot,
+  "src",
+  "runtime",
+  "executable",
+  "windows.rs",
+);
+const runtimeRedactionSourcePath = join(
+  crateRoot,
+  "src",
+  "runtime",
+  "redaction.rs",
+);
+const runtimeSupervisorSourcePath = join(
+  crateRoot,
+  "src",
+  "runtime",
+  "supervisor.rs",
+);
+const runtimeSupervisorPlatformSourcePath = join(
+  crateRoot,
+  "src",
+  "runtime",
+  "supervisor",
+  "platform.rs",
+);
+const nativeProcessTestProbeSourcePath = join(
+  crateRoot,
+  "src",
+  "bin",
+  "native-process-test-probe.rs",
+);
 const targetMapPath = join(crateRoot, "src", "target_map.rs");
 const isolationMarker = "plurum-native-isolation-v1\n";
 
@@ -200,16 +264,26 @@ for (const path of [
   macosAclSourcePath,
   posixSyscallManifestPath,
   posixSyscallSourcePath,
+  posixSyscallProcessSourcePath,
   secretMemoryManifestPath,
   secretMemorySourcePath,
   windowsSourcePath,
   windowsMutationSourcePath,
   windowsSyscallManifestPath,
   windowsSyscallSourcePath,
+  windowsSyscallProcessSourcePath,
   windowsMediumLauncherSourcePath,
   windowsRuntimeProbeSourcePath,
   bridgeSourcePath,
   runtimeSourcePath,
+  runtimeExecutableSourcePath,
+  runtimeImageSourcePath,
+  runtimePosixExecutableSourcePath,
+  runtimeWindowsExecutableSourcePath,
+  runtimeRedactionSourcePath,
+  runtimeSupervisorSourcePath,
+  runtimeSupervisorPlatformSourcePath,
+  nativeProcessTestProbeSourcePath,
   targetMapPath,
 ]) {
   const metadata = lstatSync(path);
@@ -292,7 +366,10 @@ assert.equal(rootPackage.edition, "2021");
 assert.equal(rootPackage.rust_version, "1.88");
 assert.equal(rootPackage.license, "Apache-2.0");
 assert.deepEqual(rootPackage.publish, []);
-assert.deepEqual(rootPackage.features, {});
+assert.deepEqual(rootPackage.features, {
+  default: [],
+  "test-support": ["plurum-native-posix-syscall/test-support"],
+});
 
 const dependencies = rootPackage.dependencies
   .map((dependency) => ({
@@ -417,7 +494,7 @@ assert.deepEqual(dependencies, [
   },
 ]);
 
-assert.equal(rootPackage.targets.length, 2);
+assert.equal(rootPackage.targets.length, 3);
 const libraryTarget = rootPackage.targets.find(({ kind }) =>
   kind.includes("cdylib"),
 );
@@ -433,8 +510,25 @@ const buildTarget = rootPackage.targets.find(({ kind }) =>
 assert.ok(buildTarget, "the crate must retain its napi build script");
 assert.deepEqual(buildTarget.kind, ["custom-build"]);
 
+const nativeProcessTestProbe = rootPackage.targets.find(
+  ({ name }) => name === "plurum-native-process-test-probe",
+);
+assert.ok(
+  nativeProcessTestProbe,
+  "the crate must expose one feature-gated native process test probe",
+);
+assert.deepEqual(nativeProcessTestProbe.kind, ["bin"]);
+assert.deepEqual(nativeProcessTestProbe.crate_types, ["bin"]);
+assert.deepEqual(nativeProcessTestProbe["required-features"], ["test-support"]);
+assert.equal(nativeProcessTestProbe.test, false);
+assert.equal(
+  realpathSync(nativeProcessTestProbe.src_path),
+  realpathSync(nativeProcessTestProbeSourcePath),
+);
+
 const rootNode = cargo.resolve.nodes.find(({ id }) => id === rootPackage.id);
 assert.ok(rootNode, "Cargo resolution must contain the foundation crate");
+assert.deepEqual(rootNode.features, ["default"]);
 const macosAclDependency = rootNode.deps.find(
   ({ name }) => name === "plurum_native_macos_acl",
 );
@@ -579,7 +673,10 @@ assert.equal(posixSyscallPackage.edition, "2021");
 assert.equal(posixSyscallPackage.rust_version, "1.88");
 assert.equal(posixSyscallPackage.license, "Apache-2.0");
 assert.deepEqual(posixSyscallPackage.publish, []);
-assert.deepEqual(posixSyscallPackage.features, {});
+assert.deepEqual(posixSyscallPackage.features, {
+  default: [],
+  "test-support": [],
+});
 assert.deepEqual(
   posixSyscallPackage.dependencies.map((dependency) => ({
     name: dependency.name,
@@ -617,7 +714,7 @@ assert.ok(
   posixSyscallNode,
   "Cargo resolution must describe the POSIX syscall boundary",
 );
-assert.deepEqual(posixSyscallNode.features, []);
+assert.deepEqual(posixSyscallNode.features, ["default"]);
 const libcDependency = posixSyscallNode.deps.find(
   ({ name }) => name === "libc",
 );
@@ -680,11 +777,14 @@ assert.deepEqual(
       features: [
         "Wdk_Storage_FileSystem",
         "Win32_Foundation",
+        "Win32_Globalization",
         "Win32_Security",
         "Win32_Security_Authorization",
         "Win32_Storage_FileSystem",
         "Win32_System_IO",
         "Win32_System_Ioctl",
+        "Win32_System_JobObjects",
+        "Win32_System_Pipes",
         "Win32_System_SystemServices",
         "Win32_System_Threading",
       ],
