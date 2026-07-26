@@ -29,10 +29,14 @@ _INITIALIZE_REQUEST = {
     },
 }
 _MCP_ACCEPT = "application/json, text/event-stream"
-_READ_TOOL_NAMES = [
+_TOOL_NAMES = [
     "plurum_search",
     "plurum_get_experience",
     "plurum_get_artifact",
+    "plurum_publish",
+    "plurum_report_outcome",
+    "plurum_archive",
+    "plurum_vote",
 ]
 
 
@@ -73,7 +77,7 @@ async def _post_initialize(application, authorization: str | None = None):
 
 
 @pytest.mark.asyncio
-async def test_valid_key_initializes_with_instructions_and_read_tools(mock_supabase):
+async def test_valid_key_initializes_with_instructions_and_tools(mock_supabase):
     raw_key = "plrm_live_stage_one_valid_key"
     agent = _active_agent()
     agents_table = mock_supabase.table.return_value
@@ -97,7 +101,7 @@ async def test_valid_key_initializes_with_instructions_and_read_tools(mock_supab
             assert "private" in instructions
             assert [
                 tool.name for tool in (await session.list_tools()).tools
-            ] == _READ_TOOL_NAMES
+            ] == _TOOL_NAMES
 
     lookup_calls = agents_table.select.return_value.eq.call_args_list
     assert lookup_calls
@@ -126,7 +130,7 @@ async def test_fresh_app_instances_start_and_close_independently(monkeypatch):
             ):
                 assert [
                     tool.name for tool in (await session.list_tools()).tools
-                ] == _READ_TOOL_NAMES
+                ] == _TOOL_NAMES
 
 
 @pytest.mark.asyncio
