@@ -35,6 +35,7 @@ class RequestBodyLimitMiddleware:
 
         received_bytes = 0
         messages: list[Message] = []
+        body_complete = False
         while True:
             message = await receive()
             messages.append(message)
@@ -48,9 +49,13 @@ class RequestBodyLimitMiddleware:
                     await response(scope, receive, send)
                     return
                 if not message.get("more_body", False):
+                    body_complete = True
                     break
             elif message["type"] == "http.disconnect":
                 break
+
+        if not body_complete:
+            return
 
         message_index = 0
 

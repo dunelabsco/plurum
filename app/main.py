@@ -22,14 +22,21 @@ from app.mcp import create_mcp_application
 def create_app() -> FastAPI:
     """Create an isolated FastAPI application and MCP session manager."""
     settings = get_settings()
-    mcp_server, mcp_http_app = create_mcp_application(settings)
+    if settings.mcp_enabled:
+        mcp_server, mcp_http_app = create_mcp_application(settings)
+    else:
+        mcp_server = None
+        mcp_http_app = None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         """Run the existing application lifecycle with the MCP session manager."""
         print("🚀 Plurum API starting up...")
-        async with mcp_server.session_manager.run():
+        if mcp_server is None:
             yield
+        else:
+            async with mcp_server.session_manager.run():
+                yield
         print("👋 Plurum API shutting down...")
 
     application = FastAPI(
@@ -110,7 +117,11 @@ def create_app() -> FastAPI:
     @application.get("/health", tags=["Health"])
     def health_check():
         """Health check endpoint."""
-        return {"status": "healthy", "version": "0.2.0"}
+        return {
+            "status": "healthy",
+            "version": "0.2.0",
+            "mcp": "ready" if settings.mcp_enabled else "disabled",
+        }
 
     @application.get("/", tags=["Health"])
     def root():
@@ -123,9 +134,16 @@ def create_app() -> FastAPI:
             "health": "/health",
         }
 
-    # Route the generated ASGI app exactly at its internal transport path.
-    # This avoids both a catch-all root mount and a pre-authentication slash redirect.
-    application.add_route("/mcp", mcp_http_app, name="mcp", include_in_schema=False)
+    if mcp_http_app is not None:
+        # Route the generated ASGI app exactly at its internal transport path.
+        # This avoids both a catch-all root mount and a pre-authentication slash
+        # redirect.
+        application.add_route(
+            "/mcp",
+            mcp_http_app,
+            name="mcp",
+            include_in_schema=False,
+        )
     return application
 
 
