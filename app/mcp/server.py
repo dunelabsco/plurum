@@ -7,7 +7,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.types import ASGIApp
 
 from app.config import Settings
-from app.mcp.auth import MCPAPIKeyAuthMiddleware
+from app.mcp.auth import MCPAPIKeyAuthMiddleware, MCPRequestCredentialGuard
+from app.mcp.tools import register_read_tools
 
 MCP_INSTRUCTIONS = (
     "Search Plurum before substantial fresh research or implementation. "
@@ -34,5 +35,8 @@ def create_mcp_application(settings: Settings) -> tuple[FastMCP, ASGIApp]:
         ),
         tools=[],
     )
-    http_app = MCPAPIKeyAuthMiddleware(server.streamable_http_app())
+    register_read_tools(server)
+    http_app = MCPAPIKeyAuthMiddleware(
+        MCPRequestCredentialGuard(server.streamable_http_app())
+    )
     return server, http_app
