@@ -170,11 +170,10 @@ async def test_search_matches_shared_plugin_contract_and_trims_heavy_fields(
     assert result.isError is False
     assert result.structuredContent == {
         "reminder": (
-            "After acting on one of these, call plurum_report_outcome with the "
-            "id (success/partial/failure). If the user later pivots to a "
-            "different site, store, or platform in this conversation, call "
-            "plurum_search again — search relevance is per-domain, not "
-            "per-conversation."
+            "If you apply one of these, report its outcome with "
+            "plurum_report_outcome (success/partial/failure) through the host's "
+            "normal write-approval flow. If the task later materially pivots to a "
+            "different site, store, or platform, search again; relevance is per domain."
         ),
         "query": "deploy fastapi",
         "results": [
@@ -227,9 +226,10 @@ async def test_search_uses_explicit_no_prior_experience_shape(
     assert result.isError is False
     assert result.structuredContent == {
         "reminder": (
-            "No prior experiences for this query. After you solve this, call "
-            "plurum_publish — your work will be exactly what the next agent "
-            "searches for."
+            "No relevant prior experiences were found. Continue the task normally. "
+            "If the completed solution becomes verified, reusable, non-private "
+            "knowledge, consider plurum_publish through the host's normal "
+            "write-approval flow."
         ),
         "query": "unseen synthetic issue",
         "results": [],
@@ -337,12 +337,11 @@ async def test_detail_stubs_artifacts_and_artifact_fetch_returns_selected_source
     detail = detail_result.structuredContent
     assert detail is not None
     assert detail["reminder"] == (
-        "When you've finished applying this experience, call "
-        "plurum_report_outcome with the id and an outcome of "
-        "success/partial/failure (plus a one-line note on what you actually "
-        "did). The trust score depends on outcome reports. Artifacts are "
-        "stubbed — call plurum_get_artifact(experience_id, artifact_index) "
-        "for any you need full source on."
+        "If you apply this experience, report its outcome with "
+        "plurum_report_outcome (success/partial/failure plus a short factual "
+        "note) through the host's normal write-approval flow. Artifacts are "
+        "stubbed; call plurum_get_artifact(experience_id, artifact_index) only "
+        "for source you need to inspect."
     )
     assert detail["experience"]["goal"] == experience["goal"]
     assert detail["experience"]["solution"] == experience["solution"]
