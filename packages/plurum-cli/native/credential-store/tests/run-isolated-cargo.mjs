@@ -53,6 +53,12 @@ const processEvidenceExecutionSentinelName =
   ".plurum-native-process-evidence-execution-v1";
 const processEvidenceExecutionDirectoryPrefix =
   ".plurum-native-process-evidence-run-v1-";
+const processEvidenceProbeMaterializationMarker =
+  "plurum-native-process-evidence-materialization-v1\n";
+const processEvidenceProbeMaterializationDirectoryPrefix =
+  ".plurum-native-process-evidence-materialization-v1-";
+const processEvidenceProbeMaterializationSentinelName =
+  ".plurum-native-process-evidence-materialization-v1";
 const processEvidenceHarnessStagedName =
   "plurum-native-process-evidence-harness";
 const processEvidenceProbeName = "plurum-native-process-test-probe";
@@ -376,6 +382,657 @@ function captureStableProcessEvidenceArtifact(
   );
   assert.deepEqual(second, first, `${label} was not stable across captures`);
   return first;
+}
+
+function captureProcessEvidenceMaterializationSentinel(path, label) {
+  assert.equal(isAbsolute(path), true, `${label} path must be absolute`);
+  const literalMetadata = lstatSync(path, { bigint: true });
+  assert.equal(
+    literalMetadata.isSymbolicLink(),
+    false,
+    `${label} must not be a symlink`,
+  );
+  assert.equal(
+    literalMetadata.isFile(),
+    true,
+    `${label} must be a regular file`,
+  );
+  assert.equal(literalMetadata.nlink, 1n, `${label} must have one link`);
+  assert.equal(
+    literalMetadata.size,
+    BigInt(Buffer.byteLength(processEvidenceProbeMaterializationMarker)),
+    `${label} has the wrong size`,
+  );
+  if (process.platform !== "win32") {
+    assertPosixOwnerAndMode(literalMetadata, 0o600, label);
+  }
+
+  const descriptor = openSync(
+    path,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+  );
+  let descriptorMetadata;
+  try {
+    descriptorMetadata = fstatSync(descriptor, { bigint: true });
+    assert.deepEqual(
+      stableFileIdentity(descriptorMetadata),
+      stableFileIdentity(literalMetadata),
+      `${label} descriptor identity drifted`,
+    );
+    const bytes = Buffer.alloc(Number(descriptorMetadata.size));
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const bytesRead = readSync(
+        descriptor,
+        bytes,
+        offset,
+        bytes.byteLength - offset,
+        null,
+      );
+      assert.ok(bytesRead > 0, `${label} ended early`);
+      offset += bytesRead;
+    }
+    assert.equal(
+      readSync(descriptor, Buffer.alloc(1), 0, 1, null),
+      0,
+      `${label} grew while it was read`,
+    );
+    assert.equal(
+      bytes.toString("utf8"),
+      processEvidenceProbeMaterializationMarker,
+      `${label} marker changed`,
+    );
+    assert.deepEqual(
+      stableFileIdentity(fstatSync(descriptor, { bigint: true })),
+      stableFileIdentity(descriptorMetadata),
+      `${label} changed while it was read`,
+    );
+  } finally {
+    closeSync(descriptor);
+  }
+  assert.deepEqual(
+    stableFileIdentity(lstatSync(path, { bigint: true })),
+    stableFileIdentity(descriptorMetadata),
+    `${label} path changed while it was read`,
+  );
+  return stableFileIdentity(descriptorMetadata);
+}
+
+function capturePrivateProcessEvidenceProbeMaterialization(
+  path,
+  cargoTarget,
+  expectedEntryNames,
+  label,
+) {
+  assert.equal(isAbsolute(path), true, `${label} path must be absolute`);
+  assert.equal(
+    dirname(path),
+    cargoTarget,
+    `${label} must be a direct child of Cargo target storage`,
+  );
+  const name = parse(path).base;
+  assert.equal(
+    name.startsWith(processEvidenceProbeMaterializationDirectoryPrefix),
+    true,
+    `${label} prefix drifted`,
+  );
+  assert.match(
+    name.slice(processEvidenceProbeMaterializationDirectoryPrefix.length),
+    /^[A-Za-z0-9]{6}$/u,
+    `${label} random suffix drifted`,
+  );
+
+  const literalMetadata = lstatSync(path, { bigint: true });
+  assert.equal(
+    literalMetadata.isSymbolicLink(),
+    false,
+    `${label} must not be a symlink`,
+  );
+  assert.equal(
+    literalMetadata.isDirectory(),
+    true,
+    `${label} must be a directory`,
+  );
+  const canonicalPath = realpathSync(path);
+  assert.equal(canonicalPath, path, `${label} canonical path drifted`);
+  assert.equal(
+    isStrictDescendant(cargoTarget, canonicalPath),
+    true,
+    `${label} escaped Cargo target storage`,
+  );
+  if (process.platform !== "win32") {
+    assertPosixOwnerAndMode(literalMetadata, 0o700, label);
+  }
+
+  assert.deepEqual(
+    [...readdirSync(canonicalPath)].sort(),
+    [...expectedEntryNames].sort(),
+    `${label} contains unexpected entries`,
+  );
+  const sentinelPath = join(
+    canonicalPath,
+    processEvidenceProbeMaterializationSentinelName,
+  );
+  const sentinelIdentity = captureProcessEvidenceMaterializationSentinel(
+    sentinelPath,
+    `${label} sentinel`,
+  );
+  return Object.freeze({
+    path: canonicalPath,
+    identity: stableDirectoryIdentity(literalMetadata),
+    sentinel: Object.freeze({
+      path: sentinelPath,
+      identity: sentinelIdentity,
+    }),
+  });
+}
+
+function createPrivateProcessEvidenceProbeMaterialization(cargoTarget) {
+  const prefix = join(
+    cargoTarget,
+    processEvidenceProbeMaterializationDirectoryPrefix,
+  );
+  const created = mkdtempSync(prefix);
+  let sentinelDescriptor;
+  let sentinelCreated = false;
+  try {
+    assert.equal(
+      dirname(created),
+      cargoTarget,
+      "probe materialization must be a direct Cargo target child",
+    );
+    if (process.platform !== "win32") {
+      chmodSync(created, 0o700);
+    }
+    const canonicalPath = realpathSync(created);
+    assert.equal(canonicalPath, created);
+    const sentinelPath = join(
+      canonicalPath,
+      processEvidenceProbeMaterializationSentinelName,
+    );
+    sentinelDescriptor = openSync(
+      sentinelPath,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        (constants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    sentinelCreated = true;
+    writeFileSync(
+      sentinelDescriptor,
+      processEvidenceProbeMaterializationMarker,
+      "utf8",
+    );
+    if (process.platform !== "win32") {
+      fchmodSync(sentinelDescriptor, 0o600);
+    }
+    fsyncSync(sentinelDescriptor);
+    closeSync(sentinelDescriptor);
+    sentinelDescriptor = undefined;
+    const materialization = capturePrivateProcessEvidenceProbeMaterialization(
+      canonicalPath,
+      cargoTarget,
+      [processEvidenceProbeMaterializationSentinelName],
+      "private probe materialization",
+    );
+    if (process.platform !== "win32") {
+      const directoryDescriptor = openSync(
+        canonicalPath,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      );
+      try {
+        fsyncSync(directoryDescriptor);
+      } finally {
+        closeSync(directoryDescriptor);
+      }
+    }
+    return materialization;
+  } catch (error) {
+    if (sentinelDescriptor !== undefined) {
+      closeSync(sentinelDescriptor);
+    }
+    if (
+      sentinelCreated &&
+      existsSync(
+        join(created, processEvidenceProbeMaterializationSentinelName),
+      )
+    ) {
+      const sentinelPath = join(
+        created,
+        processEvidenceProbeMaterializationSentinelName,
+      );
+      captureProcessEvidenceMaterializationSentinel(
+        sentinelPath,
+        "failed probe materialization sentinel",
+      );
+      unlinkSync(sentinelPath);
+    }
+    if (existsSync(created)) {
+      const metadata = lstatSync(created);
+      assert.equal(metadata.isSymbolicLink(), false);
+      assert.equal(metadata.isDirectory(), true);
+      assert.deepEqual(readdirSync(created), []);
+      rmdirSync(created);
+    }
+    throw error;
+  }
+}
+
+function cargoProbeDependencyNamePattern() {
+  const suffix = process.platform === "win32" ? "\\.exe" : "";
+  const rustCrateName = processEvidenceProbeName.replaceAll("-", "_");
+  return new RegExp(
+    `^(?:${processEvidenceProbeName}|${rustCrateName})-[0-9a-f]{16}${suffix}$`,
+    "u",
+  );
+}
+
+function captureStableCargoProcessEvidenceProbeSource(
+  path,
+  expectedPath,
+  cargoTarget,
+  label,
+) {
+  assertExactCanonicalPath(path, expectedPath, `${label} selected executable`);
+  const source = captureStableProcessEvidenceArtifact(
+    path,
+    cargoTarget,
+    label,
+    false,
+  );
+  const linkCount = BigInt(source.identity.nlink);
+  assert.equal(
+    linkCount === 1n || linkCount === 2n,
+    true,
+    `${label} must have one link or Cargo's exact two-link layout`,
+  );
+  if (linkCount === 1n) {
+    return source;
+  }
+
+  assert.equal(
+    process.platform === "linux" || process.platform === "win32",
+    true,
+    `${label} may only use Cargo's second link on Linux or Windows`,
+  );
+  const outputDirectory = regularDirectory(
+    dirname(source.path),
+    `${label} output directory`,
+  );
+  assert.equal(
+    outputDirectory,
+    realpathSync(dirname(expectedPath)),
+    `${label} output directory drifted`,
+  );
+  const dependenciesDirectory = regularDirectory(
+    join(outputDirectory, "deps"),
+    `${label} dependencies directory`,
+  );
+  assert.equal(
+    dirname(dependenciesDirectory),
+    outputDirectory,
+    `${label} dependencies directory escaped its output directory`,
+  );
+
+  const candidateNames = readdirSync(dependenciesDirectory).filter((name) =>
+    cargoProbeDependencyNamePattern().test(name),
+  );
+  assert.ok(
+    candidateNames.length > 0,
+    `${label} is missing Cargo's dependency-link candidate`,
+  );
+  const siblings = candidateNames.flatMap((name) => {
+    const candidate = captureStableProcessEvidenceArtifact(
+      join(dependenciesDirectory, name),
+      cargoTarget,
+      `${label} dependency-link candidate`,
+      false,
+    );
+    return candidate.identity.dev === source.identity.dev &&
+      candidate.identity.ino === source.identity.ino
+      ? [candidate]
+      : [];
+  });
+  assert.equal(
+    siblings.length,
+    1,
+    `${label} must account for exactly one Cargo dependency link`,
+  );
+  const sibling = siblings[0];
+  assert.notEqual(
+    sibling.path,
+    source.path,
+    `${label} Cargo links must use distinct paths`,
+  );
+  assert.deepEqual(
+    sibling.identity,
+    source.identity,
+    `${label} Cargo links must identify the same stable artifact`,
+  );
+  assert.equal(
+    sibling.sha256,
+    source.sha256,
+    `${label} Cargo links must contain the same bytes`,
+  );
+  assert.deepEqual(
+    captureStableProcessEvidenceArtifact(
+      sibling.path,
+      cargoTarget,
+      `${label} dependency link after reconciliation`,
+      false,
+    ),
+    sibling,
+    `${label} Cargo dependency link changed during reconciliation`,
+  );
+  assert.deepEqual(
+    captureStableProcessEvidenceArtifact(
+      source.path,
+      cargoTarget,
+      `${label} source after link reconciliation`,
+      false,
+    ),
+    source,
+    `${label} source changed during link reconciliation`,
+  );
+  return source;
+}
+
+function cleanupFailedProcessEvidenceProbeMaterialization(
+  materialization,
+  cargoTarget,
+  destination,
+  destinationIdentity,
+) {
+  const expectedNames = [
+    processEvidenceProbeMaterializationSentinelName,
+    ...(destinationIdentity === undefined ? [] : [parse(destination).base]),
+  ];
+  const captured = capturePrivateProcessEvidenceProbeMaterialization(
+    materialization.path,
+    cargoTarget,
+    expectedNames,
+    "failed private probe materialization",
+  );
+  assert.deepEqual(
+    captured,
+    materialization,
+    "failed private probe materialization identity drifted",
+  );
+  if (destinationIdentity !== undefined) {
+    assert.equal(dirname(destination), materialization.path);
+    const destinationMetadata = lstatSync(destination, { bigint: true });
+    assert.equal(destinationMetadata.isSymbolicLink(), false);
+    assert.equal(destinationMetadata.isFile(), true);
+    assert.equal(destinationMetadata.nlink, 1n);
+    assert.deepEqual(
+      stableObjectIdentity(destinationMetadata),
+      destinationIdentity,
+      "failed materialized probe identity drifted",
+    );
+    unlinkSync(destination);
+  }
+  assert.deepEqual(
+    captureProcessEvidenceMaterializationSentinel(
+      materialization.sentinel.path,
+      "failed private probe materialization sentinel",
+    ),
+    materialization.sentinel.identity,
+  );
+  unlinkSync(materialization.sentinel.path);
+  assert.deepEqual(readdirSync(materialization.path), []);
+  if (process.platform !== "win32") {
+    const directoryDescriptor = openSync(
+      materialization.path,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    );
+    try {
+      fsyncSync(directoryDescriptor);
+    } finally {
+      closeSync(directoryDescriptor);
+    }
+  }
+  rmdirSync(materialization.path);
+}
+
+function materializeCargoProcessEvidenceProbe(
+  cargoSource,
+  expectedSourcePath,
+  cargoTarget,
+  label,
+) {
+  const sourceBefore = captureStableCargoProcessEvidenceProbeSource(
+    cargoSource.path,
+    expectedSourcePath,
+    cargoTarget,
+    `${label} source`,
+  );
+  assert.deepEqual(
+    sourceBefore,
+    cargoSource,
+    `${label} source changed before materialization`,
+  );
+  const materialization =
+    createPrivateProcessEvidenceProbeMaterialization(cargoTarget);
+  const executableSuffix = process.platform === "win32" ? ".exe" : "";
+  const destination = join(
+    materialization.path,
+    `${processEvidenceProbeName}${executableSuffix}`,
+  );
+  assert.equal(dirname(destination), materialization.path);
+
+  let sourceDescriptor;
+  let destinationDescriptor;
+  let destinationIdentity;
+  let materializationError;
+  try {
+    sourceDescriptor = openSync(
+      cargoSource.path,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    );
+    const sourceMetadata = fstatSync(sourceDescriptor, { bigint: true });
+    assert.deepEqual(
+      stableFileIdentity(sourceMetadata),
+      cargoSource.identity,
+      `${label} source descriptor identity drifted`,
+    );
+    destinationDescriptor = openSync(
+      destination,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        (constants.O_NOFOLLOW ?? 0),
+      0o700,
+    );
+    destinationIdentity = stableObjectIdentity(
+      fstatSync(destinationDescriptor, { bigint: true }),
+    );
+
+    const hash = createHash("sha256");
+    const chunk = Buffer.allocUnsafe(64 * 1024);
+    let remaining = Number(sourceMetadata.size);
+    while (remaining > 0) {
+      const requested = Math.min(remaining, chunk.byteLength);
+      const bytesRead = readSync(
+        sourceDescriptor,
+        chunk,
+        0,
+        requested,
+        null,
+      );
+      assert.ok(bytesRead > 0, `${label} source ended during materialization`);
+      hash.update(chunk.subarray(0, bytesRead));
+      let written = 0;
+      while (written < bytesRead) {
+        const amount = writeSync(
+          destinationDescriptor,
+          chunk,
+          written,
+          bytesRead - written,
+          null,
+        );
+        assert.ok(amount > 0, `${label} destination write made no progress`);
+        written += amount;
+      }
+      remaining -= bytesRead;
+    }
+    assert.equal(
+      readSync(sourceDescriptor, chunk, 0, 1, null),
+      0,
+      `${label} source grew during materialization`,
+    );
+    assert.equal(
+      hash.digest("hex"),
+      cargoSource.sha256,
+      `${label} source digest changed during materialization`,
+    );
+    assert.deepEqual(
+      stableFileIdentity(fstatSync(sourceDescriptor, { bigint: true })),
+      cargoSource.identity,
+      `${label} source changed during materialization`,
+    );
+
+    if (process.platform !== "win32") {
+      fchmodSync(destinationDescriptor, 0o700);
+    }
+    fsyncSync(destinationDescriptor);
+    const destinationMetadata = fstatSync(destinationDescriptor, {
+      bigint: true,
+    });
+    assert.equal(destinationMetadata.isFile(), true);
+    assert.equal(destinationMetadata.nlink, 1n);
+    assert.equal(destinationMetadata.size, sourceMetadata.size);
+    if (process.platform !== "win32") {
+      assertPosixOwnerAndMode(
+        destinationMetadata,
+        0o700,
+        `${label} destination descriptor`,
+      );
+    }
+    destinationIdentity = stableObjectIdentity(destinationMetadata);
+  } catch (error) {
+    materializationError = error;
+  } finally {
+    if (sourceDescriptor !== undefined) {
+      closeSync(sourceDescriptor);
+    }
+    if (destinationDescriptor !== undefined) {
+      closeSync(destinationDescriptor);
+    }
+  }
+  if (materializationError !== undefined) {
+    try {
+      cleanupFailedProcessEvidenceProbeMaterialization(
+        materialization,
+        cargoTarget,
+        destination,
+        destinationIdentity,
+      );
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [materializationError, cleanupError],
+        `${label} failed and its private materialization was retained`,
+      );
+    }
+    throw materializationError;
+  }
+
+  try {
+    assert.deepEqual(
+      stableObjectIdentity(lstatSync(destination, { bigint: true })),
+      destinationIdentity,
+      `${label} destination path changed after copy`,
+    );
+    assert.deepEqual(
+      captureStableCargoProcessEvidenceProbeSource(
+        cargoSource.path,
+        expectedSourcePath,
+        cargoTarget,
+        `${label} source after materialization`,
+      ),
+      cargoSource,
+      `${label} source changed around materialization`,
+    );
+    const materialized = captureStableProcessEvidenceArtifact(
+      destination,
+      cargoTarget,
+      `${label} materialized artifact`,
+    );
+    assert.equal(materialized.size, cargoSource.size);
+    assert.equal(materialized.sha256, cargoSource.sha256);
+    assert.deepEqual(
+      stableObjectIdentity(
+        lstatSync(materialized.path, { bigint: true }),
+      ),
+      destinationIdentity,
+      `${label} materialized destination identity drifted`,
+    );
+    const finalMaterialization =
+      capturePrivateProcessEvidenceProbeMaterialization(
+        materialization.path,
+        cargoTarget,
+        [
+          processEvidenceProbeMaterializationSentinelName,
+          parse(destination).base,
+        ],
+        "private probe materialization after copy",
+      );
+    assert.deepEqual(
+      finalMaterialization,
+      materialization,
+      "private probe materialization identity changed during copy",
+    );
+    if (process.platform !== "win32") {
+      const directoryDescriptor = openSync(
+        materialization.path,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      );
+      try {
+        fsyncSync(directoryDescriptor);
+      } finally {
+        closeSync(directoryDescriptor);
+      }
+    }
+    return materialized;
+  } catch (error) {
+    try {
+      cleanupFailedProcessEvidenceProbeMaterialization(
+        materialization,
+        cargoTarget,
+        destination,
+        destinationIdentity,
+      );
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `${label} validation failed and its private materialization was retained`,
+      );
+    }
+    throw error;
+  }
+}
+
+function assertPrivateMaterializedProcessEvidenceProbe(
+  artifact,
+  cargoTarget,
+  label,
+) {
+  const executableSuffix = process.platform === "win32" ? ".exe" : "";
+  assert.equal(
+    parse(artifact.path).base,
+    `${processEvidenceProbeName}${executableSuffix}`,
+    `${label} filename drifted`,
+  );
+  capturePrivateProcessEvidenceProbeMaterialization(
+    dirname(artifact.path),
+    cargoTarget,
+    [
+      processEvidenceProbeMaterializationSentinelName,
+      parse(artifact.path).base,
+    ],
+    `${label} private materialization`,
+  );
+  return artifact;
 }
 
 function expectedProcessEvidenceProbeLayout(rustHost) {
@@ -1632,8 +2289,15 @@ function buildProcessEvidenceProbe({
     expectedPath,
     `${label} executable`,
   );
-  return captureStableProcessEvidenceArtifact(
+  const cargoSource = captureStableCargoProcessEvidenceProbeSource(
     executable,
+    expectedPath,
+    cargoTarget,
+    label,
+  );
+  return materializeCargoProcessEvidenceProbe(
+    cargoSource,
+    expectedPath,
     cargoTarget,
     label,
   );
@@ -1663,6 +2327,11 @@ function createUniversalMacProcessEvidenceProbe(
   const slicesBefore = macProcessEvidenceRustTargets.map((rustTarget) => {
     const slice = slices.get(rustTarget);
     assert.ok(slice, `the ${rustTarget} process-evidence slice is missing`);
+    assertPrivateMaterializedProcessEvidenceProbe(
+      slice,
+      cargoTarget,
+      `${rustTarget} process evidence probe slice`,
+    );
     assert.deepEqual(
       assertMacProcessEvidenceProbeLayout(
         slice.path,
@@ -1852,6 +2521,13 @@ function validateProcessEvidenceManifest(
     manifest.harness,
     "harness evidence did not revalidate",
   );
+  if (manifest.probeLayout.kind === "thin") {
+    assertPrivateMaterializedProcessEvidenceProbe(
+      probe,
+      cargoTarget,
+      "manifest process evidence probe",
+    );
+  }
   if (process.platform === "darwin") {
     assert.deepEqual(
       assertMacProcessEvidenceProbeLayout(

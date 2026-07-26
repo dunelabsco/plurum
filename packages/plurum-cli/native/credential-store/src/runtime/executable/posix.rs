@@ -10,6 +10,8 @@ use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 
 use super::image::{attest_native_image, NativeImageAttestation};
+#[cfg(all(test, feature = "test-support", target_os = "macos"))]
+use super::DirectCandidateDiagnostic;
 use super::{ExecutableAuthorityError, ExecutableOwner, RetainedHandleFootprint};
 
 const MAX_PATH_BYTES: usize = 32_767;
@@ -362,6 +364,216 @@ fn reopen_bound_excluded(
     Ok(reopened)
 }
 
+#[cfg(all(test, feature = "test-support", target_os = "macos"))]
+pub(super) fn diagnose_direct_candidate(
+    candidate_path: &Path,
+    excluded_project_directory: &Path,
+) -> DirectCandidateDiagnostic {
+    if resolve_direct_executable(candidate_path, excluded_project_directory).is_ok() {
+        return DirectCandidateDiagnostic::Ready;
+    }
+
+    let candidate = match NormalizedAbsolutePath::parse(candidate_path) {
+        Ok(candidate) => candidate,
+        Err(_) => return DirectCandidateDiagnostic::CandidateAncestorOpen,
+    };
+    let excluded = match NormalizedAbsolutePath::parse(excluded_project_directory) {
+        Ok(excluded) => excluded,
+        Err(_) => return DirectCandidateDiagnostic::ExcludedAncestorOpen,
+    };
+    let current_uid = rustix::process::getuid().as_raw();
+    if current_uid == 0 {
+        return DirectCandidateDiagnostic::Owner;
+    }
+
+    let excluded_chain = match diagnostic_directory_chain(
+        &excluded.components,
+        current_uid,
+        DiagnosticAncestorScope::Excluded,
+    ) {
+        Ok(chain) => chain,
+        Err(category) => return category,
+    };
+    let excluded_identity = match excluded_chain.last() {
+        Some(entry) => entry.facts,
+        None => return DirectCandidateDiagnostic::Unavailable,
+    };
+    let candidate_chain = match diagnostic_directory_chain(
+        &candidate.components[..candidate.components.len() - 1],
+        current_uid,
+        DiagnosticAncestorScope::Candidate,
+    ) {
+        Ok(chain) => chain,
+        Err(category) => return category,
+    };
+    if candidate_chain
+        .iter()
+        .any(|entry| entry.facts.same_object(excluded_identity))
+    {
+        return DirectCandidateDiagnostic::ExcludedOverlap;
+    }
+
+    let parent = match candidate_chain.last() {
+        Some(parent) => &parent.file,
+        None => return DirectCandidateDiagnostic::Unavailable,
+    };
+    let leaf = match candidate.components.last() {
+        Some(leaf) => leaf,
+        None => return DirectCandidateDiagnostic::CandidateAncestorOpen,
+    };
+    let executable = match open_file_at(parent, leaf) {
+        Ok(executable) => executable,
+        Err(_) => return DirectCandidateDiagnostic::CandidateAncestorOpen,
+    };
+    let executable_facts = match ObjectFacts::capture(&executable) {
+        Ok(facts) => facts,
+        Err(_) => return DirectCandidateDiagnostic::Unavailable,
+    };
+    let executable_bits = if executable_facts.uid == current_uid {
+        0o100
+    } else if executable_facts.uid == 0 {
+        0o001
+    } else {
+        return DirectCandidateDiagnostic::Owner;
+    };
+    if executable_facts.links != 1 {
+        return DirectCandidateDiagnostic::LinkCount;
+    }
+    if executable_facts.mode & FILE_TYPE_MASK != REGULAR_FILE_TYPE
+        || executable_facts.mode & BROAD_WRITE_BITS != 0
+        || executable_facts.mode & SET_ID_BITS != 0
+        || executable_facts.mode & executable_bits == 0
+    {
+        return DirectCandidateDiagnostic::Mode;
+    }
+    match plurum_native_posix_syscall::local_filesystem_is_supported(executable.as_fd()) {
+        Ok(true) => {}
+        Ok(false) => return DirectCandidateDiagnostic::Filesystem,
+        Err(_) => return DirectCandidateDiagnostic::Unavailable,
+    }
+    match plurum_native_macos_acl::extended_acl_is_empty(executable.as_fd()) {
+        Ok(true) => {}
+        Ok(false) => return DirectCandidateDiagnostic::AccessControlList,
+        Err(_) => return DirectCandidateDiagnostic::Unavailable,
+    }
+    match attest_native_image(&executable, executable_facts.size) {
+        Ok(_) => {}
+        Err(ExecutableAuthorityError::Conflict) => {
+            return DirectCandidateDiagnostic::Changed;
+        }
+        Err(ExecutableAuthorityError::Unavailable) => {
+            return DirectCandidateDiagnostic::Unavailable;
+        }
+        Err(_) => return DirectCandidateDiagnostic::NativeImage,
+    }
+    match ObjectFacts::capture(&executable) {
+        Ok(current) if current == executable_facts => DirectCandidateDiagnostic::Unavailable,
+        Ok(_) => DirectCandidateDiagnostic::Changed,
+        Err(_) => DirectCandidateDiagnostic::Unavailable,
+    }
+}
+
+#[cfg(all(test, feature = "test-support", target_os = "macos"))]
+#[derive(Clone, Copy)]
+enum DiagnosticAncestorScope {
+    Candidate,
+    Excluded,
+}
+
+#[cfg(all(test, feature = "test-support", target_os = "macos"))]
+impl DiagnosticAncestorScope {
+    fn open(self) -> DirectCandidateDiagnostic {
+        match self {
+            Self::Candidate => DirectCandidateDiagnostic::CandidateAncestorOpen,
+            Self::Excluded => DirectCandidateDiagnostic::ExcludedAncestorOpen,
+        }
+    }
+
+    fn owner(self) -> DirectCandidateDiagnostic {
+        match self {
+            Self::Candidate => DirectCandidateDiagnostic::CandidateAncestorOwner,
+            Self::Excluded => DirectCandidateDiagnostic::ExcludedAncestorOwner,
+        }
+    }
+
+    fn mode(self) -> DirectCandidateDiagnostic {
+        match self {
+            Self::Candidate => DirectCandidateDiagnostic::CandidateAncestorMode,
+            Self::Excluded => DirectCandidateDiagnostic::ExcludedAncestorMode,
+        }
+    }
+
+    fn filesystem(self) -> DirectCandidateDiagnostic {
+        match self {
+            Self::Candidate => DirectCandidateDiagnostic::CandidateAncestorFilesystem,
+            Self::Excluded => DirectCandidateDiagnostic::ExcludedAncestorFilesystem,
+        }
+    }
+
+    fn acl(self) -> DirectCandidateDiagnostic {
+        match self {
+            Self::Candidate => DirectCandidateDiagnostic::CandidateAncestorAccessControlList,
+            Self::Excluded => DirectCandidateDiagnostic::ExcludedAncestorAccessControlList,
+        }
+    }
+}
+
+#[cfg(all(test, feature = "test-support", target_os = "macos"))]
+fn diagnostic_directory_chain(
+    components: &[OsString],
+    current_uid: u32,
+    scope: DiagnosticAncestorScope,
+) -> Result<Vec<RetainedDirectory>, DirectCandidateDiagnostic> {
+    let root = open_root_directory().map_err(|_| scope.open())?;
+    let root_facts =
+        ObjectFacts::capture(&root).map_err(|_| DirectCandidateDiagnostic::Unavailable)?;
+    diagnose_directory_security(&root, root_facts, current_uid, scope)?;
+    let mut directories = vec![RetainedDirectory {
+        file: root,
+        facts: root_facts,
+    }];
+
+    for component in components {
+        let parent = directories
+            .last()
+            .ok_or(DirectCandidateDiagnostic::Unavailable)?;
+        let file = open_directory_at(&parent.file, component).map_err(|_| scope.open())?;
+        let facts =
+            ObjectFacts::capture(&file).map_err(|_| DirectCandidateDiagnostic::Unavailable)?;
+        diagnose_directory_security(&file, facts, current_uid, scope)?;
+        directories.push(RetainedDirectory { file, facts });
+    }
+    Ok(directories)
+}
+
+#[cfg(all(test, feature = "test-support", target_os = "macos"))]
+fn diagnose_directory_security(
+    file: &File,
+    facts: ObjectFacts,
+    current_uid: u32,
+    scope: DiagnosticAncestorScope,
+) -> Result<(), DirectCandidateDiagnostic> {
+    if facts.uid != current_uid && facts.uid != 0 {
+        return Err(scope.owner());
+    }
+    if facts.mode & FILE_TYPE_MASK != DIRECTORY_TYPE
+        || facts.mode & BROAD_WRITE_BITS != 0
+        || facts.mode & SET_ID_BITS != 0
+    {
+        return Err(scope.mode());
+    }
+    match plurum_native_posix_syscall::local_filesystem_is_supported(file.as_fd()) {
+        Ok(true) => {}
+        Ok(false) => return Err(scope.filesystem()),
+        Err(_) => return Err(DirectCandidateDiagnostic::Unavailable),
+    }
+    match plurum_native_macos_acl::extended_acl_is_empty(file.as_fd()) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(scope.acl()),
+        Err(_) => Err(DirectCandidateDiagnostic::Unavailable),
+    }
+}
+
 fn capture_once(
     candidate: &NormalizedAbsolutePath,
     excluded: &NormalizedAbsolutePath,
@@ -610,8 +822,20 @@ fn require_missing_xattr(file: &File, name: &OsStr) -> Result<(), ExecutableAuth
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "test-support", target_os = "macos"))]
+    use super::diagnose_direct_candidate;
     use super::NormalizedAbsolutePath;
+    #[cfg(all(feature = "test-support", target_os = "macos"))]
+    use crate::posix::ProcessEvidenceRoot;
+    #[cfg(all(feature = "test-support", target_os = "macos"))]
+    use crate::runtime::executable::DirectCandidateDiagnostic;
     use crate::runtime::executable::ExecutableAuthorityError;
+    #[cfg(all(feature = "test-support", target_os = "macos"))]
+    use std::fs::{self, OpenOptions};
+    #[cfg(all(feature = "test-support", target_os = "macos"))]
+    use std::io::Write;
+    #[cfg(all(feature = "test-support", target_os = "macos"))]
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::path::Path;
 
     #[test]
@@ -633,5 +857,67 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    #[cfg(all(feature = "test-support", target_os = "macos"))]
+    #[test]
+    fn direct_candidate_diagnostic_separates_image_and_link_failures() {
+        let root = ProcessEvidenceRoot::new();
+        let excluded = root.create_private_child("excluded");
+        let candidates = root.create_private_child("candidates");
+        let text = candidates.join("compiled-looking-probe");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&text)
+            .expect("the diagnostic fixture must be created");
+        file.write_all(b"not a native image")
+            .expect("the diagnostic fixture must be complete");
+        file.sync_all()
+            .expect("the diagnostic fixture must be durable");
+        drop(file);
+
+        fs::set_permissions(&candidates, fs::Permissions::from_mode(0o777))
+            .expect("the candidate ancestor must become unsafe");
+        let candidate_ancestor_category = diagnose_direct_candidate(&text, &excluded);
+        fs::set_permissions(&candidates, fs::Permissions::from_mode(0o700))
+            .expect("the candidate ancestor must be restored");
+        assert_eq!(
+            candidate_ancestor_category,
+            DirectCandidateDiagnostic::CandidateAncestorMode
+        );
+
+        fs::set_permissions(&excluded, fs::Permissions::from_mode(0o777))
+            .expect("the excluded ancestor must become unsafe");
+        let excluded_ancestor_category = diagnose_direct_candidate(&text, &excluded);
+        fs::set_permissions(&excluded, fs::Permissions::from_mode(0o700))
+            .expect("the excluded ancestor must be restored");
+        assert_eq!(
+            excluded_ancestor_category,
+            DirectCandidateDiagnostic::ExcludedAncestorMode
+        );
+
+        let overlapping = excluded.join("overlapping-probe");
+        fs::hard_link(&text, &overlapping).expect("the overlap fixture must be created");
+        assert_eq!(
+            diagnose_direct_candidate(&overlapping, &excluded),
+            DirectCandidateDiagnostic::ExcludedOverlap
+        );
+        fs::remove_file(&overlapping).expect("the overlap fixture must be removed");
+
+        assert_eq!(
+            diagnose_direct_candidate(&text, &excluded),
+            DirectCandidateDiagnostic::NativeImage
+        );
+
+        let linked = candidates.join("linked-probe");
+        fs::hard_link(&text, &linked).expect("the hard-link fixture must be created");
+        assert_eq!(
+            diagnose_direct_candidate(&text, &excluded),
+            DirectCandidateDiagnostic::LinkCount
+        );
+        fs::remove_file(&linked).expect("the hard-link fixture must be removed");
+        fs::remove_file(&text).expect("the native-image fixture must be removed");
     }
 }

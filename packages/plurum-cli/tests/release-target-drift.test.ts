@@ -1010,6 +1010,132 @@ describe("native release target drift", () => {
     );
   });
 
+  it("materializes Cargo process probes into private single-link evidence", () => {
+    const genericCaptureStart = uniqueLine(
+      isolatedCargoRunner,
+      "function captureProcessEvidenceArtifact(",
+    );
+    const genericCaptureEnd = uniqueFollowingLine(
+      isolatedCargoRunner,
+      "function captureStableProcessEvidenceArtifact(",
+      genericCaptureStart,
+    );
+    const genericCapture = isolatedCargoRunner.slice(
+      genericCaptureStart,
+      genericCaptureEnd,
+    );
+    expect(genericCapture).toContain(
+      "    assert.equal(literalMetadata.nlink, 1n, `${label} must have one link`);",
+    );
+    expect(genericCapture.join("\n")).not.toContain("nlink === 2n");
+
+    for (const exactLine of [
+      '  "plurum-native-process-evidence-materialization-v1\\n";',
+      '  ".plurum-native-process-evidence-materialization-v1-";',
+      '  ".plurum-native-process-evidence-materialization-v1";',
+    ]) {
+      expect(exactLineCount(isolatedCargoRunner, exactLine)).toBe(1);
+    }
+
+    const cargoSourceStart = uniqueLine(
+      isolatedCargoRunner,
+      "function captureStableCargoProcessEvidenceProbeSource(",
+    );
+    const cargoSourceEnd = uniqueFollowingLine(
+      isolatedCargoRunner,
+      "function cleanupFailedProcessEvidenceProbeMaterialization(",
+      cargoSourceStart,
+    );
+    const cargoSource = isolatedCargoRunner
+      .slice(cargoSourceStart, cargoSourceEnd)
+      .join("\n");
+    for (const required of [
+      "    linkCount === 1n || linkCount === 2n,",
+      '    process.platform === "linux" || process.platform === "win32",',
+      '  const dependenciesDirectory = regularDirectory(',
+      "    siblings.length,",
+      "    return candidate.identity.dev === source.identity.dev &&",
+      "      candidate.identity.ino === source.identity.ino",
+      "    sibling.identity,",
+      "    source.identity,",
+      "      `${label} source after link reconciliation`,",
+    ]) {
+      expect(cargoSource).toContain(required);
+    }
+    const cargoPattern = isolatedCargoRunner.join("\n");
+    expect(cargoPattern).toContain(
+      '  const rustCrateName = processEvidenceProbeName.replaceAll("-", "_");',
+    );
+    expect(cargoPattern).toContain(
+      "    `^(?:${processEvidenceProbeName}|${rustCrateName})-[0-9a-f]{16}${suffix}$`,",
+    );
+
+    const materializeStart = uniqueLine(
+      isolatedCargoRunner,
+      "function materializeCargoProcessEvidenceProbe(",
+    );
+    const materializeEnd = uniqueFollowingLine(
+      isolatedCargoRunner,
+      "function assertPrivateMaterializedProcessEvidenceProbe(",
+      materializeStart,
+    );
+    const materialize = isolatedCargoRunner
+      .slice(materializeStart, materializeEnd)
+      .join("\n");
+    for (const required of [
+      '  const executableSuffix = process.platform === "win32" ? ".exe" : "";',
+      "      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),",
+      "        constants.O_EXCL |",
+      "        (constants.O_NOFOLLOW ?? 0),",
+      "      hash.update(chunk.subarray(0, bytesRead));",
+      "        const amount = writeSync(",
+      "    fsyncSync(destinationDescriptor);",
+      "    assert.equal(destinationMetadata.nlink, 1n);",
+      "    assert.equal(destinationMetadata.size, sourceMetadata.size);",
+      "      `${label} destination path changed after copy`,",
+      "    const materialized = captureStableProcessEvidenceArtifact(",
+      "    assert.equal(materialized.sha256, cargoSource.sha256);",
+      "      `${label} materialized destination identity drifted`,",
+      "        fsyncSync(directoryDescriptor);",
+      "      cleanupFailedProcessEvidenceProbeMaterialization(",
+    ]) {
+      expect(materialize).toContain(required);
+    }
+
+    const privateDirectoryStart = uniqueLine(
+      isolatedCargoRunner,
+      "function createPrivateProcessEvidenceProbeMaterialization(cargoTarget) {",
+    );
+    const privateDirectoryEnd = uniqueFollowingLine(
+      isolatedCargoRunner,
+      "function cargoProbeDependencyNamePattern() {",
+      privateDirectoryStart,
+    );
+    expect(
+      isolatedCargoRunner
+        .slice(privateDirectoryStart, privateDirectoryEnd)
+        .join("\n"),
+    ).toContain("  const created = mkdtempSync(prefix);");
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        "  const cargoSource = captureStableCargoProcessEvidenceProbeSource(",
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        "  return materializeCargoProcessEvidenceProbe(",
+      ),
+    ).toBe(1);
+    expect(
+      exactLineCount(
+        isolatedCargoRunner,
+        '  if (manifest.probeLayout.kind === "thin") {',
+      ),
+    ).toBe(1);
+  });
+
   it("keeps the CI release build path-remapped before package assembly", () => {
     expect(
       uniqueNamedStep(workflowSteps, "Build the native foundation").lines,

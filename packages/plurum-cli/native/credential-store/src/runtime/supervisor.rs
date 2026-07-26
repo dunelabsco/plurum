@@ -1076,6 +1076,8 @@ mod tests {
     use crate::runtime::executable::ExecutableAuthorityError;
     #[cfg(target_os = "windows")]
     use crate::runtime::executable::MAX_RETAINED_HANDLES;
+    #[cfg(all(feature = "test-support", target_os = "macos"))]
+    use crate::runtime::executable::{diagnose_direct_candidate, DirectCandidateDiagnostic};
     #[cfg(feature = "test-support")]
     use crate::runtime::executable::{
         DirectExecutableResolver, ExecutableOwner, ExecutableRevision,
@@ -1330,6 +1332,20 @@ mod tests {
         assert_eq!(working_directory.parent(), Some(root.root()));
         assert_eq!(hostile_directory.parent(), Some(root.root()));
         assert_eq!(hostile_working_directory.parent(), Some(root.root()));
+
+        #[cfg(target_os = "macos")]
+        {
+            let diagnostic = diagnose_direct_candidate(&probe, &excluded);
+            eprintln!(
+                "plurum-native-process-evidence-preflight={}",
+                diagnostic.category()
+            );
+            assert_eq!(
+                diagnostic,
+                DirectCandidateDiagnostic::Ready,
+                "the staged probe failed its bounded preflight category"
+            );
+        }
 
         let mut supervisor =
             NativeProcessSupervisor::start().expect("native process supervisor must start");

@@ -76,6 +76,59 @@ pub(crate) enum ExecutableAuthorityError {
     Unavailable,
 }
 
+#[cfg(all(test, feature = "test-support", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DirectCandidateDiagnostic {
+    Ready,
+    CandidateAncestorOpen,
+    CandidateAncestorOwner,
+    CandidateAncestorMode,
+    CandidateAncestorFilesystem,
+    CandidateAncestorAccessControlList,
+    ExcludedAncestorOpen,
+    ExcludedAncestorOwner,
+    ExcludedAncestorMode,
+    ExcludedAncestorFilesystem,
+    ExcludedAncestorAccessControlList,
+    ExcludedOverlap,
+    Owner,
+    Mode,
+    LinkCount,
+    Filesystem,
+    AccessControlList,
+    NativeImage,
+    Changed,
+    Unavailable,
+}
+
+#[cfg(all(test, feature = "test-support", target_os = "macos"))]
+impl DirectCandidateDiagnostic {
+    pub(crate) const fn category(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::CandidateAncestorOpen => "candidate-ancestor-open",
+            Self::CandidateAncestorOwner => "candidate-ancestor-owner",
+            Self::CandidateAncestorMode => "candidate-ancestor-mode",
+            Self::CandidateAncestorFilesystem => "candidate-ancestor-filesystem",
+            Self::CandidateAncestorAccessControlList => "candidate-ancestor-acl",
+            Self::ExcludedAncestorOpen => "excluded-ancestor-open",
+            Self::ExcludedAncestorOwner => "excluded-ancestor-owner",
+            Self::ExcludedAncestorMode => "excluded-ancestor-mode",
+            Self::ExcludedAncestorFilesystem => "excluded-ancestor-filesystem",
+            Self::ExcludedAncestorAccessControlList => "excluded-ancestor-acl",
+            Self::ExcludedOverlap => "excluded-overlap",
+            Self::Owner => "owner",
+            Self::Mode => "mode",
+            Self::LinkCount => "link-count",
+            Self::Filesystem => "filesystem",
+            Self::AccessControlList => "acl",
+            Self::NativeImage => "native-image",
+            Self::Changed => "changed",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ExecutableOwner {
     CurrentUser,
@@ -330,6 +383,14 @@ impl DirectExecutableResolver {
     }
 }
 
+#[cfg(all(test, feature = "test-support", target_os = "macos"))]
+pub(crate) fn diagnose_direct_candidate(
+    candidate_path: &Path,
+    excluded_project_directory: &Path,
+) -> DirectCandidateDiagnostic {
+    platform::diagnose_direct_candidate(candidate_path, excluded_project_directory)
+}
+
 fn ensure_handle_capacity(
     already_retained: usize,
     additional_peak: usize,
@@ -378,6 +439,8 @@ fn map_runtime_verify(error: NativeRuntimeAuthorityError) -> ExecutableAuthority
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "test-support", target_os = "macos"))]
+    use super::DirectCandidateDiagnostic;
     use super::{
         append_hex, ensure_handle_capacity, ExecutableAuthorityError, ExecutableRevision,
         RetainedHandleFootprint, MAX_RETAINED_HANDLES,
@@ -401,6 +464,42 @@ mod tests {
         let mut value = String::new();
         append_hex(&mut value, &[0, 1, 15, 16, 254, 255]);
         assert_eq!(value, "00010f10feff");
+    }
+
+    #[cfg(all(feature = "test-support", target_os = "macos"))]
+    #[test]
+    fn direct_candidate_diagnostic_categories_are_fixed_and_bounded() {
+        let categories = [
+            DirectCandidateDiagnostic::Ready,
+            DirectCandidateDiagnostic::CandidateAncestorOpen,
+            DirectCandidateDiagnostic::CandidateAncestorOwner,
+            DirectCandidateDiagnostic::CandidateAncestorMode,
+            DirectCandidateDiagnostic::CandidateAncestorFilesystem,
+            DirectCandidateDiagnostic::CandidateAncestorAccessControlList,
+            DirectCandidateDiagnostic::ExcludedAncestorOpen,
+            DirectCandidateDiagnostic::ExcludedAncestorOwner,
+            DirectCandidateDiagnostic::ExcludedAncestorMode,
+            DirectCandidateDiagnostic::ExcludedAncestorFilesystem,
+            DirectCandidateDiagnostic::ExcludedAncestorAccessControlList,
+            DirectCandidateDiagnostic::ExcludedOverlap,
+            DirectCandidateDiagnostic::Owner,
+            DirectCandidateDiagnostic::Mode,
+            DirectCandidateDiagnostic::LinkCount,
+            DirectCandidateDiagnostic::Filesystem,
+            DirectCandidateDiagnostic::AccessControlList,
+            DirectCandidateDiagnostic::NativeImage,
+            DirectCandidateDiagnostic::Changed,
+            DirectCandidateDiagnostic::Unavailable,
+        ];
+        for category in categories {
+            let rendered = category.category();
+            assert!(!rendered.is_empty());
+            assert!(rendered.len() <= 32);
+            assert!(rendered
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'-'));
+            assert!(!rendered.contains('/') && !rendered.contains('\\'));
+        }
     }
 
     #[test]
