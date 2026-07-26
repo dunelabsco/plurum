@@ -13,6 +13,7 @@ os.environ.setdefault("SUPABASE_DB_URL", "postgresql://test:test@localhost:5432/
 os.environ.setdefault("SUPABASE_KEY", "test-key")
 os.environ.setdefault("OPENAI_API_KEY", "sk-test")
 os.environ.setdefault("ENVIRONMENT", "development")
+os.environ.setdefault("MCP_ALLOWED_HOSTS", '["testserver"]')
 
 
 @pytest.fixture
@@ -49,9 +50,9 @@ def mock_openai():
 @pytest.fixture
 def client(mock_supabase, mock_openai):
     """Create test client with mocked dependencies."""
-    from app.main import app
+    from app.main import create_app
 
-    with TestClient(app) as test_client:
+    with TestClient(create_app()) as test_client:
         yield test_client
 
 

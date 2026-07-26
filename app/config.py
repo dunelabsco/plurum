@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     # Request limits
     max_request_body_bytes: int = 5 * 1024 * 1024  # 5 MB cap on request bodies
 
+    # Hosted MCP transport security
+    mcp_allowed_hosts: list[str] = [
+        "mcp.plurum.ai",
+        "mcp.plurum.ai:*",
+        "api.plurum.ai",
+        "api.plurum.ai:*",
+    ]
+    mcp_allowed_origins: list[str] = []
+
     # CORS
     allowed_origins: list[str] = ["http://localhost:3000"]
 

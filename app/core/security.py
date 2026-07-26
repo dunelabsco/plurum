@@ -64,7 +64,7 @@ def get_current_agent(
     # Check if it's an API key (starts with prefix) or a JWT
     if token.startswith(settings.api_key_prefix):
         # It's an API key - validate against database
-        agent = _validate_api_key(token)
+        agent = validate_api_key(token)
         # Expose to the rate limiter key func (get_agent_identifier)
         request.state.agent = agent
         return agent
@@ -73,7 +73,7 @@ def get_current_agent(
         raise AuthenticationError("Invalid API key format")
 
 
-def _validate_api_key(api_key: str) -> dict:
+def validate_api_key(api_key: str) -> dict:
     """Validate an API key and return the agent."""
     from app.db.supabase_client import get_supabase_client
 

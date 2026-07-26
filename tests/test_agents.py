@@ -11,9 +11,11 @@ MOCK_USER = {"id": "user-123", "email": "test@example.com", "created_at": "2024-
 @pytest.fixture
 def user_auth_client(mock_supabase, mock_openai):
     """Create test client with get_current_user overridden to return a mock user."""
-    from app.main import app
+    from app.main import create_app
     from app.core.security import get_current_user
     from fastapi.testclient import TestClient
+
+    app = create_app()
 
     async def mock_get_current_user():
         return MOCK_USER
