@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import contextvars
+import json
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import anyio
+from mcp.types import INVALID_PARAMS
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from app.core.content_security import reject_api_keys
 from app.core.exceptions import AuthenticationError
+from app.core.exceptions import ValidationError as PlurumValidationError
 from app.core.security import extract_bearer_token, validate_api_key
 
 logger = logging.getLogger(__name__)
@@ -46,6 +51,66 @@ def _normalize_client(value: str | None) -> str:
     return client if client in _KNOWN_CLIENTS else "unknown"
 
 
+def _safe_request_id(payload: Any) -> str | int | None:
+    if not isinstance(payload, dict):
+        return None
+    request_id = payload.get("id")
+    if isinstance(request_id, bool) or not isinstance(request_id, (str, int)):
+        return None
+    try:
+        reject_api_keys(request_id, path="mcp_request.id")
+    except PlurumValidationError:
+        return None
+    return request_id
+
+
+def _parse_and_scan_body(body: bytes) -> tuple[Any, bool]:
+    """Return parsed JSON when possible and whether it contains a credential."""
+    text = body.decode("utf-8", errors="replace")
+    try:
+        reject_api_keys(text, path="mcp_request")
+        raw_contains_credential = False
+    except PlurumValidationError:
+        raw_contains_credential = True
+
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, raw_contains_credential
+
+    # Reserializing catches escaped credentials and credentials used as mapping
+    # keys without reflecting the request in an error or log.
+    try:
+        reject_api_keys(
+            json.dumps(payload, ensure_ascii=False),
+            path="mcp_request",
+        )
+    except PlurumValidationError:
+        return payload, True
+    return payload, raw_contains_credential
+
+
+async def _send_invalid_params(
+    scope: Scope,
+    receive: Receive,
+    send: Send,
+    request_id: str | int | None,
+) -> None:
+    response = JSONResponse(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": INVALID_PARAMS,
+                "message": "Invalid request parameters",
+            },
+        },
+        status_code=200,
+        headers={"Cache-Control": "no-store"},
+    )
+    await response(scope, receive, send)
+
+
 async def _send_error(scope: Scope, receive: Receive, send: Send, status_code: int) -> None:
     if status_code == 401:
         message = "Invalid or missing API key"
@@ -59,6 +124,52 @@ async def _send_error(scope: Scope, receive: Receive, send: Send, status_code: i
 
     response = JSONResponse({"error": message}, status_code=status_code, headers=headers)
     await response(scope, receive, send)
+
+
+class MCPRequestCredentialGuard:
+    """Stop secret-bearing MCP bodies before SDK parsing or validation logs."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope["method"] != "POST":
+            await self.app(scope, receive, send)
+            return
+
+        messages: list[Message] = []
+        body_parts: list[bytes] = []
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message["type"] == "http.request":
+                body_parts.append(message.get("body", b""))
+                if not message.get("more_body", False):
+                    break
+            elif message["type"] == "http.disconnect":
+                break
+
+        payload, contains_credential = _parse_and_scan_body(b"".join(body_parts))
+        if contains_credential:
+            await _send_invalid_params(
+                scope,
+                receive,
+                send,
+                _safe_request_id(payload),
+            )
+            return
+
+        message_index = 0
+
+        async def replay_receive() -> Message:
+            nonlocal message_index
+            if message_index < len(messages):
+                message = messages[message_index]
+                message_index += 1
+                return message
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
 
 
 class MCPAPIKeyAuthMiddleware:
