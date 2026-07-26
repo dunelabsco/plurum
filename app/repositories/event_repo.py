@@ -24,9 +24,9 @@ def log_event(
     metadata: Optional[dict] = None,
 ) -> None:
     """Append a usage event. Best-effort: any failure is swallowed."""
-    if not get_settings().events_enabled:
-        return
     try:
+        if not get_settings().events_enabled:
+            return
         row = {"event_type": event_type, "metadata": metadata or {}}
         if agent_id:
             row["agent_id"] = str(agent_id)
@@ -35,5 +35,9 @@ def log_event(
         if query:
             row["query"] = query[:2000]  # cap stored query length
         get_supabase_client().table("events").insert(row).execute()
-    except Exception as e:  # never propagate — analytics is non-critical
-        logger.debug("log_event(%s) failed (ignored): %s", event_type, e)
+    except Exception as exc:  # never propagate — analytics is non-critical
+        logger.debug(
+            "log_event(%s) failed (ignored; %s)",
+            event_type,
+            type(exc).__name__,
+        )

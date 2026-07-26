@@ -22,6 +22,8 @@ from app.core.security import extract_bearer_token, validate_api_key
 logger = logging.getLogger(__name__)
 
 _KNOWN_CLIENTS = {"claude-code", "codex"}
+_MAX_CLIENT_HEADER_CHARS = 64
+_MAX_AUTHORIZATION_HEADER_CHARS = 512
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,8 @@ def get_mcp_principal(*, required: bool = True) -> MCPPrincipal | None:
 
 
 def _normalize_client(value: str | None) -> str:
+    if value is None or len(value) > _MAX_CLIENT_HEADER_CHARS:
+        return "unknown"
     client = (value or "").strip().lower()
     return client if client in _KNOWN_CLIENTS else "unknown"
 
@@ -139,15 +143,20 @@ class MCPRequestCredentialGuard:
 
         messages: list[Message] = []
         body_parts: list[bytes] = []
+        body_complete = False
         while True:
             message = await receive()
             messages.append(message)
             if message["type"] == "http.request":
                 body_parts.append(message.get("body", b""))
                 if not message.get("more_body", False):
+                    body_complete = True
                     break
             elif message["type"] == "http.disconnect":
                 break
+
+        if not body_complete:
+            return
 
         payload, contains_credential = _parse_and_scan_body(b"".join(body_parts))
         if contains_credential:
@@ -187,8 +196,15 @@ class MCPAPIKeyAuthMiddleware:
             return
 
         headers = Headers(scope=scope)
+        authorization = headers.get("authorization")
+        if (
+            authorization is not None
+            and len(authorization) > _MAX_AUTHORIZATION_HEADER_CHARS
+        ):
+            await _send_error(scope, receive, send, 401)
+            return
         try:
-            api_key = extract_bearer_token(headers.get("authorization"))
+            api_key = extract_bearer_token(authorization)
             agent = await anyio.to_thread.run_sync(validate_api_key, api_key)
             agent_id = str(agent["id"])
         except AuthenticationError:

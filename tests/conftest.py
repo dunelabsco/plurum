@@ -14,6 +14,7 @@ os.environ.setdefault("SUPABASE_KEY", "test-key")
 os.environ.setdefault("OPENAI_API_KEY", "sk-test")
 os.environ.setdefault("ENVIRONMENT", "development")
 os.environ.setdefault("MCP_ALLOWED_HOSTS", '["testserver"]')
+os.environ.setdefault("EVENTS_ENABLED", "false")
 
 
 @pytest.fixture

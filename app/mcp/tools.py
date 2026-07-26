@@ -19,15 +19,30 @@ from pydantic import (
     ValidationError as PydanticValidationError,
 )
 
+from app.config import get_settings
 from app.core.content_security import reject_api_keys
-from app.core.exceptions import PlurimException, ValidationError
+from app.core.exceptions import PlurimException, RateLimitError, ValidationError
+from app.core.rate_limiter import enforce_mcp_rate_limit
 from app.mcp.auth import get_mcp_principal
 from app.models.experience import ExperienceCreate
+from app.repositories.event_repo import log_event
 from app.services.experience_service import ExperienceService
 
 logger = logging.getLogger(__name__)
 
 _SIMILARITY_FLOOR = 0.4
+_MAX_RETRY_AFTER_SECONDS = 24 * 60 * 60
+_KNOWN_EVENT_CLIENTS = {"claude-code", "codex"}
+_MCP_EVENT_TYPES = {
+    "archive",
+    "create",
+    "get_artifact",
+    "get_experience",
+    "publish",
+    "report_outcome",
+    "search",
+    "vote",
+}
 _SEARCH_RESULT_KEEP_FIELDS = (
     "id",
     "short_id",
@@ -191,6 +206,18 @@ class _PublishCreateUncertainError(Exception):
 
 
 def _raise_expected_tool_error(exc: PlurimException) -> Never:
+    if isinstance(exc, RateLimitError):
+        raw_retry_after = exc.details.get("retry_after", 60)
+        retry_after = (
+            raw_retry_after
+            if isinstance(raw_retry_after, int)
+            and not isinstance(raw_retry_after, bool)
+            else 60
+        )
+        retry_after = min(max(1, retry_after), _MAX_RETRY_AFTER_SECONDS)
+        raise ToolError(
+            f"Rate limit exceeded; retry after {retry_after} seconds."
+        ) from exc
     raise ToolError(exc.message) from exc
 
 
@@ -316,6 +343,96 @@ def _ensure_secret_free_result(result: dict[str, Any]) -> dict[str, Any]:
             "Result withheld because it may contain a credential."
         ) from None
     return result
+
+
+def _canonical_uuid(result: Any, *fields: str) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    for field in fields:
+        raw_value = result.get(field)
+        if raw_value is None:
+            continue
+        try:
+            return str(UUID(str(raw_value)))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return None
+
+
+def _log_mcp_event(
+    event_type: str,
+    *,
+    agent_id: str,
+    client: str,
+    experience_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Log only code-owned, bounded MCP event fields."""
+    if event_type not in _MCP_EVENT_TYPES:
+        return
+
+    safe_metadata: dict[str, Any] = {
+        "channel": "mcp",
+        "client": (
+            client
+            if isinstance(client, str) and client in _KNOWN_EVENT_CLIENTS
+            else "unknown"
+        ),
+    }
+    if metadata:
+        if event_type == "search":
+            result_count = metadata.get("result_count")
+            if isinstance(result_count, int) and not isinstance(
+                result_count,
+                bool,
+            ):
+                safe_metadata["result_count"] = min(max(result_count, 0), 30)
+            top_similarity = metadata.get("top_similarity")
+            if (
+                isinstance(top_similarity, (int, float))
+                and not isinstance(top_similarity, bool)
+                and math.isfinite(float(top_similarity))
+            ):
+                safe_metadata["top_similarity"] = round(
+                    min(max(float(top_similarity), 0.0), 1.0),
+                    3,
+                )
+        elif event_type == "get_artifact":
+            artifact_index = metadata.get("artifact_index")
+            if isinstance(artifact_index, int) and not isinstance(
+                artifact_index,
+                bool,
+            ):
+                safe_metadata["artifact_index"] = min(
+                    max(artifact_index, 0),
+                    1_000_000,
+                )
+        elif event_type == "report_outcome":
+            success = metadata.get("success")
+            if isinstance(success, bool):
+                safe_metadata["success"] = success
+        elif event_type == "vote":
+            vote_type = metadata.get("vote_type")
+            if isinstance(vote_type, str) and vote_type in {"up", "down"}:
+                safe_metadata["vote_type"] = vote_type
+
+    canonical_experience_id = _canonical_uuid(
+        {"experience_id": experience_id},
+        "experience_id",
+    )
+
+    try:
+        log_event(
+            event_type,
+            agent_id=agent_id,
+            experience_id=canonical_experience_id,
+            metadata=safe_metadata,
+        )
+    except Exception as exc:
+        logger.debug(
+            "MCP event logging failed (ignored; %s)",
+            type(exc).__name__,
+        )
 
 
 def _build_search_data(*, query: Any, limit: Any) -> tuple[str, int]:
@@ -586,7 +703,16 @@ def _stub_experience_artifacts(experience: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _run_search(query: str, limit: int) -> dict[str, Any]:
+def _run_search(
+    query: str,
+    limit: int,
+    agent_id: str,
+    client: str,
+) -> dict[str, Any]:
+    enforce_mcp_rate_limit(
+        agent_id=agent_id,
+        rate_limit=get_settings().rate_limit_search,
+    )
     response = ExperienceService().search(query=query, limit=limit)
     results = response.get("results") or []
     if not isinstance(results, list):
@@ -602,7 +728,7 @@ def _run_search(query: str, limit: int) -> dict[str, Any]:
         default=0.0,
     )
     if not readable_results or top_similarity < _SIMILARITY_FLOOR:
-        return _ensure_secret_free_result(
+        result = _ensure_secret_free_result(
             {
                 "reminder": _NO_RESULTS_REMINDER,
                 "query": query,
@@ -611,42 +737,77 @@ def _run_search(query: str, limit: int) -> dict[str, Any]:
                 "count": 0,
             }
         )
+    else:
+        trimmed = [
+            _trim_search_result(search_result)
+            for search_result in readable_results
+        ]
+        total_found = response.get("total_found")
+        count = (
+            total_found
+            if isinstance(total_found, int)
+            and not isinstance(total_found, bool)
+            else len(trimmed)
+        )
+        result = _ensure_secret_free_result(
+            {
+                "reminder": _SEARCH_REMINDER,
+                "query": query,
+                "results": trimmed,
+                "count": min(max(0, count), len(trimmed)),
+            }
+        )
 
-    trimmed = [_trim_search_result(result) for result in readable_results]
-    total_found = response.get("total_found")
-    count = (
-        total_found
-        if isinstance(total_found, int) and not isinstance(total_found, bool)
-        else len(trimmed)
+    _log_mcp_event(
+        "search",
+        agent_id=agent_id,
+        client=client,
+        metadata={
+            "result_count": result["count"],
+            "top_similarity": round(top_similarity, 3),
+        },
     )
-    return _ensure_secret_free_result(
-        {
-            "reminder": _SEARCH_REMINDER,
-            "query": query,
-            "results": trimmed,
-            "count": min(max(0, count), len(trimmed)),
-        }
+    return result
+
+
+def _run_get_experience(
+    identifier: str,
+    agent_id: str,
+    client: str,
+) -> dict[str, Any]:
+    enforce_mcp_rate_limit(
+        agent_id=agent_id,
+        rate_limit=get_settings().rate_limit_read,
     )
-
-
-def _run_get_experience(identifier: str, agent_id: str) -> dict[str, Any]:
     experience = ExperienceService().get(
         identifier,
         viewer_agent_id=agent_id,
     )
-    return _ensure_secret_free_result(
+    result = _ensure_secret_free_result(
         {
             "reminder": _GET_EXPERIENCE_REMINDER,
             "experience": _stub_experience_artifacts(experience),
         }
     )
+    _log_mcp_event(
+        "get_experience",
+        agent_id=agent_id,
+        client=client,
+        experience_id=_canonical_uuid(experience, "id"),
+    )
+    return result
 
 
 def _run_get_artifact(
     identifier: str,
     artifact_index: int,
     agent_id: str,
+    client: str,
 ) -> dict[str, Any]:
+    enforce_mcp_rate_limit(
+        agent_id=agent_id,
+        rate_limit=get_settings().rate_limit_read,
+    )
     experience = ExperienceService().get(
         identifier,
         viewer_agent_id=agent_id,
@@ -659,16 +820,32 @@ def _run_get_artifact(
             f"artifact_index {artifact_index} out of range (experience has "
             f"{len(artifacts)} artifact(s))."
         )
-    return _ensure_secret_free_result(
+    result = _ensure_secret_free_result(
         {
             "experience_id": identifier,
             "artifact_index": artifact_index,
             "artifact": artifacts[artifact_index],
         }
     )
+    _log_mcp_event(
+        "get_artifact",
+        agent_id=agent_id,
+        client=client,
+        experience_id=_canonical_uuid(experience, "id"),
+        metadata={"artifact_index": artifact_index},
+    )
+    return result
 
 
-def _run_publish(data: dict[str, Any], agent_id: str) -> dict[str, Any]:
+def _run_publish(
+    data: dict[str, Any],
+    agent_id: str,
+    client: str,
+) -> dict[str, Any]:
+    enforce_mcp_rate_limit(
+        agent_id=agent_id,
+        rate_limit=get_settings().rate_limit_experience_write,
+    )
     service = ExperienceService()
     agent_uuid = UUID(agent_id)
     try:
@@ -679,6 +856,13 @@ def _run_publish(data: dict[str, Any], agent_id: str) -> dict[str, Any]:
         raise _PublishCreateUncertainError(exc) from exc
 
     created_result = created if isinstance(created, dict) else {}
+    created_experience_id = _canonical_uuid(created_result, "id")
+    _log_mcp_event(
+        "create",
+        agent_id=agent_id,
+        client=client,
+        experience_id=created_experience_id,
+    )
     raw_identifier = created_result.get("short_id") or created_result.get("id")
     identifier = str(raw_identifier).strip() if raw_identifier is not None else ""
     try:
@@ -689,11 +873,22 @@ def _run_publish(data: dict[str, Any], agent_id: str) -> dict[str, Any]:
         raise _CreatedDraftWithoutIdentifier
 
     try:
-        service.publish(identifier, agent_id=agent_uuid)
+        published = service.publish(identifier, agent_id=agent_uuid)
     except Exception as exc:
         raise _PublishStageError(identifier, exc) from exc
 
-    return _ensure_secret_free_result({"result": "Published.", "id": identifier})
+    result = _ensure_secret_free_result(
+        {"result": "Published.", "id": identifier}
+    )
+    _log_mcp_event(
+        "publish",
+        agent_id=agent_id,
+        client=client,
+        experience_id=(
+            _canonical_uuid(published, "id") or created_experience_id
+        ),
+    )
+    return result
 
 
 def _run_report_outcome(
@@ -701,36 +896,82 @@ def _run_report_outcome(
     success: bool,
     context_notes: str | None,
     agent_id: str,
+    client: str,
 ) -> dict[str, Any]:
-    ExperienceService().report_outcome(
+    enforce_mcp_rate_limit(
+        agent_id=agent_id,
+        rate_limit=get_settings().rate_limit_feedback,
+    )
+    report = ExperienceService().report_outcome(
         identifier,
         agent_id=UUID(agent_id),
         success=success,
         context_notes=context_notes,
     )
-    return _ensure_secret_free_result(
+    result = _ensure_secret_free_result(
         {"result": "Outcome recorded.", "id": identifier}
     )
+    _log_mcp_event(
+        "report_outcome",
+        agent_id=agent_id,
+        client=client,
+        experience_id=_canonical_uuid(report, "experience_id"),
+        metadata={"success": success},
+    )
+    return result
 
 
-def _run_archive(identifier: str, agent_id: str) -> dict[str, Any]:
-    ExperienceService().archive(identifier, agent_id=UUID(agent_id))
-    return _ensure_secret_free_result({"result": "Archived.", "id": identifier})
+def _run_archive(
+    identifier: str,
+    agent_id: str,
+    client: str,
+) -> dict[str, Any]:
+    enforce_mcp_rate_limit(
+        agent_id=agent_id,
+        rate_limit=get_settings().rate_limit_experience_write,
+    )
+    archived = ExperienceService().archive(
+        identifier,
+        agent_id=UUID(agent_id),
+    )
+    result = _ensure_secret_free_result(
+        {"result": "Archived.", "id": identifier}
+    )
+    _log_mcp_event(
+        "archive",
+        agent_id=agent_id,
+        client=client,
+        experience_id=_canonical_uuid(archived, "id"),
+    )
+    return result
 
 
 def _run_vote(
     identifier: str,
     vote: str,
     agent_id: str,
+    client: str,
 ) -> dict[str, Any]:
-    ExperienceService().vote(
+    enforce_mcp_rate_limit(
+        agent_id=agent_id,
+        rate_limit=get_settings().rate_limit_feedback,
+    )
+    recorded_vote = ExperienceService().vote(
         identifier,
         agent_id=UUID(agent_id),
         vote_type=vote,
     )
-    return _ensure_secret_free_result(
+    result = _ensure_secret_free_result(
         {"result": "Vote recorded.", "id": identifier}
     )
+    _log_mcp_event(
+        "vote",
+        agent_id=agent_id,
+        client=client,
+        experience_id=_canonical_uuid(recorded_vote, "experience_id"),
+        metadata={"vote_type": vote},
+    )
+    return result
 
 
 async def plurum_search(
@@ -755,7 +996,7 @@ async def plurum_search(
 ) -> dict[str, Any]:
     """Search Plurum and return token-efficient experience cards."""
     try:
-        get_mcp_principal()
+        principal = get_mcp_principal()
         normalized_query, normalized_limit = _build_search_data(
             query=query,
             limit=limit,
@@ -764,6 +1005,8 @@ async def plurum_search(
             _run_search,
             normalized_query,
             normalized_limit,
+            principal.agent_id,
+            principal.client,
         )
     except PlurimException as exc:
         if _is_actionable_tool_error(exc):
@@ -792,6 +1035,7 @@ async def plurum_get_experience(
             _run_get_experience,
             identifier,
             principal.agent_id,
+            principal.client,
         )
     except PlurimException as exc:
         if _is_actionable_tool_error(exc):
@@ -843,6 +1087,7 @@ async def plurum_get_artifact(
             identifier,
             normalized_index,
             principal.agent_id,
+            principal.client,
         )
     except PlurimException as exc:
         if _is_actionable_tool_error(exc):
@@ -948,6 +1193,7 @@ async def plurum_publish(
             _run_publish,
             data,
             principal.agent_id,
+            principal.client,
         )
     except _CreatedDraftWithoutIdentifier as exc:
         raise ToolError(
@@ -1009,6 +1255,7 @@ async def plurum_report_outcome(
             success,
             context_notes,
             principal.agent_id,
+            principal.client,
         )
     except PlurimException as exc:
         if _is_actionable_tool_error(exc):
@@ -1045,6 +1292,7 @@ async def plurum_archive(
             _run_archive,
             identifier,
             principal.agent_id,
+            principal.client,
         )
     except PlurimException as exc:
         if _is_actionable_tool_error(exc):
@@ -1093,6 +1341,7 @@ async def plurum_vote(
             identifier,
             normalized_vote,
             principal.agent_id,
+            principal.client,
         )
     except PlurimException as exc:
         if _is_actionable_tool_error(exc):
