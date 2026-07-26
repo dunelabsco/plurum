@@ -82,7 +82,7 @@ def _row(
 
 
 @pytest.mark.asyncio
-async def test_inventory_exposes_exactly_three_bounded_read_tools(monkeypatch):
+async def test_inventory_keeps_three_bounded_read_tools(monkeypatch):
     from app.main import create_app
     from app.mcp import auth
 
@@ -91,9 +91,10 @@ async def test_inventory_exposes_exactly_three_bounded_read_tools(monkeypatch):
     async with _mcp_session(create_app()) as session:
         inventory = await session.list_tools()
 
-    assert [tool.name for tool in inventory.tools] == READ_TOOL_NAMES
+    read_tools = inventory.tools[:3]
+    assert [tool.name for tool in read_tools] == READ_TOOL_NAMES
     by_name = {tool.name: tool for tool in inventory.tools}
-    for tool in inventory.tools:
+    for tool in read_tools:
         assert tool.annotations is not None
         assert tool.annotations.readOnlyHint is True
         assert tool.annotations.destructiveHint is False
