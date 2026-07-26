@@ -150,7 +150,7 @@ class ExperienceService:
         consumers should filter on status='archived' or use the
         include_archived=true list flag to retrieve them.
         """
-        experience = self.repo.get_by_identifier(identifier)
+        experience = self._get_readable_experience(identifier, agent_id)
         self._assert_owner(experience, agent_id)
 
         if experience["status"] == "archived":
