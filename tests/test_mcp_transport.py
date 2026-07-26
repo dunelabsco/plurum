@@ -96,7 +96,9 @@ async def test_valid_key_initializes_with_instructions_and_tools(mock_supabase):
             assert "search" in instructions
             assert "inspect" in instructions
             assert "report outcomes" in instructions
-            assert "never publish" in instructions
+            assert "publish only verified" in instructions
+            assert "write-approval" in instructions
+            assert "never send" in instructions
             assert "secret" in instructions
             assert "private" in instructions
             assert [
