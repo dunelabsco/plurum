@@ -29,6 +29,7 @@ node_modules/
 
 # Local config (contains API keys)
 .mcp.json
+!plugins/plurum/.mcp.json
 .claude/
 
 # Internal (kept local, not published) — root-anchored so they don't
