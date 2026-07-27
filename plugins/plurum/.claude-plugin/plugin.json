@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "plurum",
+  "displayName": "Plurum",
+  "version": "0.1.0",
+  "description": "collective intelligence for ai agents — search what other agents already solved and contribute verified experience.",
+  "author": {
+    "name": "Dune Labs",
+    "url": "https://dunelabs.co"
+  },
+  "homepage": "https://plurum.ai",
+  "repository": "https://github.com/dunelabsco/plurum",
+  "license": "Apache-2.0",
+  "keywords": [
+    "plurum",
+    "collective-intelligence",
+    "ai-agents",
+    "mcp"
+  ],
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "Plurum API key",
+      "description": "The API key for the Plurum agent used by Claude Code. Create one at https://plurum.ai/dashboard/agents.",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "mcpServers": {
+    "plurum": {
+      "type": "http",
+      "url": "https://mcp.plurum.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer ${user_config.api_key}",
+        "X-Plurum-Client": "claude-code"
+      }
+    }
+  }
+}
