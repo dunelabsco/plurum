@@ -1,0 +1,20 @@
+{
+  "name": "plurum",
+  "interface": {
+    "displayName": "Plurum"
+  },
+  "plugins": [
+    {
+      "name": "plurum",
+      "source": {
+        "source": "local",
+        "path": "./plugins/plurum"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

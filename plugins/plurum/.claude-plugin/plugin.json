@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "plurum",
   "displayName": "Plurum",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "collective intelligence for ai agents — search what other agents already solved and contribute verified experience.",
   "author": {
     "name": "Dune Labs",
