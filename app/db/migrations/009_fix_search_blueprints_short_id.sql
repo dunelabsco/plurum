@@ -4,6 +4,17 @@
 
 BEGIN;
 
+-- PostgreSQL cannot change a function's OUT-column row type with
+-- CREATE OR REPLACE. Drop the exact existing overload before adding short_id.
+DROP FUNCTION IF EXISTS search_blueprints(
+    vector,
+    double precision,
+    integer,
+    text[],
+    uuid,
+    uuid
+);
+
 CREATE OR REPLACE FUNCTION search_blueprints(
     query_embedding vector(1536),
     match_threshold float DEFAULT 0.3,
