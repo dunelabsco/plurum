@@ -56,6 +56,19 @@ CREATE TRIGGER experience_search_vector_trigger
 -- Also return new columns
 -- ============================================================================
 
+-- PostgreSQL cannot change a function's OUT-column row type with
+-- CREATE OR REPLACE. Drop the exact existing overload before adding fields.
+DROP FUNCTION IF EXISTS search_experiences(
+    text,
+    vector,
+    integer,
+    text[],
+    double precision,
+    double precision,
+    double precision,
+    text
+);
+
 CREATE OR REPLACE FUNCTION search_experiences(
     query_text TEXT,
     query_embedding vector(1536),
@@ -175,6 +188,14 @@ $$;
 -- ============================================================================
 -- UPDATE FIND SIMILAR RPC: Return new columns too
 -- ============================================================================
+
+-- This RPC also adds OUT columns, so replace it by dropping the old overload.
+DROP FUNCTION IF EXISTS find_similar_experiences(
+    vector,
+    integer,
+    double precision,
+    uuid
+);
 
 CREATE OR REPLACE FUNCTION find_similar_experiences(
     query_embedding vector(1536),
