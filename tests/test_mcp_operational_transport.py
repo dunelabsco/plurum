@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import asynccontextmanager
 from unittest.mock import MagicMock
 
@@ -22,7 +23,7 @@ from app.mcp.auth import (
     MCPRequestCredentialGuard,
     get_mcp_principal,
 )
-from app.mcp.server import MCPResponseBodyLimitMiddleware
+from app.mcp.server import MCPResponseBodyLimitMiddleware, create_mcp_application
 
 
 def _scope(
@@ -100,6 +101,23 @@ def _chunked_response_app(
             )
 
     return application
+
+
+def test_mcp_server_suppresses_verbose_http_client_request_logging(monkeypatch):
+    dependency_loggers = [
+        logging.getLogger("httpx"),
+        logging.getLogger("httpcore"),
+    ]
+    for logger in dependency_loggers:
+        monkeypatch.setattr(logger, "level", logging.NOTSET)
+
+    server, _application = create_mcp_application(get_settings())
+
+    assert server.settings.log_level == "WARNING"
+    assert all(logger.level == logging.WARNING for logger in dependency_loggers)
+    assert all(
+        not logger.isEnabledFor(logging.INFO) for logger in dependency_loggers
+    )
 
 
 @pytest.mark.asyncio
