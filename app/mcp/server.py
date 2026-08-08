@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
@@ -104,6 +106,10 @@ class MCPResponseBodyLimitMiddleware:
 
 def create_mcp_application(settings: Settings) -> tuple[FastMCP, ASGIApp]:
     """Create one MCP server and authenticated ASGI app."""
+    # FastMCP configures the process root logger. Keep HTTP client request URLs
+    # out of host logs because PostgREST filters can contain credential hashes.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     server = FastMCP(
         name="Plurum",
         instructions=MCP_INSTRUCTIONS,
@@ -116,6 +122,7 @@ def create_mcp_application(settings: Settings) -> tuple[FastMCP, ASGIApp]:
             allowed_hosts=settings.mcp_allowed_hosts,
             allowed_origins=settings.mcp_allowed_origins,
         ),
+        log_level="WARNING",
         tools=[],
     )
     register_read_tools(server)
