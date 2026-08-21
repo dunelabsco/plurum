@@ -5,6 +5,8 @@
 - Add the native Codex manifest, hosted MCP declaration, and Git marketplace
   distribution.
 - Document environment-backed API-key setup for the Codex CLI beta.
+- Record completed native Claude Code and Codex CLI validation and clarify
+  installation, credential rotation, and update behavior.
 
 ## 0.1.0
 
