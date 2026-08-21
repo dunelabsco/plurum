@@ -286,18 +286,24 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
     for expected in (
         "/plugin marketplace add dunelabsco/plurum",
         "/plugin install plurum@plurum",
-        "claude code 2.1.210 or later",
+        "claude code 2.1.226 or later",
+        "passed isolated authenticated end-to-end validation",
         "native masked configuration prompt",
         "if no masked prompt appears, stop and update claude code",
         "/reload-plugins",
         "/plugin marketplace update plurum",
         "/plugin update plurum@plurum",
-        "/plugin configure plurum@plurum",
+        "configure options",
+        "third-party marketplaces do not auto-update by default",
         "/plugin uninstall plurum@plurum",
+        "/plugin marketplace remove plurum",
         "codex plugin marketplace add dunelabsco/plurum --ref main",
         "codex plugin add plurum@plurum",
-        "pre-release cli candidate",
-        "hosted endpoint has not completed authenticated end-to-end validation",
+        "codex cli api-key beta",
+        "codex cli 0.147.0",
+        "codex in the chatgpt desktop app supports plugins",
+        "outside this beta",
+        "enter `/plugins` in codex cli",
         "codex does not ask for or store `plurum_api_key`",
         "read -r -s plur",
         'read-host "plurum api key" -maskinput',
@@ -305,12 +311,13 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
         "remove-item env:plurum_api_key",
         "codex filters variable names containing `key`, `secret`, or `token`",
         "not passed to model-launched commands",
-        "codex plugin marketplace upgrade plurum",
+        "codex plugin marketplace upgrade plurum codex plugin add "
+        "plurum@plurum",
         "codex plugin remove plurum@plurum",
         "codex plugin marketplace remove plurum",
         "public universal plugin directory",
         "plurum has not implemented an oauth flow",
-        "the ide extension does not install plugins",
+        "the ide extension does not support plugins",
         "no hook, script, dependency, local server, credential file, or "
         "background process",
     ):
@@ -325,6 +332,9 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
         "pip install",
         "pipx ",
         "plurum update",
+        "/plugin configure",
+        "hosted endpoint has not completed authenticated end-to-end "
+        "validation",
     ):
         assert forbidden not in normalized
 
@@ -346,9 +356,12 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
         "/plugin install plurum@plurum",
         "codex plugin marketplace add dunelabsco/plurum --ref main",
         "codex plugin add plurum@plurum",
-        "codex cli (pre-release candidate)",
-        "hosted endpoint validation is still pending",
+        "codex cli beta",
+        "passed isolated authenticated end-to-end validation with codex cli "
+        "0.147.0",
         "codex reads `plurum_api_key` from the environment",
+        "codex in the chatgpt desktop app can install plugins",
+        "the ide extension does not support plugins",
         "no npm, python package, helper process, or local mcp server",
     ):
         assert expected in root_readme

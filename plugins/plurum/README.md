@@ -17,9 +17,10 @@ log.
 
 ## Claude Code
 
-Use Claude Code 2.1.210 or later. This beta is validated against that release's
-native sensitive plugin configuration. If no masked prompt appears, stop and
-update Claude Code; never enter the key somewhere else.
+Use Claude Code 2.1.226 or later. This beta passed isolated authenticated
+end-to-end validation with that release's native sensitive plugin
+configuration. If no masked prompt appears, stop and update Claude Code;
+never enter the key somewhere else.
 
 Run these as slash commands inside Claude Code:
 
@@ -36,35 +37,41 @@ does not create a credential file.
 Start a new session or run `/reload-plugins`, then use `/mcp` to confirm that
 the `plurum` server is connected.
 
-To update the manifest or skill:
+To replace a rotated key, run `/plugin`, select **Installed**, open **Plurum**,
+and choose **Configure options**. Enter the replacement only in the native
+masked prompt, then reload the plugin or start a new session.
+
+Third-party marketplaces do not auto-update by default. To update manually:
 
 ```text
 /plugin marketplace update plurum
 /plugin update plurum@plurum
 ```
 
-To replace a rotated key:
+Run `/reload-plugins` if Claude requests it, or start a new session.
 
-```text
-/plugin configure plurum@plurum
-```
+You can instead enable auto-update from `/plugin` → **Marketplaces** →
+**Plurum** → **Enable auto-update**.
 
-To remove the plugin:
+To remove the plugin and its marketplace:
 
 ```text
 /plugin uninstall plurum@plurum
+/plugin marketplace remove plurum
 ```
 
-## Codex CLI API-key preview
+## Codex CLI API-key beta
 
-This package is a pre-release CLI candidate. Its local installation and
-configuration have been validated, but the hosted endpoint has not completed
-authenticated end-to-end validation. Do not publish or announce the Codex beta
-until that release gate passes.
+This beta passed isolated authenticated end-to-end validation with Codex CLI
+0.147.0, including Git marketplace installation, environment-backed
+authentication, a hosted MCP connection, a native read, and one explicitly
+approved write.
 
-The first API-key surface is the Codex CLI. Desktop environment-backed
-authentication has not been validated. The IDE extension does not install
-plugins; a direct-MCP IDE path is a separate future validation target.
+The supported surface for this API-key beta is Codex CLI. Codex in the ChatGPT
+desktop app supports plugins, but Plurum's environment-backed authentication
+has not been validated there and is outside this beta. The IDE extension does
+not support plugins; a direct-MCP IDE path is a separate future validation
+target.
 
 Install through Codex's native Git marketplace:
 
@@ -72,6 +79,10 @@ Install through Codex's native Git marketplace:
 codex plugin marketplace add dunelabsco/plurum --ref main
 codex plugin add plurum@plurum
 ```
+
+After adding the marketplace, you can also enter `/plugins` in Codex CLI and
+install Plurum from the **Plurum** marketplace tab. Start a new session after
+installation so the bundled skill and tools are available.
 
 Codex does not ask for or store `PLURUM_API_KEY` during plugin installation.
 The key must be present in the environment that launches the Codex session.
@@ -139,10 +150,11 @@ codex mcp list
 These commands verify local configuration; they do not prove that the hosted
 server is reachable.
 
-To update the Git marketplace and installed plugin cache:
+To refresh the Git marketplace and reinstall the updated plugin:
 
 ```bash
 codex plugin marketplace upgrade plurum
+codex plugin add plurum@plurum
 ```
 
 Start a new Codex session after updating. To remove the plugin and marketplace:
