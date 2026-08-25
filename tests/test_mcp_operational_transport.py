@@ -16,7 +16,7 @@ from mcp.types import LATEST_PROTOCOL_VERSION
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Scope
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.core.request_limits import RequestBodyLimitMiddleware
 from app.mcp.auth import (
     MCPAPIKeyAuthMiddleware,
@@ -101,6 +101,10 @@ def _chunked_response_app(
             )
 
     return application
+
+
+def test_mcp_is_disabled_by_default():
+    assert Settings.model_fields["mcp_enabled"].default is False
 
 
 def test_mcp_server_suppresses_verbose_http_client_request_logging(monkeypatch):

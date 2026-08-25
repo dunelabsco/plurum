@@ -575,7 +575,7 @@ async def test_archive_is_owner_only_idempotent_and_hides_private_existence(
     monkeypatch.setattr(
         experience_service,
         "experience_detail",
-        lambda row: dict(row),
+        dict,
     )
     monkeypatch.setattr(tools, "ExperienceService", lambda: service)
     monkeypatch.setattr(auth, "validate_api_key", lambda _key: _agent())

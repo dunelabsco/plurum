@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     # FastMCP emits structured results in both JSON content and
     # structuredContent, so the wire cap is intentionally above the request cap.
     mcp_max_response_body_bytes: int = 10 * 1024 * 1024
-    mcp_enabled: bool = True
+    mcp_enabled: bool = False
 
     # CORS
     allowed_origins: list[str] = ["http://localhost:3000"]
