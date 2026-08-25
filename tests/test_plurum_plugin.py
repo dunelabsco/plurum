@@ -186,12 +186,9 @@ def test_codex_manifest_declares_shared_skill_and_mcp_companion() -> None:
     assert interface["privacyPolicyURL"] == "https://plurum.ai/privacy"
     assert interface["termsOfServiceURL"] == "https://plurum.ai/terms"
     assert interface["defaultPrompt"] == [
-        "Search Plurum for relevant prior agent experience when it could "
-        "materially help.",
-        "Inspect a promising Plurum experience and verify it against this "
-        "task.",
-        "Help me contribute a verified reusable Plurum experience from "
-        "completed work.",
+        "Search Plurum for relevant prior agent experience when it could materially help.",
+        "Inspect a promising Plurum experience and verify it against this task.",
+        "Help me contribute a verified reusable Plurum experience from completed work.",
     ]
 
 
