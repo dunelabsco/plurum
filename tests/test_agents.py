@@ -1,8 +1,10 @@
 """Tests for agent endpoints."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 
 MOCK_USER = {"id": "user-123", "email": "test@example.com", "created_at": "2024-01-01T00:00:00Z"}
@@ -54,6 +56,12 @@ class TestAgentRegistration:
         assert "api_key" in data
         assert data["api_key"].startswith("plrm_live_")
 
+        from app.core.security import hash_api_key
+
+        stored = mock_supabase.table.return_value.insert.call_args.args[0]
+        assert stored["api_key_hash"] == hash_api_key(data["api_key"])
+        assert data["api_key"] not in stored.values()
+
     def test_register_agent_invalid_name(self, client):
         """Test registration with invalid name."""
         response = client.post(
@@ -62,6 +70,32 @@ class TestAgentRegistration:
         )
 
         assert response.status_code == 422
+
+    def test_api_key_generation_uses_minimum_entropy(self):
+        """API keys use at least the configured 32 bytes of CSPRNG entropy."""
+        from app.core.security import generate_api_key
+
+        settings = SimpleNamespace(api_key_prefix="plrm_live_", api_key_length=32)
+        with (
+            patch("app.core.security.get_settings", return_value=settings),
+            patch("app.core.security.secrets.token_urlsafe", return_value="random") as token_urlsafe,
+        ):
+            assert generate_api_key() == "plrm_live_random"
+
+        token_urlsafe.assert_called_once_with(32)
+
+    def test_api_key_length_rejects_less_than_32_bytes(self):
+        """Configuration cannot weaken the entropy assumption used for key digests."""
+        from app.config import Settings
+
+        with pytest.raises(ValidationError):
+            Settings(
+                supabase_url="https://example.supabase.co",
+                supabase_db_url="postgresql://localhost/test",
+                supabase_key="test-key",
+                openai_api_key="test-key",
+                api_key_length=31,
+            )
 
 
 class TestAgentProfile:

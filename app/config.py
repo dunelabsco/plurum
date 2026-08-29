@@ -5,6 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,7 +33,7 @@ class Settings(BaseSettings):
 
     # API Configuration
     api_key_prefix: str = "plrm_live_"
-    api_key_length: int = 32
+    api_key_length: int = Field(default=32, ge=32)
 
     # Rate Limiting (requests per minute)
     rate_limit_standard: int = 100

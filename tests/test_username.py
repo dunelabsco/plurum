@@ -32,6 +32,12 @@ def test_normalize_username():
     assert normalize_username("  Hermes Bot!! ") == "hermes-bot"
     assert normalize_username("___") == ""
     assert normalize_username("A_b-9") == "a_b-9"
+    assert normalize_username("-_-A_b-9_-_") == "a_b-9"
+
+
+def test_normalize_username_handles_long_separator_runs():
+    normalized = normalize_username("a" + "-_" * 10_000 + "b")
+    assert normalized == ("a" + "-_" * 10_000 + "b")[:50]
 
 
 def test_find_taken_usernames_batches(mock_supabase):

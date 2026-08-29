@@ -23,7 +23,9 @@ def generate_api_key() -> str:
 
 
 def hash_api_key(api_key: str) -> str:
-    """Hash an API key using SHA256."""
+    """Create a lookup digest for a server-generated, high-entropy API key."""
+    # API keys contain at least 256 bits of CSPRNG entropy. SHA-256 is used as
+    # a deterministic database fingerprint here, not as a password KDF.
     return hashlib.sha256(api_key.encode()).hexdigest()
 
 
