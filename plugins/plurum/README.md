@@ -25,7 +25,7 @@ never enter the key somewhere else.
 Run these as slash commands inside Claude Code:
 
 ```text
-/plugin marketplace add dunelabsco/plurum
+/plugin marketplace add https://github.com/dunelabsco/plurum.git
 /plugin install plurum@plurum
 ```
 
