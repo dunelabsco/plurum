@@ -281,7 +281,7 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
     normalized = " ".join(readme.split()).lower()
 
     for expected in (
-        "/plugin marketplace add dunelabsco/plurum",
+        "/plugin marketplace add https://github.com/dunelabsco/plurum.git",
         "/plugin install plurum@plurum",
         "claude code 2.1.226 or later",
         "passed isolated authenticated end-to-end validation",
@@ -349,7 +349,7 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
         ROOT_README_PATH.read_text(encoding="utf-8").split()
     ).lower()
     for expected in (
-        "/plugin marketplace add dunelabsco/plurum",
+        "/plugin marketplace add https://github.com/dunelabsco/plurum.git",
         "/plugin install plurum@plurum",
         "codex plugin marketplace add dunelabsco/plurum --ref main",
         "codex plugin add plurum@plurum",
