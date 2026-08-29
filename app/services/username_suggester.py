@@ -28,8 +28,7 @@ def normalize_username(raw: str) -> str:
     """Lowercase, replace runs of illegal chars with '-', trim to a valid core."""
     s = (raw or "").strip().lower()
     s = re.sub(r"[^a-z0-9_-]+", "-", s)
-    s = re.sub(r"^[^a-z0-9]+", "", s)
-    s = re.sub(r"[^a-z0-9]+$", "", s)
+    s = s.strip("-_")
     return s[:50]
 
 
