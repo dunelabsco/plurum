@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import anyio
+from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.types import INVALID_PARAMS
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
@@ -18,12 +19,15 @@ from app.core.content_security import reject_api_keys
 from app.core.exceptions import AuthenticationError
 from app.core.exceptions import ValidationError as PlurumValidationError
 from app.core.security import extract_bearer_token, validate_api_key
+from app.mcp.token_verifier import MCP_AGENT_ID_CLAIM
 
 logger = logging.getLogger(__name__)
 
 _KNOWN_CLIENTS = {"claude-code", "codex"}
+_MAX_AGENT_ID_CHARS = 128
 _MAX_CLIENT_HEADER_CHARS = 64
 _MAX_AUTHORIZATION_HEADER_CHARS = 512
+_MIN_SECRET_BEARER_CHARS = 32
 
 
 @dataclass(frozen=True)
@@ -38,11 +42,25 @@ _principal_var: contextvars.ContextVar[MCPPrincipal | None] = contextvars.Contex
     "plurum_mcp_principal",
     default=None,
 )
+_client_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "plurum_mcp_client",
+    default="unknown",
+)
 
 
 def get_mcp_principal(*, required: bool = True) -> MCPPrincipal | None:
     """Return the authenticated principal for the current MCP request."""
     principal = _principal_var.get()
+    if principal is None:
+        access_token = get_access_token()
+        claims = access_token.claims if access_token is not None else None
+        agent_id = claims.get(MCP_AGENT_ID_CLAIM) if isinstance(claims, dict) else None
+        if (
+            isinstance(agent_id, str)
+            and 0 < len(agent_id) <= _MAX_AGENT_ID_CHARS
+            and not any(ord(character) < 0x20 for character in agent_id)
+        ):
+            principal = MCPPrincipal(agent_id=agent_id, client=_client_var.get())
     if principal is None and required:
         raise RuntimeError("MCP tool called without an authenticated principal")
     return principal
@@ -68,13 +86,19 @@ def _safe_request_id(payload: Any) -> str | int | None:
     return request_id
 
 
-def _parse_and_scan_body(body: bytes) -> tuple[Any, bool]:
+def _parse_and_scan_body(
+    body: bytes,
+    *,
+    request_bearer: str | None = None,
+) -> tuple[Any, bool]:
     """Return parsed JSON when possible and whether it contains a credential."""
     text = body.decode("utf-8", errors="replace")
     try:
         reject_api_keys(text, path="mcp_request")
         raw_contains_credential = False
     except PlurumValidationError:
+        raw_contains_credential = True
+    if request_bearer is not None and request_bearer in text:
         raw_contains_credential = True
 
     try:
@@ -85,13 +109,25 @@ def _parse_and_scan_body(body: bytes) -> tuple[Any, bool]:
     # Reserializing catches escaped credentials and credentials used as mapping
     # keys without reflecting the request in an error or log.
     try:
-        reject_api_keys(
-            json.dumps(payload, ensure_ascii=False),
-            path="mcp_request",
-        )
+        serialized = json.dumps(payload, ensure_ascii=False)
+        reject_api_keys(serialized, path="mcp_request")
+        if request_bearer is not None and request_bearer in serialized:
+            return payload, True
     except PlurumValidationError:
         return payload, True
     return payload, raw_contains_credential
+
+
+def _request_bearer_for_body_scan(authorization: str | None) -> str | None:
+    """Return a bounded bearer worth comparing against an MCP request body."""
+    try:
+        token = extract_bearer_token(authorization)
+        encoded = token.encode("utf-8")
+    except (AuthenticationError, UnicodeEncodeError):
+        return None
+    if len(token) < _MIN_SECRET_BEARER_CHARS or len(encoded) > 64 * 1024:
+        return None
+    return token
 
 
 async def _send_invalid_params(
@@ -158,7 +194,13 @@ class MCPRequestCredentialGuard:
         if not body_complete:
             return
 
-        payload, contains_credential = _parse_and_scan_body(b"".join(body_parts))
+        request_bearer = _request_bearer_for_body_scan(
+            Headers(scope=scope).get("authorization")
+        )
+        payload, contains_credential = _parse_and_scan_body(
+            b"".join(body_parts),
+            request_bearer=request_bearer,
+        )
         if contains_credential:
             await _send_invalid_params(
                 scope,
@@ -179,6 +221,25 @@ class MCPRequestCredentialGuard:
             return await receive()
 
         await self.app(scope, replay_receive, send)
+
+
+class MCPClientContextMiddleware:
+    """Keep the non-authoritative client channel request-local in OAuth mode."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        client = _normalize_client(Headers(scope=scope).get("x-plurum-client"))
+        token = _client_var.set(client)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _client_var.reset(token)
 
 
 class MCPAPIKeyAuthMiddleware:

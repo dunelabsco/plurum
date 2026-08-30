@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import secrets
+import time
+from collections.abc import Mapping
 from typing import Annotated, Optional
+from uuid import UUID
 
 from fastapi import Depends, Header, Request
 
@@ -13,6 +16,9 @@ from app.config import get_settings
 from app.core.exceptions import AuthenticationError
 
 logger = logging.getLogger(__name__)
+
+_USER_TOKEN_CLOCK_SKEW_SECONDS = 60
+_INVALID_USER_TOKEN_MESSAGE = "Invalid or expired token"
 
 
 def generate_api_key() -> str:
@@ -121,30 +127,78 @@ def get_current_user(
     if token.startswith(settings.api_key_prefix):
         raise AuthenticationError("Expected JWT token, got API key")
 
-    # Validate JWT with Supabase
+    # Validate the signature first, then constrain the token to the ordinary
+    # Supabase web-user audience. MCP OAuth tokens are valid Supabase JWTs too,
+    # but must never authenticate dashboard ownership routes.
     client = get_supabase_client()
 
     try:
-        # Use Supabase to verify the JWT and get user
-        user_response = client.auth.get_user(token)
+        claims_response = client.auth.get_claims(jwt=token)
+        claims = claims_response.get("claims") if claims_response else None
+        user_id = _validate_web_user_claims(
+            claims,
+            expected_issuer=f"{settings.supabase_url.rstrip('/')}/auth/v1",
+        )
+    except AuthenticationError:
+        raise
+    except Exception as exc:
+        logger.warning("Token verification failed (%s)", type(exc).__name__)
+        raise AuthenticationError(_INVALID_USER_TOKEN_MESSAGE) from None
 
-        if not user_response or not user_response.user:
-            raise AuthenticationError("Invalid or expired token")
+    return {"id": user_id}
 
-        user = user_response.user
 
-        return {
-            "id": user.id,
-            "email": user.email,
-            "created_at": user.created_at,
-        }
+def _validate_web_user_claims(
+    claims: object,
+    *,
+    expected_issuer: str,
+    now: int | None = None,
+) -> str:
+    """Return a canonical web-user id from a verified Supabase JWT payload."""
+    if not isinstance(claims, Mapping):
+        raise AuthenticationError(_INVALID_USER_TOKEN_MESSAGE)
 
-    except Exception as e:
-        error_msg = str(e)
-        if "Invalid" in error_msg or "expired" in error_msg.lower():
-            raise AuthenticationError("Invalid or expired token")
-        logger.warning("Token verification failed: %s", error_msg)
-        raise AuthenticationError("Invalid or expired token")
+    if (
+        claims.get("iss") != expected_issuer
+        or claims.get("aud") != "authenticated"
+        or "client_id" in claims
+    ):
+        raise AuthenticationError(_INVALID_USER_TOKEN_MESSAGE)
+
+    subject = claims.get("sub")
+    if not isinstance(subject, str):
+        raise AuthenticationError(_INVALID_USER_TOKEN_MESSAGE)
+    try:
+        canonical_subject = str(UUID(subject))
+    except (ValueError, AttributeError):
+        raise AuthenticationError(_INVALID_USER_TOKEN_MESSAGE) from None
+    if subject != canonical_subject:
+        raise AuthenticationError(_INVALID_USER_TOKEN_MESSAGE)
+
+    current_time = int(time.time()) if now is None else now
+    expires_at = claims.get("exp")
+    issued_at = claims.get("iat")
+    not_before = claims.get("nbf")
+
+    if not _is_numeric_date(expires_at) or not _is_numeric_date(issued_at):
+        raise AuthenticationError(_INVALID_USER_TOKEN_MESSAGE)
+    if expires_at < current_time - _USER_TOKEN_CLOCK_SKEW_SECONDS:
+        raise AuthenticationError(_INVALID_USER_TOKEN_MESSAGE)
+    if issued_at > current_time + _USER_TOKEN_CLOCK_SKEW_SECONDS or issued_at > expires_at:
+        raise AuthenticationError(_INVALID_USER_TOKEN_MESSAGE)
+    if not_before is not None and (
+        not _is_numeric_date(not_before)
+        or not_before > current_time + _USER_TOKEN_CLOCK_SKEW_SECONDS
+        or not_before > expires_at
+    ):
+        raise AuthenticationError(_INVALID_USER_TOKEN_MESSAGE)
+
+    return canonical_subject
+
+
+def _is_numeric_date(value: object) -> bool:
+    """Accept the integer NumericDate representation emitted by Supabase."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def get_optional_current_user(
