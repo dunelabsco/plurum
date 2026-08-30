@@ -123,6 +123,24 @@ class TestAgentProfile:
         data = response.json()
         assert data["name"] == "test-agent"
 
+    def test_list_owned_oauth_agent_returns_explicit_null_key_prefix(
+        self,
+        user_auth_client,
+        mock_agent,
+    ):
+        oauth_agent = {**mock_agent, "api_key_hash": None, "api_key_prefix": None}
+        with patch(
+            "app.services.agent_service.AgentService.list_by_owner",
+            return_value=[oauth_agent],
+        ):
+            response = user_auth_client.get(
+                "/api/v1/agents/me/agents",
+                headers={"Authorization": "Bearer fake-jwt-token"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()[0]["api_key_prefix"] is None
+
 
 class TestApiKeyRotation:
     """Tests for API key rotation."""
@@ -199,6 +217,30 @@ class TestAgentClaim:
             )
         assert response.status_code == 403
 
+    def test_oauth_only_agent_release_requires_a_key(
+        self,
+        user_auth_client,
+        mock_agent,
+    ):
+        with patch(
+            "app.services.agent_service.AgentService.release_agent"
+        ) as mock_release:
+            from app.core.exceptions import PlurimException
+
+            mock_release.side_effect = PlurimException(
+                "Create an API key before releasing this agent",
+                status_code=409,
+            )
+            response = user_auth_client.post(
+                f"/api/v1/agents/{mock_agent['id']}/release",
+                headers={"Authorization": "Bearer fake-jwt-token"},
+            )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == (
+            "Create an API key before releasing this agent"
+        )
+
 
 class TestAgentRotateKeyAsOwner:
     """Tests for rotating an agent's API key as its owner."""
@@ -232,6 +274,30 @@ class TestAgentRotateKeyAsOwner:
                 headers={"Authorization": "Bearer fake-jwt-token"},
             )
         assert response.status_code == 403
+
+    def test_create_first_key_as_owner_uses_the_same_secret_contract(
+        self,
+        user_auth_client,
+        mock_agent,
+    ):
+        with patch(
+            "app.services.agent_service.AgentService.rotate_api_key_as_owner"
+        ) as mock_rotate:
+            mock_rotate.return_value = {
+                "id": mock_agent["id"],
+                "name": mock_agent["name"],
+                "api_key": "plrm_live_firstkey123456789012345678",
+                "api_key_prefix": "plrm_live_first...",
+                "message": "API key created successfully. Store this key — it won't be shown again.",
+            }
+            response = user_auth_client.post(
+                f"/api/v1/agents/{mock_agent['id']}/rotate-key",
+                headers={"Authorization": "Bearer fake-jwt-token"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["api_key"].startswith("plrm_live_")
+        assert response.json()["message"].startswith("API key created successfully.")
 
 
 class TestAgentOverview:

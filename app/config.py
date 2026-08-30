@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -81,6 +82,19 @@ class Settings(BaseSettings):
     mcp_max_response_body_bytes: int = 10 * 1024 * 1024
     mcp_enabled: bool = False
 
+    # MCP OAuth is intentionally independent from the transport switch so a
+    # deployment can keep API-key authentication while OAuth is canaried.
+    mcp_oauth_enabled: bool = False
+    mcp_oauth_resource_url: str = "https://mcp.plurum.ai/mcp"
+    # Supabase's OAuth issuer is normally derived from SUPABASE_URL. An exact
+    # override is available for canaries and self-hosted deployments.
+    mcp_oauth_issuer_url: str | None = None
+    mcp_oauth_max_bearer_token_bytes: int = Field(
+        default=8 * 1024,
+        ge=256,
+        le=64 * 1024,
+    )
+
     # CORS
     allowed_origins: list[str] = ["http://localhost:3000"]
 
@@ -100,6 +114,73 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def mcp_oauth_audience(self) -> str:
+        """The exact JWT audience expected by the hosted MCP resource."""
+        return self.mcp_oauth_resource_url
+
+    @property
+    def effective_mcp_oauth_issuer_url(self) -> str:
+        """Return the explicit OAuth issuer or the Supabase project issuer."""
+        if self.mcp_oauth_issuer_url is not None:
+            return self.mcp_oauth_issuer_url
+        return f"{self.supabase_url.rstrip('/')}/auth/v1"
+
+    @model_validator(mode="after")
+    def validate_mcp_oauth_endpoints(self) -> "Settings":
+        """Reject ambiguous or insecure OAuth resource and issuer URLs."""
+        allow_loopback_http = self.is_development
+        _validate_oauth_endpoint(
+            self.mcp_oauth_resource_url,
+            field_name="mcp_oauth_resource_url",
+            allow_loopback_http=allow_loopback_http,
+        )
+        _validate_oauth_endpoint(
+            self.effective_mcp_oauth_issuer_url,
+            field_name="mcp_oauth_issuer_url",
+            allow_loopback_http=allow_loopback_http,
+        )
+        return self
+
+
+def _validate_oauth_endpoint(
+    value: str,
+    *,
+    field_name: str,
+    allow_loopback_http: bool,
+) -> None:
+    """Validate an absolute OAuth endpoint without rewriting its identity."""
+    if not value or any(
+        character.isspace()
+        or ord(character) < 0x20
+        or ord(character) == 0x7F
+        or character == "\\"
+        for character in value
+    ):
+        raise ValueError(f"{field_name} must be an absolute HTTPS URL")
+
+    parsed = urlsplit(value)
+    try:
+        parsed.port
+    except ValueError:
+        raise ValueError(
+            f"{field_name} must be an absolute HTTPS URL"
+        ) from None
+    is_loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    secure_scheme = parsed.scheme == "https" or (
+        allow_loopback_http and parsed.scheme == "http" and is_loopback
+    )
+    if (
+        not secure_scheme
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.netloc.endswith(":")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"{field_name} must be an absolute HTTPS URL")
 
 
 @lru_cache

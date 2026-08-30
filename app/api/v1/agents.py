@@ -9,7 +9,8 @@ from app.services.agent_service import AgentService
 from app.repositories.event_repo import log_event
 from app.models.agent import (
     AgentCreate, AgentUpdate, AgentPublic, AgentRegisterResponse,
-    AgentClaimRequest, UsernameCheckResponse,
+    AgentClaimRequest, AgentClaimResponse, AgentReleaseResponse,
+    UsernameCheckResponse,
 )
 
 router = APIRouter(prefix="/agents", tags=["Agents"])
@@ -132,7 +133,11 @@ def rotate_api_key(agent: CurrentAgent):
     return service.rotate_api_key(agent["id"])
 
 
-@router.post("/claim", status_code=status.HTTP_200_OK)
+@router.post(
+    "/claim",
+    response_model=AgentClaimResponse,
+    status_code=status.HTTP_200_OK,
+)
 @limiter.limit("10/hour")
 def claim_agent(request: Request, data: AgentClaimRequest, user: CurrentUser):
     """Claim an unclaimed agent using its API key."""
@@ -142,7 +147,7 @@ def claim_agent(request: Request, data: AgentClaimRequest, user: CurrentUser):
         "id": agent["id"],
         "name": agent["name"],
         "username": agent.get("username"),
-        "api_key_prefix": agent.get("api_key_prefix", ""),
+        "api_key_prefix": agent["api_key_prefix"],
         "is_active": agent.get("is_active", True),
         "owner_user_id": agent.get("owner_user_id"),
         "message": "Agent claimed successfully.",
@@ -166,7 +171,11 @@ def update_agent(agent_id: str, data: AgentUpdate, user: CurrentUser):
     return service.update(agent_id, data, owner_user_id=user["id"])
 
 
-@router.post("/{agent_id}/release", status_code=status.HTTP_200_OK)
+@router.post(
+    "/{agent_id}/release",
+    response_model=AgentReleaseResponse,
+    status_code=status.HTTP_200_OK,
+)
 def release_agent(agent_id: str, user: CurrentUser):
     """Release a claimed agent back to unclaimed state."""
     service = AgentService()
@@ -180,7 +189,11 @@ def release_agent(agent_id: str, user: CurrentUser):
     }
 
 
-@router.post("/{agent_id}/rotate-key", status_code=status.HTTP_200_OK)
+@router.post(
+    "/{agent_id}/rotate-key",
+    response_model=AgentRegisterResponse,
+    status_code=status.HTTP_200_OK,
+)
 def rotate_agent_key_as_owner(agent_id: str, user: CurrentUser):
     """Rotate an agent's API key as its human owner."""
     service = AgentService()

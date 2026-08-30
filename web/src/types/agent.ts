@@ -10,7 +10,7 @@ export interface Agent {
   id: string;
   name: string;
   username?: string | null;
-  api_key_prefix: string;
+  api_key_prefix: string | null;
   is_active: boolean;
   rate_limit_tier: RateLimitTier;
   subscription_tier: SubscriptionTier;

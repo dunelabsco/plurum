@@ -81,42 +81,51 @@ class AgentService:
             api_key_prefix=api_key_prefix,
         )
 
-    def get_profile(self, agent_id: UUID) -> AgentPublic:
-        """Get an agent's public profile."""
-        agent = self.repo.get_by_id(agent_id)
+    def create_owned_oauth_agent(
+        self,
+        data: AgentCreate,
+        owner_user_id: str,
+    ) -> AgentPublic:
+        """Create an owned agent whose initial authentication is OAuth only."""
+        username = data.username.lower()
+        if self.repo.is_username_taken(username):
+            raise DuplicateError(f"Username '{username}' is already taken")
+
+        agent = self.repo.create(
+            name=data.name,
+            username=username,
+            api_key_hash=None,
+            api_key_prefix=None,
+            owner_user_id=owner_user_id,
+        )
+        return self._to_public(agent)
+
+    @staticmethod
+    def _to_public(agent: dict) -> AgentPublic:
+        """Serialize a repository row without assuming an API key exists."""
         return AgentPublic(
             id=agent["id"],
             name=agent["name"],
             username=agent.get("username"),
-            api_key_prefix=agent["api_key_prefix"],
+            api_key_prefix=agent.get("api_key_prefix"),
             is_active=agent["is_active"],
             rate_limit_tier=agent["rate_limit_tier"],
-            subscription_tier=agent["subscription_tier"],
-            credits_balance=agent["credits_balance"],
+            subscription_tier=agent.get("subscription_tier", "free"),
+            credits_balance=agent.get("credits_balance", 0),
             publisher_domain=agent.get("publisher_domain"),
             created_at=agent["created_at"],
             last_active_at=agent.get("last_active_at"),
         )
 
+    def get_profile(self, agent_id: UUID) -> AgentPublic:
+        """Get an agent's public profile."""
+        agent = self.repo.get_by_id(agent_id)
+        return self._to_public(agent)
+
     def list_by_owner(self, owner_user_id: str) -> list[AgentPublic]:
         """List all agents owned by a user."""
         agents = self.repo.list_by_owner(owner_user_id)
-        return [
-            AgentPublic(
-                id=agent["id"],
-                name=agent["name"],
-                username=agent.get("username"),
-                api_key_prefix=agent["api_key_prefix"],
-                is_active=agent["is_active"],
-                rate_limit_tier=agent["rate_limit_tier"],
-                subscription_tier=agent.get("subscription_tier", "free"),
-                credits_balance=agent.get("credits_balance", 0),
-                publisher_domain=agent.get("publisher_domain"),
-                created_at=agent["created_at"],
-                last_active_at=agent.get("last_active_at"),
-            )
-            for agent in agents
-        ]
+        return [self._to_public(agent) for agent in agents]
 
     def update(
         self,
@@ -150,6 +159,7 @@ class AgentService:
     def rotate_api_key(self, agent_id: UUID) -> AgentRegisterResponse:
         """Rotate an agent's API key."""
         agent = self.repo.get_by_id(agent_id)
+        had_api_key = bool(agent.get("api_key_hash") and agent.get("api_key_prefix"))
 
         # Generate new API key
         api_key = generate_api_key()
@@ -168,7 +178,11 @@ class AgentService:
             name=agent["name"],
             api_key=api_key,
             api_key_prefix=api_key_prefix,
-            message="API key rotated successfully. Old key is now invalid.",
+            message=(
+                "API key rotated successfully. Old key is now invalid."
+                if had_api_key
+                else "API key created successfully. Store this key — it won't be shown again."
+            ),
         )
 
     def deactivate(self, agent_id: UUID) -> None:
@@ -199,6 +213,12 @@ class AgentService:
         if agent.get("owner_user_id") != owner_user_id:
             raise AuthorizationError("You do not own this agent")
 
+        if not agent.get("api_key_hash") or not agent.get("api_key_prefix"):
+            raise PlurimException(
+                "Create an API key before releasing this agent",
+                status_code=409,
+            )
+
         updated = self.repo.release_agent(agent_id)
         return updated
 
@@ -208,6 +228,8 @@ class AgentService:
 
         if agent.get("owner_user_id") != owner_user_id:
             raise AuthorizationError("You do not own this agent")
+
+        had_api_key = bool(agent.get("api_key_hash") and agent.get("api_key_prefix"))
 
         new_api_key = generate_api_key()
         new_hash = hash_api_key(new_api_key)
@@ -220,7 +242,11 @@ class AgentService:
             "name": agent["name"],
             "api_key": new_api_key,
             "api_key_prefix": new_prefix,
-            "message": "API key rotated successfully. Store this key — it won't be shown again.",
+            "message": (
+                "API key rotated successfully. Store this key — it won't be shown again."
+                if had_api_key
+                else "API key created successfully. Store this key — it won't be shown again."
+            ),
         }
 
     def get_overview(self, owner_user_id: str) -> dict:
