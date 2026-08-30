@@ -10,13 +10,36 @@ from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from starlette.types import Receive, Scope, Send
 
 from app.api.v1.router import router as v1_router
 from app.config import get_settings
 from app.core.exceptions import PlurimException
 from app.core.rate_limiter import limiter
 from app.core.request_limits import RequestBodyLimitMiddleware
-from app.mcp import create_mcp_application
+from app.mcp import (
+    create_mcp_application,
+    create_mcp_oauth_metadata_application,
+    get_mcp_oauth_metadata_path,
+)
+
+
+class PlurumCORSMiddleware(CORSMiddleware):
+    """Let the SDK answer public OAuth metadata preflights itself."""
+
+    def __init__(self, app, *, public_preflight_paths: list[str], **kwargs):
+        super().__init__(app, **kwargs)
+        self.public_preflight_paths = frozenset(public_preflight_paths)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] == "http"
+            and scope["method"] == "OPTIONS"
+            and scope["path"] in self.public_preflight_paths
+        ):
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
 
 
 def create_app() -> FastAPI:
@@ -24,9 +47,13 @@ def create_app() -> FastAPI:
     settings = get_settings()
     if settings.mcp_enabled:
         mcp_server, mcp_http_app = create_mcp_application(settings)
+        mcp_oauth_metadata_path = get_mcp_oauth_metadata_path(settings)
+        mcp_oauth_metadata_app = create_mcp_oauth_metadata_application(settings)
     else:
         mcp_server = None
         mcp_http_app = None
+        mcp_oauth_metadata_path = None
+        mcp_oauth_metadata_app = None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -69,7 +96,10 @@ def create_app() -> FastAPI:
     application.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     application.add_middleware(SlowAPIMiddleware)
     application.add_middleware(
-        CORSMiddleware,
+        PlurumCORSMiddleware,
+        public_preflight_paths=(
+            [mcp_oauth_metadata_path] if mcp_oauth_metadata_path is not None else []
+        ),
         allow_origins=["*"] if settings.is_development else settings.allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
@@ -144,6 +174,16 @@ def create_app() -> FastAPI:
             name="mcp",
             include_in_schema=False,
         )
+        if mcp_oauth_metadata_path is not None and mcp_oauth_metadata_app is not None:
+            # Keep public discovery outside FastMCP's global authentication
+            # middleware while retaining the SDK's RFC 9728 response and CORS.
+            application.add_route(
+                mcp_oauth_metadata_path,
+                mcp_oauth_metadata_app,
+                methods=["GET", "OPTIONS"],
+                name="mcp-oauth-protected-resource",
+                include_in_schema=False,
+            )
     return application
 
 

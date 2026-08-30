@@ -389,6 +389,54 @@ async def test_client_header_length_is_bounded_before_normalization(
 
 
 @pytest.mark.asyncio
+async def test_request_guard_rejects_the_exact_oauth_bearer_in_tool_arguments():
+    bearer = "header.payload.signature-value-that-must-stay-out-of-context"
+    downstream_called = False
+
+    async def downstream(_scope, _receive, _send):
+        nonlocal downstream_called
+        downstream_called = True
+
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 17,
+            "method": "tools/call",
+            "params": {
+                "name": "plurum_search",
+                "arguments": {"query": bearer},
+            },
+        }
+    ).encode()
+    sent = await _invoke_asgi(
+        MCPRequestCredentialGuard(downstream),
+        _scope(
+            method="POST",
+            path="/mcp",
+            headers=[
+                (b"authorization", f"Bearer {bearer}".encode()),
+                (b"content-type", b"application/json"),
+            ],
+        ),
+        [{"type": "http.request", "body": body, "more_body": False}],
+    )
+
+    status, headers, response_body = _response(sent)
+    assert status == 200
+    assert json.loads(response_body) == {
+        "jsonrpc": "2.0",
+        "id": 17,
+        "error": {
+            "code": -32602,
+            "message": "Invalid request parameters",
+        },
+    }
+    assert headers[b"cache-control"] == b"no-store"
+    assert bearer.encode() not in response_body
+    assert downstream_called is False
+
+
+@pytest.mark.asyncio
 async def test_streamed_mcp_request_over_global_cap_fails_before_authentication(
     monkeypatch,
     caplog,
