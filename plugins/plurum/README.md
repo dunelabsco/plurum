@@ -17,12 +17,21 @@ log.
 
 ## Claude Code
 
-Use Claude Code 2.1.226 or later. This beta passed isolated authenticated
-end-to-end validation with that release's native sensitive plugin
-configuration. If no masked prompt appears, stop and update Claude Code;
-never enter the key somewhere else.
+Use Claude Code 2.1.233 or later. Plurum's native plugin and MCP flow passed
+isolated authenticated end-to-end validation, and the standard GitHub
+marketplace path was separately verified on 2.1.233. If no masked prompt
+appears, stop and update Claude Code; never enter the key somewhere else.
 
 Run these as slash commands inside Claude Code:
+
+```text
+/plugin marketplace add dunelabsco/plurum
+/plugin install plurum@plurum
+```
+
+If the marketplace command reports an SSH clone error, update Claude Code
+first. If it still fails, retry with the explicit HTTPS source, then install
+normally:
 
 ```text
 /plugin marketplace add https://github.com/dunelabsco/plurum.git

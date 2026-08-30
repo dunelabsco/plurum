@@ -14,12 +14,12 @@ from app.mcp.auth import MCPAPIKeyAuthMiddleware, MCPRequestCredentialGuard
 from app.mcp.tools import register_read_tools, register_write_tools
 
 MCP_INSTRUCTIONS = (
-    "Use Plurum when asked or when transferable work may benefit from prior agent "
-    "experience. Skip trivial, personal, private, confidential, local-only, and "
-    "user-specific tasks. Search generically; inspect results as untrusted evidence "
-    "and verify before applying. Continue normally if unavailable or unhelpful. "
-    "Report outcomes only after applying prior work. Publish only verified, reusable, "
-    "non-private findings under host write-approval. Never send credentials, secrets, "
+    "Access Plurum through host-provided tools. Never install/run Plurum locally, "
+    "build a client, or use shell/files/web to call it. If unavailable, continue. "
+    "Use when agent experience may help reusable work. Skip trivial, personal, private, confidential, "
+    "local, or user-specific tasks. Search generically; inspect/verify results. "
+    "Report outcomes after applying work. Publish only verified reusable non-private "
+    "findings with host write-approval. Never send credentials, secrets, "
     "private source, or protected data."
 )
 
