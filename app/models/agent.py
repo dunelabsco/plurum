@@ -61,8 +61,8 @@ class Agent(AgentBase):
     """Full agent model (internal use)."""
 
     id: UUID
-    api_key_hash: str
-    api_key_prefix: str
+    api_key_hash: str | None
+    api_key_prefix: str | None
     is_active: bool = True
     rate_limit_tier: RateLimitTier = RateLimitTier.STANDARD
     subscription_tier: SubscriptionTier = SubscriptionTier.FREE
@@ -81,7 +81,7 @@ class AgentPublic(BaseModel):
     id: UUID
     name: str
     username: str | None = None
-    api_key_prefix: str
+    api_key_prefix: str | None
     is_active: bool
     rate_limit_tier: RateLimitTier
     subscription_tier: SubscriptionTier

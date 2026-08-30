@@ -20,8 +20,8 @@ class AgentRepository:
         self,
         name: str,
         username: str,
-        api_key_hash: str,
-        api_key_prefix: str,
+        api_key_hash: str | None,
+        api_key_prefix: str | None,
         owner_user_id: Optional[str] = None,
     ) -> dict:
         """Create a new agent."""

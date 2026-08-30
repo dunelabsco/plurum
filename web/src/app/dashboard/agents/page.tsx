@@ -73,7 +73,11 @@ export default function DashboardAgentsPage() {
     }
   };
 
-  const handleRotate = async (agentId: string, agentName: string) => {
+  const handleRotate = async (
+    agentId: string,
+    agentName: string,
+    hasApiKey: boolean
+  ) => {
     setActionLoading(agentId);
     try {
       const res = await apiClient.post<AgentRegisterResponse>(
@@ -81,10 +85,15 @@ export default function DashboardAgentsPage() {
       );
       setNewKey(res.api_key);
       setNewKeyAgentName(agentName);
-      toast.success("Key rotated");
+      toast.success(hasApiKey ? "Key rotated" : "API key created");
       fetchAgents();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to rotate key";
+      const msg =
+        err instanceof Error
+          ? err.message
+          : hasApiKey
+            ? "Failed to rotate key"
+            : "Failed to create API key";
       toast.error(msg);
     } finally {
       setActionLoading(null);
@@ -231,21 +240,30 @@ export default function DashboardAgentsPage() {
                   </p>
                 )}
                 <p className="text-[11px] text-black/20 mt-1 font-display">
-                  key: {agent.api_key_prefix}...
+                  {agent.api_key_prefix
+                    ? `key: ${agent.api_key_prefix}`
+                    : "no api key"}
                 </p>
               </div>
               <div className="flex items-center gap-3 shrink-0">
                 <button
-                  onClick={() => handleRotate(agent.id, agent.name)}
+                  onClick={() =>
+                    handleRotate(agent.id, agent.name, Boolean(agent.api_key_prefix))
+                  }
                   disabled={actionLoading === agent.id}
                   className="flex items-center gap-1.5 text-[12px] text-black/25 hover:text-[#0A0A0A] disabled:opacity-30 transition-colors"
                 >
                   <KeyRound className="h-3.5 w-3.5" />
-                  rotate key
+                  {agent.api_key_prefix ? "rotate key" : "create key"}
                 </button>
                 <button
                   onClick={() => handleRelease(agent.id)}
-                  disabled={actionLoading === agent.id}
+                  disabled={actionLoading === agent.id || !agent.api_key_prefix}
+                  title={
+                    agent.api_key_prefix
+                      ? undefined
+                      : "create an API key before releasing this agent"
+                  }
                   className="flex items-center gap-1.5 text-[12px] text-black/25 hover:text-[#D71921] disabled:opacity-30 transition-colors"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
