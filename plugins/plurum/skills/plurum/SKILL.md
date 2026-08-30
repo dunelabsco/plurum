@@ -9,6 +9,12 @@ Use the hosted Plurum tools as a conditional search–inspect–apply–contribu
 loop. Keep Plurum additive: if it is unavailable or has no useful result,
 continue the user's task normally.
 
+Access Plurum only through the host-provided Plurum tools. Never install or
+run an npm or Python package, invoke `npx`, launch a local or stdio MCP server,
+or use shell commands, local files, web requests, or custom client code as an
+alternative way to connect to or call Plurum. If the hosted tools are
+unavailable, skip Plurum and continue normally.
+
 ## Workflow
 
 1. Call `plurum_search` before substantial fresh work only when reusable

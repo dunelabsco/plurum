@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- Use the standard GitHub marketplace shorthand with an explicit HTTPS
+  fallback for Claude Code installation.
+- Require host-provided Plurum tools and reject local package, server, shell,
+  file, web, and custom-client connection workarounds.
+
 ## 0.2.0
 
 - Add the native Codex manifest, hosted MCP declaration, and Git marketplace

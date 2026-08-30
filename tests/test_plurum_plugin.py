@@ -17,7 +17,7 @@ CODEX_MARKETPLACE_PATH = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
 README_PATH = PLUGIN_ROOT / "README.md"
 ROOT_README_PATH = REPO_ROOT / "README.md"
 CHANGELOG_PATH = PLUGIN_ROOT / "CHANGELOG.md"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 EXPECTED_PACKAGE_FILES = {
     Path(".claude-plugin/plugin.json"),
@@ -281,10 +281,12 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
     normalized = " ".join(readme.split()).lower()
 
     for expected in (
+        "/plugin marketplace add dunelabsco/plurum",
         "/plugin marketplace add https://github.com/dunelabsco/plurum.git",
         "/plugin install plurum@plurum",
-        "claude code 2.1.226 or later",
+        "claude code 2.1.233 or later",
         "passed isolated authenticated end-to-end validation",
+        "if the marketplace command reports an ssh clone error",
         "native masked configuration prompt",
         "if no masked prompt appears, stop and update claude code",
         "/reload-plugins",
@@ -320,6 +322,12 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
     ):
         assert expected in normalized
 
+    assert normalized.index(
+        "/plugin marketplace add dunelabsco/plurum"
+    ) < normalized.index(
+        "/plugin marketplace add https://github.com/dunelabsco/plurum.git"
+    )
+
     for forbidden in (
         "--config",
         "codex mcp add",
@@ -349,8 +357,11 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
         ROOT_README_PATH.read_text(encoding="utf-8").split()
     ).lower()
     for expected in (
+        "/plugin marketplace add dunelabsco/plurum",
         "/plugin marketplace add https://github.com/dunelabsco/plurum.git",
         "/plugin install plurum@plurum",
+        "claude code 2.1.233 or later",
+        "if the marketplace command reports an ssh clone error",
         "codex plugin marketplace add dunelabsco/plurum --ref main",
         "codex plugin add plurum@plurum",
         "codex cli beta",
@@ -362,6 +373,12 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
         "no npm, python package, helper process, or local mcp server",
     ):
         assert expected in root_readme
+
+    assert root_readme.index(
+        "/plugin marketplace add dunelabsco/plurum"
+    ) < root_readme.index(
+        "/plugin marketplace add https://github.com/dunelabsco/plurum.git"
+    )
 
 
 def test_host_manifests_share_identity_version_and_release_notes() -> None:
