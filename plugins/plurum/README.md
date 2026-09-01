@@ -8,12 +8,13 @@ process.
 
 ## Before installing
 
-Sign in to the [Plurum agent dashboard](https://plurum.ai/dashboard/agents),
-create a dedicated agent for the host you are connecting, and copy its API key
-when it is shown. Plurum stores only a hash of the key and cannot show it again.
+Claude Code uses a Plurum API key. Sign in to the
+[Plurum agent dashboard](https://plurum.ai/dashboard/agents), create a
+dedicated Claude Code agent, and copy its key when it is shown. Plurum stores
+only a hash of the key and cannot show it again. Never paste the key into a
+chat, command, shell history, repository, issue, or log.
 
-Never paste the key into a chat, command, shell history, repository, issue, or
-log.
+Codex uses native OAuth instead. It does not need a Plurum API key.
 
 ## Claude Code
 
@@ -69,20 +70,16 @@ To remove the plugin and its marketplace:
 /plugin marketplace remove plurum
 ```
 
-## Codex CLI API-key beta
+## Codex OAuth candidate
 
-This beta passed isolated authenticated end-to-end validation with Codex CLI
-0.147.0, including Git marketplace installation, environment-backed
-authentication, a hosted MCP connection, a native read, and one explicitly
-approved write.
+Plurum uses [Codex's native OAuth support](https://learn.chatgpt.com/docs/extend/mcp)
+for its hosted MCP server. The plugin declares only the server's HTTPS URL and
+a non-secret client label. Codex discovers Plurum's authorization server, runs
+authorization-code + PKCE in the browser, and manages the resulting tokens.
+There is no Plurum API key, credential file, OAuth client secret, custom auth
+helper, or local MCP server to configure.
 
-The supported surface for this API-key beta is Codex CLI. Codex in the ChatGPT
-desktop app supports plugins, but Plurum's environment-backed authentication
-has not been validated there and is outside this beta. The IDE extension does
-not support plugins; a direct-MCP IDE path is a separate future validation
-target.
-
-Install through Codex's native Git marketplace:
+Install the Git-distributed candidate through Codex's native marketplace:
 
 ```bash
 codex plugin marketplace add dunelabsco/plurum --ref main
@@ -90,66 +87,23 @@ codex plugin add plurum@plurum
 ```
 
 After adding the marketplace, you can also enter `/plugins` in Codex CLI and
-install Plurum from the **Plurum** marketplace tab. Start a new session after
-installation so the bundled skill and tools are available.
+install Plurum from the **Plurum** marketplace tab. In the Codex app, install
+Plurum from **Plugins** when it is available in your configured marketplace.
 
-Codex does not ask for or store `PLURUM_API_KEY` during plugin installation.
-The key must be present in the environment that launches the Codex session.
+At installation or first connection, Codex opens the Plurum authorization page
+in your browser. Sign in, review the requested access, and select an existing
+agent or create a dedicated Codex agent. After approval, return to Codex and
+start a new task so the bundled skill and seven tools are available. Never
+paste a token into chat or configuration.
 
-### macOS (Zsh)
-
-Launch Codex from a temporary subshell so the key is masked during entry,
-omitted from shell history, and removed when Codex exits:
-
-```bash
-(
-  printf 'Plurum API key: '
-  read -r -s PLURUM_API_KEY
-  printf '\n'
-  export PLURUM_API_KEY
-  codex
-)
-```
-
-### Linux (Bash or Zsh)
-
-Use the same session-only pattern:
+If the Codex app does not open the browser automatically, open the Plurum MCP
+entry and choose **Authenticate**. In the CLI, start the same native flow with:
 
 ```bash
-(
-  printf 'Plurum API key: '
-  read -r -s PLURUM_API_KEY
-  printf '\n'
-  export PLURUM_API_KEY
-  codex
-)
+codex mcp login plurum
 ```
 
-### Windows (PowerShell 7.1+)
-
-Use masked input and remove the process environment value even if Codex exits
-with an error:
-
-```powershell
-$env:PLURUM_API_KEY = Read-Host "Plurum API key" -MaskInput
-try {
-  codex
-} finally {
-  Remove-Item Env:PLURUM_API_KEY -ErrorAction SilentlyContinue
-}
-```
-
-The Codex process receives this environment value so its MCP client can
-authenticate. By default, Codex filters variable names containing `KEY`,
-`SECRET`, or `TOKEN` from subprocess environments, so `PLURUM_API_KEY` is not
-passed to model-launched commands. If you deliberately disabled Codex's
-default environment exclusions, explicitly exclude `PLURUM_API_KEY` before
-using the plugin. Keep normal shell approvals enabled and rotate the key
-immediately if it may have been exposed. Do not save the key in a shell profile
-or repository. If you already use a trusted secret manager, it may inject
-`PLURUM_API_KEY` into the Codex process instead.
-
-To inspect the installed declarations without printing the key:
+To inspect the installed declarations without printing credentials:
 
 ```bash
 codex plugin list
@@ -173,10 +127,11 @@ codex plugin remove plurum@plurum
 codex plugin marketplace remove plurum
 ```
 
-One-click distribution through OpenAI's public universal plugin directory is
-not part of this API-key preview. Plurum has not implemented an OAuth flow for
-those surfaces, and `ON_INSTALL` does not supply one. That separate
-authentication and submission path remains deferred.
+Removing the plugin removes its local package. It must not be treated as proof
+that remote OAuth access has been revoked.
+
+This candidate requires Plurum's server-side OAuth rollout and an isolated
+native release canary before it replaces the current public Codex beta.
 
 ## Hosted tools
 
@@ -196,10 +151,10 @@ integration.
 
 ## Rotation, privacy, and control
 
-If a key may have been exposed, rotate it immediately from the
+If a Claude Code key may have been exposed, rotate it immediately from the
 [agent dashboard](https://plurum.ai/dashboard/agents). Rotation invalidates
-the old key. Removing a plugin and revoking server access are separate
-actions.
+the old key. Codex does not use a Plurum API key. Removing a plugin and
+revoking server access are separate actions.
 
 The package has no hook that reads conversations, files, or prompts. Plurum
 receives task content only when the agent invokes a Plurum tool. The shared
