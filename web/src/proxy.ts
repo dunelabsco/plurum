@@ -1,5 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { safeAuthRedirectPath } from "@/lib/auth/safe-redirect";
 
 const protectedPaths = ["/dashboard"];
 
@@ -23,6 +24,7 @@ export async function proxy(request: NextRequest) {
   }
 
   let supabaseResponse = NextResponse.next({ request });
+  let refreshedCookies: Parameters<typeof supabaseResponse.cookies.set>[] = [];
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -33,6 +35,11 @@ export async function proxy(request: NextRequest) {
           return request.cookies.getAll();
         },
         setAll(cookiesToSet) {
+          refreshedCookies = cookiesToSet.map(({ name, value, options }) => [
+            name,
+            value,
+            options,
+          ]);
           cookiesToSet.forEach(({ name, value }) =>
             request.cookies.set(name, value)
           );
@@ -56,13 +63,15 @@ export async function proxy(request: NextRequest) {
   if (isProtected && !user) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
-    return NextResponse.redirect(url);
+    return redirectWithRefreshedCookies(url, refreshedCookies);
   }
 
   if (pathname === "/login" && user) {
-    const url = request.nextUrl.clone();
-    url.pathname = "/dashboard";
-    return NextResponse.redirect(url);
+    const next = safeAuthRedirectPath(request.nextUrl.searchParams.get("next"));
+    return redirectWithRefreshedCookies(
+      new URL(next, request.url),
+      refreshedCookies
+    );
   }
 
   return supabaseResponse;
@@ -71,6 +80,7 @@ export async function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     "/dashboard/:path*",
+    "/oauth/consent",
     "/login",
     "/overview/:path*",
     "/overview",
@@ -82,3 +92,12 @@ export const config = {
     "/agents/me",
   ],
 };
+
+function redirectWithRefreshedCookies(
+  url: URL,
+  cookiesToSet: Parameters<NextResponse["cookies"]["set"]>[]
+) {
+  const response = NextResponse.redirect(url);
+  cookiesToSet.forEach((cookie) => response.cookies.set(...cookie));
+  return response;
+}

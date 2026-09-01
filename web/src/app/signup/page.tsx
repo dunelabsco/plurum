@@ -1,12 +1,30 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import { safeAuthRedirectPath } from "@/lib/auth/safe-redirect";
 import { Loader2, MailCheck } from "lucide-react";
 import { OAuthButtons, OAuthDivider } from "@/components/auth/oauth-buttons";
 
 export default function SignupPage() {
+  return (
+    <Suspense fallback={<SignupPageFallback />}>
+      <SignupForm />
+    </Suspense>
+  );
+}
+
+function SignupPageFallback() {
+  return (
+    <div className="min-h-svh flex items-center justify-center px-6">
+      <Loader2 className="h-5 w-5 animate-spin text-black/20" />
+    </div>
+  );
+}
+
+function SignupForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -17,11 +35,13 @@ export default function SignupPage() {
   const [sentVia, setSentVia] = useState<"password" | "magic">("password");
   const [resent, setResent] = useState(false);
   const [resending, setResending] = useState(false);
+  const searchParams = useSearchParams();
   const supabase = createClient();
+  const next = safeAuthRedirectPath(searchParams.get("next"));
+  const loginHref = `/login?next=${encodeURIComponent(next)}`;
 
-  const redirectTo = () => `${window.location.origin}/auth/callback`;
-  const magicRedirectTo = () =>
-    `${window.location.origin}/auth/callback?next=/dashboard`;
+  const authCallbackUrl = () =>
+    `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -43,7 +63,7 @@ export default function SignupPage() {
       const { error } = await supabase.auth.signUp({
         email,
         password,
-        options: { emailRedirectTo: redirectTo() },
+        options: { emailRedirectTo: authCallbackUrl() },
       });
       if (error) throw error;
       setSentVia("password");
@@ -62,7 +82,7 @@ export default function SignupPage() {
     try {
       const { error } = await supabase.auth.signInWithOtp({
         email,
-        options: { shouldCreateUser: true, emailRedirectTo: magicRedirectTo() },
+        options: { shouldCreateUser: true, emailRedirectTo: authCallbackUrl() },
       });
       // Only surface throttling — otherwise show the neutral check-email state.
       if (error && /rate|too many|limit|seconds/i.test(error.message)) {
@@ -84,7 +104,7 @@ export default function SignupPage() {
     if (sentVia === "magic") {
       await supabase.auth.signInWithOtp({
         email,
-        options: { shouldCreateUser: true, emailRedirectTo: magicRedirectTo() },
+        options: { shouldCreateUser: true, emailRedirectTo: authCallbackUrl() },
       });
       setResending(false);
       setResent(true);
@@ -93,7 +113,7 @@ export default function SignupPage() {
     const { error } = await supabase.auth.resend({
       type: "signup",
       email,
-      options: { emailRedirectTo: redirectTo() },
+      options: { emailRedirectTo: authCallbackUrl() },
     });
     setResending(false);
     if (!error) setResent(true);
@@ -171,7 +191,7 @@ export default function SignupPage() {
               <p className="text-black/30 text-sm">get started with plurum today</p>
             </div>
 
-            <OAuthButtons next="/dashboard" />
+            <OAuthButtons next={next} />
 
             <OAuthDivider />
 
@@ -271,7 +291,7 @@ export default function SignupPage() {
 
             <p className="text-center text-[13px] text-black/25">
               already have an account?{" "}
-              <Link href="/login" className="text-[#0A0A0A] hover:underline">
+              <Link href={loginHref} className="text-[#0A0A0A] hover:underline">
                 sign in
               </Link>
             </p>

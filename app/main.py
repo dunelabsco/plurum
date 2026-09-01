@@ -12,6 +12,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from starlette.types import Receive, Scope, Send
 
+from app.api.v1.mcp_oauth import router as mcp_oauth_router
 from app.api.v1.router import router as v1_router
 from app.config import get_settings
 from app.core.exceptions import PlurimException
@@ -143,6 +144,11 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=500, content={"error": "Internal server error"})
 
     application.include_router(v1_router, prefix="/api")
+    if settings.mcp_oauth_enabled:
+        # Keep browser onboarding absent until the OAuth rollout flag is
+        # deliberately enabled. The existing API-key endpoints remain
+        # available independently of this route surface.
+        application.include_router(mcp_oauth_router, prefix="/api/v1")
 
     @application.get("/health", tags=["Health"])
     def health_check():

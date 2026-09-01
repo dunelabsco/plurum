@@ -50,10 +50,27 @@ class MCPOAuthBindingService:
         if not _agent_is_available_to_owner(agent, owner_id):
             raise AuthorizationError(_UNAVAILABLE_AGENT)
 
-        return self.binding_repo.upsert(
+        self.binding_repo.upsert(
             owner_user_id=owner_id,
             client_id=exact_client_id,
             agent_id=selected_agent_id,
+        )
+        return agent
+
+    def create_agent_and_bind(
+        self,
+        *,
+        owner_user_id: str,
+        client_id: str,
+        name: str,
+        username: str,
+    ) -> dict:
+        """Atomically create an OAuth-only owned agent and select it."""
+        return self.binding_repo.create_agent_and_bind(
+            owner_user_id=_validate_uuid(owner_user_id),
+            client_id=_validate_client_id(client_id),
+            name=name,
+            username=username.lower(),
         )
 
     def resolve_agent(

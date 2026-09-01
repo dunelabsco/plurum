@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.core.exceptions import PlurimException
+from app.core.exceptions import DuplicateError, PlurimException
 from app.db.supabase_client import get_supabase_client
 
 
@@ -50,6 +50,38 @@ class MCPOAuthBindingRepository:
 
         if not result.data:
             raise PlurimException("Failed to save MCP OAuth agent selection")
+        return result.data[0]
+
+    def create_agent_and_bind(
+        self,
+        *,
+        owner_user_id: str,
+        client_id: str,
+        name: str,
+        username: str,
+    ) -> dict:
+        """Create an OAuth-only agent and binding in one database transaction."""
+        try:
+            result = self.client.rpc(
+                "create_mcp_oauth_agent_and_binding",
+                {
+                    "p_owner_user_id": owner_user_id,
+                    "p_client_id": client_id,
+                    "p_name": name,
+                    "p_username": username,
+                },
+            ).execute()
+        except Exception as error:
+            if getattr(error, "code", None) == "23505":
+                raise DuplicateError("Username is already taken") from None
+            logger.error(
+                "MCP OAuth atomic onboarding failed (%s)",
+                type(error).__name__,
+            )
+            raise PlurimException("Failed to create MCP OAuth agent") from None
+
+        if not result.data:
+            raise PlurimException("Failed to create MCP OAuth agent")
         return result.data[0]
 
     def get(self, *, owner_user_id: str, client_id: str) -> dict | None:
