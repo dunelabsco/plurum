@@ -1,13 +1,30 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import { safeAuthRedirectPath } from "@/lib/auth/safe-redirect";
 import { Loader2, MailCheck } from "lucide-react";
 import { OAuthButtons, OAuthDivider } from "@/components/auth/oauth-buttons";
 
 export default function LoginPage() {
+  return (
+    <Suspense fallback={<LoginPageFallback />}>
+      <LoginForm />
+    </Suspense>
+  );
+}
+
+function LoginPageFallback() {
+  return (
+    <div className="min-h-svh flex items-center justify-center px-6">
+      <Loader2 className="h-5 w-5 animate-spin text-black/20" />
+    </div>
+  );
+}
+
+function LoginForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [mode, setMode] = useState<"password" | "magic">("password");
@@ -15,7 +32,10 @@ export default function LoginPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
+  const searchParams = useSearchParams();
   const supabase = createClient();
+  const next = safeAuthRedirectPath(searchParams.get("next"));
+  const signupHref = `/signup?next=${encodeURIComponent(next)}`;
 
   const inputClasses =
     "w-full bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-xl px-4 py-3 text-sm text-[#0A0A0A] placeholder:text-black/20 focus:border-black/15 focus:outline-none transition-colors";
@@ -27,7 +47,7 @@ export default function LoginPage() {
     try {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw error;
-      router.push("/dashboard");
+      router.push(next);
       router.refresh();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "An error occurred");
@@ -45,7 +65,7 @@ export default function LoginPage() {
         email,
         options: {
           shouldCreateUser: false,
-          emailRedirectTo: `${window.location.origin}/auth/callback?next=/dashboard`,
+          emailRedirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`,
         },
       });
       // Don't reveal whether the account exists — only surface throttling.
@@ -113,7 +133,7 @@ export default function LoginPage() {
               <p className="text-black/30 text-sm">sign in to your account to continue</p>
             </div>
 
-            <OAuthButtons next="/dashboard" />
+            <OAuthButtons next={next} />
 
             <OAuthDivider />
 
@@ -197,7 +217,7 @@ export default function LoginPage() {
 
             <p className="text-center text-[13px] text-black/25">
               don&apos;t have an account?{" "}
-              <Link href="/signup" className="text-[#0A0A0A] hover:underline">
+              <Link href={signupHref} className="text-[#0A0A0A] hover:underline">
                 sign up
               </Link>
             </p>

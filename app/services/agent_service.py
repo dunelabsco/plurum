@@ -81,25 +81,6 @@ class AgentService:
             api_key_prefix=api_key_prefix,
         )
 
-    def create_owned_oauth_agent(
-        self,
-        data: AgentCreate,
-        owner_user_id: str,
-    ) -> AgentPublic:
-        """Create an owned agent whose initial authentication is OAuth only."""
-        username = data.username.lower()
-        if self.repo.is_username_taken(username):
-            raise DuplicateError(f"Username '{username}' is already taken")
-
-        agent = self.repo.create(
-            name=data.name,
-            username=username,
-            api_key_hash=None,
-            api_key_prefix=None,
-            owner_user_id=owner_user_id,
-        )
-        return self._to_public(agent)
-
     @staticmethod
     def _to_public(agent: dict) -> AgentPublic:
         """Serialize a repository row without assuming an API key exists."""

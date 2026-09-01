@@ -5,8 +5,8 @@ from uuid import UUID
 
 import pytest
 
-from app.core.exceptions import DuplicateError, PlurimException
-from app.models.agent import Agent, AgentCreate, AgentPublic
+from app.core.exceptions import PlurimException
+from app.models.agent import Agent, AgentPublic
 from app.repositories.agent_repo import AgentRepository
 from app.services.agent_service import AgentService
 
@@ -41,39 +41,6 @@ def service_with_repo() -> tuple[AgentService, MagicMock]:
     repo = MagicMock(spec=AgentRepository)
     service.repo = repo
     return service, repo
-
-
-def test_create_owned_oauth_agent_does_not_mint_or_store_an_api_key():
-    service, repo = service_with_repo()
-    repo.is_username_taken.return_value = False
-    repo.create.return_value = oauth_agent_row()
-
-    agent = service.create_owned_oauth_agent(
-        AgentCreate(name="Codex", username="codex-agent"),
-        OWNER_ID,
-    )
-
-    repo.create.assert_called_once_with(
-        name="Codex",
-        username="codex-agent",
-        api_key_hash=None,
-        api_key_prefix=None,
-        owner_user_id=OWNER_ID,
-    )
-    assert agent.api_key_prefix is None
-
-
-def test_create_owned_oauth_agent_preserves_username_uniqueness():
-    service, repo = service_with_repo()
-    repo.is_username_taken.return_value = True
-
-    with pytest.raises(DuplicateError, match="already taken"):
-        service.create_owned_oauth_agent(
-            AgentCreate(name="Codex", username="codex-agent"),
-            OWNER_ID,
-        )
-
-    repo.create.assert_not_called()
 
 
 def test_agent_repository_can_insert_an_oauth_only_agent():

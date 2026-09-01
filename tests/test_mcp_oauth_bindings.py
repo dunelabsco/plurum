@@ -10,6 +10,7 @@ from pydantic import ValidationError as PydanticValidationError
 from app.config import Settings
 from app.core.exceptions import (
     AuthorizationError,
+    DuplicateError,
     NotFoundError,
     PlurimException,
     ValidationError,
@@ -151,6 +152,91 @@ def test_repository_lookup_uses_both_exact_key_parts():
     assert query.eq.call_args_list[1].args == ("client_id", CLIENT_ID)
 
 
+def test_repository_create_agent_and_bind_uses_atomic_rpc_exactly():
+    client = MagicMock()
+    created_agent = _agent()
+    client.rpc.return_value.execute.return_value = SimpleNamespace(data=[created_agent])
+    repository = MCPOAuthBindingRepository(client=client)
+
+    result = repository.create_agent_and_bind(
+        owner_user_id=OWNER_ID,
+        client_id=CLIENT_ID,
+        name="Codex",
+        username="codex-agent",
+    )
+
+    client.rpc.assert_called_once_with(
+        "create_mcp_oauth_agent_and_binding",
+        {
+            "p_owner_user_id": OWNER_ID,
+            "p_client_id": CLIENT_ID,
+            "p_name": "Codex",
+            "p_username": "codex-agent",
+        },
+    )
+    assert result is created_agent
+
+
+def test_repository_create_agent_and_bind_sanitizes_duplicate_failures(caplog):
+    class DuplicateDatabaseError(RuntimeError):
+        code = "23505"
+
+    client = MagicMock()
+    client.rpc.side_effect = DuplicateDatabaseError(f"duplicate {CLIENT_ID} codex-agent")
+    repository = MCPOAuthBindingRepository(client=client)
+
+    with pytest.raises(DuplicateError) as error:
+        repository.create_agent_and_bind(
+            owner_user_id=OWNER_ID,
+            client_id=CLIENT_ID,
+            name="Codex",
+            username="codex-agent",
+        )
+
+    assert error.value.message == "Username is already taken"
+    assert CLIENT_ID not in error.value.message
+    assert "codex-agent" not in error.value.message
+    assert CLIENT_ID not in caplog.text
+    assert "codex-agent" not in caplog.text
+
+
+def test_repository_create_agent_and_bind_sanitizes_generic_failures(caplog):
+    client = MagicMock()
+    client.rpc.side_effect = RuntimeError(f"failed {CLIENT_ID} codex-agent")
+    repository = MCPOAuthBindingRepository(client=client)
+
+    with pytest.raises(PlurimException) as error:
+        repository.create_agent_and_bind(
+            owner_user_id=OWNER_ID,
+            client_id=CLIENT_ID,
+            name="Codex",
+            username="codex-agent",
+        )
+
+    assert error.value.message == "Failed to create MCP OAuth agent"
+    assert CLIENT_ID not in error.value.message
+    assert "codex-agent" not in error.value.message
+    assert "RuntimeError" in caplog.text
+    assert CLIENT_ID not in caplog.text
+    assert "codex-agent" not in caplog.text
+
+
+def test_repository_create_agent_and_bind_rejects_empty_rpc_result():
+    client = MagicMock()
+    client.rpc.return_value.execute.return_value = SimpleNamespace(data=[])
+    repository = MCPOAuthBindingRepository(client=client)
+
+    with pytest.raises(PlurimException) as error:
+        repository.create_agent_and_bind(
+            owner_user_id=OWNER_ID,
+            client_id=CLIENT_ID,
+            name="Codex",
+            username="codex-agent",
+        )
+
+    assert error.value.message == "Failed to create MCP OAuth agent"
+
+
 def test_repository_errors_do_not_echo_identifiers(caplog):
     client = MagicMock()
     client.table.side_effect = RuntimeError(f"database rejected {CLIENT_ID}")
@@ -172,7 +258,8 @@ def test_bind_upserts_only_an_active_agent_owned_by_the_user():
         "agent_id": AGENT_ID,
     }
     agent_repo = MagicMock(spec=AgentRepository)
-    agent_repo.get_by_id.return_value = _agent()
+    selected_agent = _agent()
+    agent_repo.get_by_id.return_value = selected_agent
     service = _service(binding_repo=binding_repo, agent_repo=agent_repo)
 
     result = service.bind(
@@ -187,7 +274,52 @@ def test_bind_upserts_only_an_active_agent_owned_by_the_user():
         client_id=CLIENT_ID,
         agent_id=AGENT_ID,
     )
-    assert result["agent_id"] == AGENT_ID
+    assert result is selected_agent
+
+
+def test_create_agent_and_bind_delegates_validated_values_to_atomic_repository():
+    binding_repo = MagicMock(spec=MCPOAuthBindingRepository)
+    created_agent = _agent()
+    binding_repo.create_agent_and_bind.return_value = created_agent
+    service = _service(binding_repo=binding_repo)
+
+    result = service.create_agent_and_bind(
+        owner_user_id=OWNER_ID,
+        client_id=CLIENT_ID,
+        name="Codex",
+        username="Codex-Agent",
+    )
+
+    binding_repo.create_agent_and_bind.assert_called_once_with(
+        owner_user_id=OWNER_ID,
+        client_id=CLIENT_ID,
+        name="Codex",
+        username="codex-agent",
+    )
+    assert result is created_agent
+
+
+@pytest.mark.parametrize(
+    ("owner_user_id", "client_id"),
+    [
+        ("not-a-uuid", CLIENT_ID),
+        (OWNER_ID, ""),
+        (OWNER_ID, "a" * 2049),
+    ],
+)
+def test_create_agent_and_bind_rejects_invalid_binding_input_before_rpc(owner_user_id, client_id):
+    binding_repo = MagicMock(spec=MCPOAuthBindingRepository)
+    service = _service(binding_repo=binding_repo)
+
+    with pytest.raises(ValidationError):
+        service.create_agent_and_bind(
+            owner_user_id=owner_user_id,
+            client_id=client_id,
+            name="Codex",
+            username="codex-agent",
+        )
+
+    binding_repo.create_agent_and_bind.assert_not_called()
 
 
 @pytest.mark.parametrize(
