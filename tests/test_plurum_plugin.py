@@ -17,7 +17,7 @@ CODEX_MARKETPLACE_PATH = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
 README_PATH = PLUGIN_ROOT / "README.md"
 ROOT_README_PATH = REPO_ROOT / "README.md"
 CHANGELOG_PATH = PLUGIN_ROOT / "CHANGELOG.md"
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 
 EXPECTED_PACKAGE_FILES = {
     Path(".claude-plugin/plugin.json"),
@@ -141,9 +141,7 @@ def test_claude_api_key_configuration_is_required_and_sensitive() -> None:
         }
     }
 
-    client_header = manifest["mcpServers"]["plurum"]["headers"][
-        "X-Plurum-Client"
-    ]
+    client_header = manifest["mcpServers"]["plurum"]["headers"]["X-Plurum-Client"]
     assert re.fullmatch(r"[a-z0-9-]{1,64}", client_header)
 
 
@@ -192,7 +190,7 @@ def test_codex_manifest_declares_shared_skill_and_mcp_companion() -> None:
     ]
 
 
-def test_codex_mcp_uses_only_native_environment_bearer_auth() -> None:
+def test_codex_mcp_uses_only_native_oauth_discovery() -> None:
     mcp = _json(MCP_PATH)
 
     assert mcp == {
@@ -200,7 +198,7 @@ def test_codex_mcp_uses_only_native_environment_bearer_auth() -> None:
             "plurum": {
                 "type": "http",
                 "url": "https://mcp.plurum.ai/mcp",
-                "bearer_token_env_var": "PLURUM_API_KEY",
+                "oauth_resource": "https://mcp.plurum.ai/mcp",
                 "http_headers": {
                     "X-Plurum-Client": "codex",
                 },
@@ -209,15 +207,27 @@ def test_codex_mcp_uses_only_native_environment_bearer_auth() -> None:
     }
 
     server = mcp["mcpServers"]["plurum"]
-    assert re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", server["bearer_token_env_var"])
+    assert server["oauth_resource"] == server["url"]
     assert re.fullmatch(
         r"[a-z0-9-]{1,64}",
         server["http_headers"]["X-Plurum-Client"],
     )
+    assert "bearer_token_env_var" not in server
     assert "Authorization" not in server.get("http_headers", {})
     assert "headers" not in server
     assert "command" not in server
     assert "args" not in server
+    assert "env" not in server
+
+    serialized = json.dumps(server).lower()
+    for forbidden in (
+        "client_id",
+        "client_secret",
+        "authorization_endpoint",
+        "token_endpoint",
+        "redirect_uri",
+    ):
+        assert forbidden not in serialized
 
 
 def test_codex_marketplace_uses_native_repo_catalog_schema() -> None:
@@ -251,11 +261,7 @@ def test_plugin_package_is_inert_and_self_contained() -> None:
     paths = list(PLUGIN_ROOT.rglob("*"))
 
     assert not any(path.is_symlink() for path in paths)
-    files = {
-        path.relative_to(PLUGIN_ROOT)
-        for path in paths
-        if path.is_file()
-    }
+    files = {path.relative_to(PLUGIN_ROOT) for path in paths if path.is_file()}
     assert files == EXPECTED_PACKAGE_FILES
     assert not any(
         path.stat().st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -271,14 +277,19 @@ def test_plugin_package_is_inert_and_self_contained() -> None:
     assert not {"hooks", "scripts", "bin"}.intersection(
         path.name for path in paths if path.is_dir()
     )
-    assert (PLUGIN_ROOT / "LICENSE").read_bytes() == (
-        REPO_ROOT / "LICENSE"
-    ).read_bytes()
+    assert (PLUGIN_ROOT / "LICENSE").read_bytes() == (REPO_ROOT / "LICENSE").read_bytes()
 
 
 def test_install_guide_uses_only_native_secret_safe_flows() -> None:
     readme = README_PATH.read_text(encoding="utf-8")
     normalized = " ".join(readme.split()).lower()
+
+    claude_section = " ".join(
+        readme.split("## Claude Code", 1)[1].split("## Codex OAuth candidate", 1)[0].split()
+    ).lower()
+    codex_section = " ".join(
+        readme.split("## Codex OAuth candidate", 1)[1].split("## Hosted tools", 1)[0].split()
+    ).lower()
 
     for expected in (
         "/plugin marketplace add dunelabsco/plurum",
@@ -298,64 +309,69 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
         "/plugin marketplace remove plurum",
         "codex plugin marketplace add dunelabsco/plurum --ref main",
         "codex plugin add plurum@plurum",
-        "codex cli api-key beta",
-        "codex cli 0.147.0",
-        "codex in the chatgpt desktop app supports plugins",
-        "outside this beta",
+        "codex oauth candidate",
+        "codex's native oauth support",
+        "authorization-code + pkce",
+        "there is no plurum api key",
         "enter `/plugins` in codex cli",
-        "codex does not ask for or store `plurum_api_key`",
-        "read -r -s plur",
-        'read-host "plurum api key" -maskinput',
-        "windows (powershell 7.1+)",
-        "remove-item env:plurum_api_key",
-        "codex filters variable names containing `key`, `secret`, or `token`",
-        "not passed to model-launched commands",
-        "codex plugin marketplace upgrade plurum codex plugin add "
-        "plurum@plurum",
+        "in the codex app, install plurum from **plugins**",
+        "at installation or first connection",
+        "select an existing agent or create a dedicated codex agent",
+        "open the plurum mcp entry and choose **authenticate**",
+        "codex mcp login plurum",
+        "codex plugin marketplace upgrade plurum codex plugin add " "plurum@plurum",
         "codex plugin remove plurum@plurum",
         "codex plugin marketplace remove plurum",
-        "public universal plugin directory",
-        "plurum has not implemented an oauth flow",
-        "the ide extension does not support plugins",
-        "no hook, script, dependency, local server, credential file, or "
-        "background process",
+        "must not be treated as proof that remote oauth access has been " "revoked",
+        "requires plurum's server-side oauth rollout and an isolated native " "release canary",
+        "no hook, script, dependency, local server, credential file, or " "background process",
     ):
         assert expected in normalized
 
-    assert normalized.index(
-        "/plugin marketplace add dunelabsco/plurum"
-    ) < normalized.index(
+    assert normalized.index("/plugin marketplace add dunelabsco/plurum") < normalized.index(
         "/plugin marketplace add https://github.com/dunelabsco/plurum.git"
     )
 
     for forbidden in (
         "--config",
         "codex mcp add",
-        "export plurum_api_key=",
         "npm install",
         "npx ",
         "pip install",
         "pipx ",
         "plurum update",
         "/plugin configure",
-        "hosted endpoint has not completed authenticated end-to-end "
-        "validation",
+        "hosted endpoint has not completed authenticated end-to-end " "validation",
     ):
         assert forbidden not in normalized
 
+    for expected in (
+        "the api key",
+        "native masked configuration prompt",
+        "configure options",
+    ):
+        assert expected in claude_section
+
+    for forbidden in (
+        "plurum_api_key",
+        "api-key beta",
+        "read -r -s",
+        "read-host",
+        "powershell",
+        "environment-backed",
+        "client secret to configure",
+    ):
+        assert forbidden not in codex_section
+
     package_text = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in PLUGIN_ROOT.rglob("*")
-        if path.is_file()
+        path.read_text(encoding="utf-8") for path in PLUGIN_ROOT.rglob("*") if path.is_file()
     )
     assert not re.search(
         r"\bplrm_(?:live|test)_[A-Za-z0-9_-]{16,}\b",
         package_text,
     )
 
-    root_readme = " ".join(
-        ROOT_README_PATH.read_text(encoding="utf-8").split()
-    ).lower()
+    root_readme = " ".join(ROOT_README_PATH.read_text(encoding="utf-8").split()).lower()
     for expected in (
         "/plugin marketplace add dunelabsco/plurum",
         "/plugin marketplace add https://github.com/dunelabsco/plurum.git",
@@ -364,19 +380,24 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
         "if the marketplace command reports an ssh clone error",
         "codex plugin marketplace add dunelabsco/plurum --ref main",
         "codex plugin add plurum@plurum",
-        "codex cli beta",
-        "passed isolated authenticated end-to-end validation with codex cli "
-        "0.147.0",
-        "codex reads `plurum_api_key` from the environment",
-        "codex in the chatgpt desktop app can install plugins",
-        "the ide extension does not support plugins",
-        "no npm, python package, helper process, or local mcp server",
+        "codex oauth candidate",
+        "codex's native oauth support",
+        "codex opens plurum in the browser",
+        "select an existing agent or create one",
+        "you do not create, paste, export, or store a plurum api key for " "codex",
+        "no npm, python package, helper process, custom oauth client, or " "local mcp server",
+        "native release validation remains a rollout gate",
     ):
         assert expected in root_readme
 
-    assert root_readme.index(
-        "/plugin marketplace add dunelabsco/plurum"
-    ) < root_readme.index(
+    for forbidden in (
+        "plurum_api_key",
+        "codex cli beta",
+        "environment-backed",
+    ):
+        assert forbidden not in root_readme
+
+    assert root_readme.index("/plugin marketplace add dunelabsco/plurum") < root_readme.index(
         "/plugin marketplace add https://github.com/dunelabsco/plurum.git"
     )
 

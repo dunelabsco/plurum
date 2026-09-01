@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- Switch the Codex hosted MCP connection to native OAuth discovery and browser
+  authorization.
+- Remove the Codex API-key environment prerequisite while leaving Claude
+  Code's protected API-key setup unchanged.
+
 ## 0.2.1
 
 - Use the standard GitHub marketplace shorthand with an explicit HTTPS

@@ -3,7 +3,7 @@
     "plurum": {
       "type": "http",
       "url": "https://mcp.plurum.ai/mcp",
-      "bearer_token_env_var": "PLURUM_API_KEY",
+      "oauth_resource": "https://mcp.plurum.ai/mcp",
       "http_headers": {
         "X-Plurum-Client": "codex"
       }
