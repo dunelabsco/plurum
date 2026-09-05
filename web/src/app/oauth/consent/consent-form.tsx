@@ -2,18 +2,21 @@
 
 import { useState } from "react";
 import { Loader2 } from "lucide-react";
+import Link from "next/link";
 
 import type { Agent } from "@/types/agent";
 
 type ConsentFormProps = {
   authorizationId: string;
   agents: Agent[];
+  expectedGrantId: string | null;
   selectionError?: boolean;
 };
 
 export function ConsentForm({
   authorizationId,
   agents,
+  expectedGrantId,
   selectionError = false,
 }: ConsentFormProps) {
   const [mode, setMode] = useState<"existing" | "new">(
@@ -32,12 +35,14 @@ export function ConsentForm({
       className="space-y-5"
     >
       <input type="hidden" name="authorization_id" value={authorizationId} />
+      <input type="hidden" name="expected_grant_id" value={expectedGrantId ?? ""} />
       <input type="hidden" name="selection_type" value={mode} />
 
       {selectionError && (
         <p className="rounded-xl border border-[#D71921]/20 bg-[#D71921]/5 px-4 py-3 text-sm text-[#D71921]">
-          that agent could not be connected. choose another agent or use a
-          different username.
+          that connection could not be saved. check your selection and username,
+          then try again. to change an already linked agent, disconnect this app
+          in <Link href="/dashboard/settings" className="underline">settings</Link> first.
         </p>
       )}
 

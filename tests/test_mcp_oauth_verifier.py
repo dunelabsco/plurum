@@ -23,6 +23,7 @@ from app.mcp.token_verifier import PlurumMCPTokenVerifier, _BoundedPyJWKClient
 
 OWNER_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 AGENT_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+GRANT_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 CLIENT_ID = "https://codex.example/oauth/client-A"
 ISSUER = "https://project.supabase.co/auth/v1"
 AUDIENCE = "https://mcp.plurum.ai/mcp"
@@ -44,11 +45,11 @@ class StubBindingResolver:
     def __init__(self, result=None, error: Exception | None = None):
         self.result = result
         self.error = error
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, str, str]] = []
         self.thread_ids: list[int] = []
 
-    def resolve_agent(self, *, owner_user_id: str, client_id: str):
-        self.calls.append((owner_user_id, client_id))
+    def resolve_agent(self, *, owner_user_id: str, client_id: str, grant_id: str):
+        self.calls.append((owner_user_id, client_id, grant_id))
         self.thread_ids.append(threading.get_ident())
         if self.error is not None:
             raise self.error
@@ -93,6 +94,7 @@ def _claims(**overrides) -> dict:
         "sub": OWNER_ID,
         "user_id": OWNER_ID,
         "client_id": CLIENT_ID,
+        "plurum_grant_id": GRANT_ID,
         "scope": "openid profile",
     }
     values.update(overrides)
@@ -267,7 +269,7 @@ async def test_valid_rs256_oauth_token_resolves_exact_binding_each_time(
     second = await verifier.verify_token(token)
 
     assert first is not None and second is not None
-    assert resolver.calls == [(OWNER_ID, CLIENT_ID), (OWNER_ID, CLIENT_ID)]
+    assert resolver.calls == [(OWNER_ID, CLIENT_ID, GRANT_ID), (OWNER_ID, CLIENT_ID, GRANT_ID)]
     assert all(thread_id != caller_thread for thread_id in resolver.thread_ids)
     assert all(thread_id != caller_thread for thread_id in signing_client.thread_ids)
     assert first.client_id == CLIENT_ID
@@ -288,7 +290,7 @@ async def test_valid_es256_oauth_token_is_supported(ec_private_key):
     access_token = await verifier.verify_token(_signed_token(ec_private_key, algorithm="ES256"))
 
     assert access_token is not None
-    assert resolver.calls == [(OWNER_ID, CLIENT_ID)]
+    assert resolver.calls == [(OWNER_ID, CLIENT_ID, GRANT_ID)]
 
 
 @pytest.mark.asyncio

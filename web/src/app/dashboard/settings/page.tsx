@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { LogOut, Loader2 } from "lucide-react";
+import { OAuthConnections } from "./oauth-connections";
 
 export default function DashboardSettingsPage() {
   const router = useRouter();
@@ -172,6 +173,8 @@ export default function DashboardSettingsPage() {
               </div>
             )}
           </section>
+
+          <OAuthConnections />
 
           <section className="bg-white/40 backdrop-blur-sm border border-black/[0.06] rounded-2xl p-5">
             <h2 className="font-display text-[11px] tracking-wide text-black/20 mb-3">session</h2>

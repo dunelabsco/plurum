@@ -73,11 +73,13 @@ def _normalize_client(value: str | None) -> str:
     return client if client in _KNOWN_CLIENTS else "unknown"
 
 
-def _safe_request_id(payload: Any) -> str | int | None:
+def _safe_request_id(payload: Any, *, request_bearer: str | None = None) -> str | int | None:
     if not isinstance(payload, dict):
         return None
     request_id = payload.get("id")
     if isinstance(request_id, bool) or not isinstance(request_id, (str, int)):
+        return None
+    if isinstance(request_id, str) and request_bearer and request_bearer in request_id:
         return None
     try:
         reject_api_keys(request_id, path="mcp_request.id")
@@ -194,9 +196,7 @@ class MCPRequestCredentialGuard:
         if not body_complete:
             return
 
-        request_bearer = _request_bearer_for_body_scan(
-            Headers(scope=scope).get("authorization")
-        )
+        request_bearer = _request_bearer_for_body_scan(Headers(scope=scope).get("authorization"))
         payload, contains_credential = _parse_and_scan_body(
             b"".join(body_parts),
             request_bearer=request_bearer,
@@ -206,7 +206,7 @@ class MCPRequestCredentialGuard:
                 scope,
                 receive,
                 send,
-                _safe_request_id(payload),
+                _safe_request_id(payload, request_bearer=request_bearer),
             )
             return
 
@@ -258,10 +258,7 @@ class MCPAPIKeyAuthMiddleware:
 
         headers = Headers(scope=scope)
         authorization = headers.get("authorization")
-        if (
-            authorization is not None
-            and len(authorization) > _MAX_AUTHORIZATION_HEADER_CHARS
-        ):
+        if authorization is not None and len(authorization) > _MAX_AUTHORIZATION_HEADER_CHARS:
             await _send_error(scope, receive, send, 401)
             return
         try:

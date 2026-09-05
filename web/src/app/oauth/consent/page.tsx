@@ -6,6 +6,7 @@ import { oauthConsentPath, parseAuthorizationId } from "@/lib/auth/safe-redirect
 import { serverApiClient } from "@/lib/api/server";
 import { createClient } from "@/lib/supabase/server";
 import type { Agent } from "@/types/agent";
+import type { OAuthBindingState } from "@/lib/auth/oauth-types";
 
 type ConsentPageProps = {
   searchParams: Promise<{
@@ -55,12 +56,20 @@ export default async function OAuthConsentPage({ searchParams }: ConsentPageProp
   }
 
   let agents: Agent[];
+  let binding: OAuthBindingState;
   try {
+    binding = await serverApiClient.post<OAuthBindingState>("/mcp/oauth/binding-state", {
+      client_id: authorization.client.id,
+    });
     agents = (await serverApiClient.get<Agent[]>("/agents/me/agents")).filter(
       (agent) => agent.is_active
     );
   } catch {
     return <ConnectionMessage title="plurum is temporarily unavailable" />;
+  }
+
+  if (binding.state === "revoking") {
+    return <ConnectionMessage title="finish disconnecting this app in your account settings" settings />;
   }
 
   const scopes = authorization.scope.split(/\s+/).filter(Boolean);
@@ -126,6 +135,7 @@ export default async function OAuthConsentPage({ searchParams }: ConsentPageProp
           <ConsentForm
             authorizationId={authorizationId}
             agents={agents}
+            expectedGrantId={binding.grant_id}
             selectionError={selectionError}
           />
 
@@ -139,7 +149,7 @@ export default async function OAuthConsentPage({ searchParams }: ConsentPageProp
   );
 }
 
-function ConnectionMessage({ title }: { title: string }) {
+function ConnectionMessage({ title, settings = false }: { title: string; settings?: boolean }) {
   return (
     <main className="min-h-svh flex items-center justify-center px-6">
       <div className="w-full max-w-sm rounded-2xl border border-black/[0.06] bg-white/45 p-8 text-center backdrop-blur-sm">
@@ -151,7 +161,9 @@ function ConnectionMessage({ title }: { title: string }) {
         </Link>
         <h1 className="mt-8 font-display text-xl text-[#0A0A0A]">{title}</h1>
         <p className="mt-3 text-sm leading-relaxed text-black/35">
-          return to your agent app and start the connection again.
+          {settings ? (
+            <Link href="/dashboard/settings" className="underline underline-offset-4">open settings</Link>
+          ) : "return to your agent app and start the connection again."}
         </p>
       </div>
     </main>

@@ -12,6 +12,7 @@ import re
 MIGRATIONS = Path(__file__).parents[1] / "app" / "db" / "migrations"
 MIGRATION = MIGRATIONS / "032_mcp_oauth_agent_bindings.sql"
 ATOMIC_MIGRATION = MIGRATIONS / "033_mcp_oauth_atomic_onboarding.sql"
+REVOCATION_MIGRATION = MIGRATIONS / "034_mcp_oauth_revocation.sql"
 
 
 def _sql() -> str:
@@ -22,14 +23,49 @@ def _atomic_sql() -> str:
     return re.sub(r"\s+", " ", ATOMIC_MIGRATION.read_text(encoding="utf-8")).strip()
 
 
+def test_revocation_migration_keeps_tombstones_and_removes_the_old_bypass():
+    sql = re.sub(r"\s+", " ", REVOCATION_MIGRATION.read_text()).strip()
+    assert sql.startswith("--") and sql.endswith("COMMIT;")
+    assert "ON DELETE SET NULL" in sql
+    assert "ALTER COLUMN agent_id DROP NOT NULL" in sql
+    assert "ADD COLUMN grant_id UUID NOT NULL DEFAULT gen_random_uuid()" in sql
+    assert "CHECK (state IN ('active', 'revoking', 'revoked'))" in sql
+    assert "DROP FUNCTION public.create_mcp_oauth_agent_and_binding(UUID, TEXT, TEXT, TEXT)" in sql
+    for signature in [
+        "bind_mcp_oauth_agent(UUID, TEXT, UUID, UUID)",
+        "create_mcp_oauth_agent_and_binding(UUID, TEXT, TEXT, TEXT, UUID)",
+        "begin_mcp_oauth_revocation(UUID, TEXT, UUID)",
+        "finish_mcp_oauth_revocation(UUID, TEXT, UUID, BOOLEAN)",
+    ]:
+        assert (
+            f"REVOKE ALL ON FUNCTION public.{signature} FROM PUBLIC, anon, authenticated, supabase_auth_admin"
+            in sql
+        )
+        assert f"GRANT EXECUTE ON FUNCTION public.{signature} TO service_role" in sql
+    assert "SECURITY DEFINER" not in sql
+
+
+def test_revocation_migration_fences_stale_writers_and_oauth_tokens():
+    sql = re.sub(r"\s+", " ", REVOCATION_MIGRATION.read_text()).strip()
+    assert sql.count("pg_catalog.pg_advisory_xact_lock(") == 3
+    assert "binding.grant_id IS DISTINCT FROM p_expected_grant_id" in sql
+    assert "OR binding.state = 'revoking'" in sql
+    assert "grant_id = CASE WHEN state = 'active' THEN gen_random_uuid() ELSE grant_id END" in sql
+    assert "AND state = 'revoking' AND revocation_attempt_id = p_attempt_id" in sql
+    assert "INTERVAL '30 seconds'" in sql
+    hook = sql.split("CREATE OR REPLACE FUNCTION public.plurum_mcp_custom_access_token_hook", 1)[1]
+    assert "IF claims->'client_id' IS NULL THEN RETURN JSONB_BUILD_OBJECT('claims', claims)" in hook
+    assert "AND state = 'active' AND agent_id IS NOT NULL" in hook
+    assert "'{plurum_grant_id}', TO_JSONB(selected_grant_id::TEXT), true" in hook
+    assert "EXCEPTION WHEN OTHERS THEN RETURN JSONB_BUILD_OBJECT('error'" in hook
+
+
 def test_mcp_oauth_migration_follows_031() -> None:
     numbered = sorted(path.name for path in MIGRATIONS.glob("[0-9][0-9][0-9]_*.sql"))
 
     assert "031_agent_experience_stats.sql" in numbered
     assert MIGRATION.name in numbered
-    assert numbered.index(MIGRATION.name) == numbered.index(
-        "031_agent_experience_stats.sql"
-    ) + 1
+    assert numbered.index(MIGRATION.name) == numbered.index("031_agent_experience_stats.sql") + 1
 
 
 def test_oauth_only_agents_and_binding_table_contract() -> None:
@@ -51,10 +87,7 @@ def test_oauth_only_agents_and_binding_table_contract() -> None:
 def test_binding_table_is_closed_to_client_roles() -> None:
     sql = _sql()
 
-    assert (
-        "ALTER TABLE public.mcp_oauth_agent_bindings ENABLE ROW LEVEL SECURITY"
-        in sql
-    )
+    assert "ALTER TABLE public.mcp_oauth_agent_bindings ENABLE ROW LEVEL SECURITY" in sql
     assert re.search(
         r"REVOKE ALL ON TABLE public\.mcp_oauth_agent_bindings "
         r"FROM PUBLIC, anon, authenticated",
@@ -72,8 +105,7 @@ def test_binding_table_is_closed_to_client_roles() -> None:
         sql,
     )
     assert re.search(
-        r"GRANT SELECT ON TABLE public\.mcp_oauth_agent_bindings "
-        r"TO supabase_auth_admin",
+        r"GRANT SELECT ON TABLE public\.mcp_oauth_agent_bindings " r"TO supabase_auth_admin",
         sql,
     )
     assert re.search(
