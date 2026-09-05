@@ -15,7 +15,7 @@ from app.config import Settings
 from app.core.exceptions import AuthorizationError
 from app.core.security import get_current_user
 from app.main import create_app
-from app.models.agent import AgentPublic
+from app.models.mcp_oauth import MCPOAuthBoundAgent
 
 
 OWNER_ID = "11111111-1111-4111-8111-111111111111"
@@ -54,8 +54,9 @@ def _client(
         yield test_client
 
 
-def _agent(*, api_key_prefix: str | None = "plrm_live_existing...") -> AgentPublic:
-    return AgentPublic(
+def _agent(*, api_key_prefix: str | None = "plrm_live_existing...") -> MCPOAuthBoundAgent:
+    return MCPOAuthBoundAgent(
+        grant_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
         id=AGENT_ID,
         name="Codex",
         username="codex-agent",
@@ -79,12 +80,13 @@ def _agent_row(*, api_key_prefix: str | None = "plrm_live_existing...") -> dict:
     [
         (
             "/api/v1/mcp/oauth/bind",
-            {"client_id": CLIENT_ID, "agent_id": str(AGENT_ID)},
+            {"client_id": CLIENT_ID, "expected_grant_id": None, "agent_id": str(AGENT_ID)},
         ),
         (
             "/api/v1/mcp/oauth/create-and-bind",
             {
                 "client_id": CLIENT_ID,
+                "expected_grant_id": None,
                 "name": "Codex",
                 "username": "codex-agent",
             },
@@ -107,13 +109,14 @@ def test_oauth_onboarding_routes_are_absent_while_flag_is_disabled(path, payload
     [
         (
             "/api/v1/mcp/oauth/bind",
-            {"client_id": CLIENT_ID, "agent_id": str(AGENT_ID)},
+            {"client_id": CLIENT_ID, "expected_grant_id": None, "agent_id": str(AGENT_ID)},
             {},
         ),
         (
             "/api/v1/mcp/oauth/create-and-bind",
             {
                 "client_id": CLIENT_ID,
+                "expected_grant_id": None,
                 "name": "Codex",
                 "username": "codex-agent",
             },
@@ -138,14 +141,12 @@ def test_bind_delegates_exact_user_client_and_agent_ownership_checks():
 
         response = client.post(
             "/api/v1/mcp/oauth/bind",
-            json={"client_id": CLIENT_ID, "agent_id": str(AGENT_ID)},
+            json={"client_id": CLIENT_ID, "expected_grant_id": None, "agent_id": str(AGENT_ID)},
         )
 
     assert response.status_code == 200
     binding_type.return_value.bind.assert_called_once_with(
-        owner_user_id=OWNER_ID,
-        client_id=CLIENT_ID,
-        agent_id=AGENT_ID,
+        owner_user_id=OWNER_ID, client_id=CLIENT_ID, agent_id=AGENT_ID, expected_grant_id=None
     )
     assert "client_id" not in response.json()
     assert "owner_user_id" not in response.json()
@@ -164,11 +165,11 @@ def test_bind_propagates_the_binding_services_generic_ownership_rejection():
 
         response = client.post(
             "/api/v1/mcp/oauth/bind",
-            json={"client_id": CLIENT_ID, "agent_id": str(AGENT_ID)},
+            json={"client_id": CLIENT_ID, "expected_grant_id": None, "agent_id": str(AGENT_ID)},
         )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == ("The selected agent cannot be used for MCP OAuth")
+    assert response.json()["error"] == ("The selected agent cannot be used for MCP OAuth")
 
 
 def test_create_and_bind_delegates_one_atomic_operation_and_logs_registration():
@@ -185,6 +186,7 @@ def test_create_and_bind_delegates_one_atomic_operation_and_logs_registration():
             "/api/v1/mcp/oauth/create-and-bind",
             json={
                 "client_id": CLIENT_ID,
+                "expected_grant_id": None,
                 "name": "Codex",
                 "username": "codex-agent",
             },
@@ -196,6 +198,7 @@ def test_create_and_bind_delegates_one_atomic_operation_and_logs_registration():
         client_id=CLIENT_ID,
         name="Codex",
         username="codex-agent",
+        expected_grant_id=None,
     )
     log_event.assert_called_once_with(
         "register",
@@ -216,6 +219,7 @@ def test_create_and_bind_delegates_one_atomic_operation_and_logs_registration():
             "/api/v1/mcp/oauth/bind",
             {
                 "client_id": CLIENT_ID,
+                "expected_grant_id": None,
                 "agent_id": str(AGENT_ID),
                 "owner_user_id": OWNER_ID,
             },
@@ -224,6 +228,7 @@ def test_create_and_bind_delegates_one_atomic_operation_and_logs_registration():
             "/api/v1/mcp/oauth/create-and-bind",
             {
                 "client_id": CLIENT_ID,
+                "expected_grant_id": None,
                 "name": "Codex",
                 "username": "codex-agent",
                 "resource": "https://attacker.example/mcp",

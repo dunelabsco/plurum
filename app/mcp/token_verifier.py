@@ -50,7 +50,7 @@ class SigningKeyClient(Protocol):
 class OAuthBindingResolver(Protocol):
     """Small injectable surface implemented by the binding service."""
 
-    def resolve_agent(self, *, owner_user_id: str, client_id: str) -> dict | None:
+    def resolve_agent(self, *, owner_user_id: str, client_id: str, grant_id: str) -> dict | None:
         ...
 
 
@@ -320,6 +320,7 @@ class PlurumMCPTokenVerifier:
                     self._binding_resolver.resolve_agent,
                     owner_user_id=owner_user_id,
                     client_id=client_id,
+                    grant_id=claims["plurum_grant_id"],
                 )
             )
         except Exception as error:
@@ -398,6 +399,8 @@ def _validate_oauth_claims(
     if owner_user_id is None:
         return None
     if "user_id" in claims and claims.get("user_id") != owner_user_id:
+        return None
+    if _canonical_uuid(claims.get("plurum_grant_id")) is None:
         return None
 
     client_id = claims.get("client_id")

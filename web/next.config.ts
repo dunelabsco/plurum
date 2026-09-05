@@ -48,6 +48,13 @@ const nextConfig: NextConfig = {
         source: "/(.*)",
         headers: securityHeaders,
       },
+      ...["/oauth/:path*", "/api/oauth/:path*"].map(source => ({
+        source,
+        headers: [
+          { key: "Cache-Control", value: "no-store" },
+          { key: "Referrer-Policy", value: "no-referrer" },
+        ],
+      })),
     ];
   },
 };
