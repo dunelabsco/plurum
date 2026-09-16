@@ -19,6 +19,27 @@ API_KEY_PATTERNS = (
     re.compile(r"plrm_live_[A-Za-z0-9\-_]{10,}"), # Plurum API keys
     re.compile(r"AKIA[0-9A-Z]{16}"),              # AWS access keys
 )
+_BASE64URL_CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+
+
+def contains_jwt(value: str) -> bool:
+    """Detect JWT-shaped substrings in linear time without decoding them."""
+    parts = value.split(".")
+    for index in range(len(parts) - 2):
+        header, payload, signature = parts[index:index + 3]
+        if (
+            not payload
+            or payload.strip(_BASE64URL_CHARACTERS)
+            or not signature
+            or signature[0] not in _BASE64URL_CHARACTERS
+        ):
+            continue
+        # Only the final base64url run can be a header before this dot.
+        header_start = len(header.rstrip(_BASE64URL_CHARACTERS))
+        # Preserve the requirement for at least one header character after eyJ.
+        if "eyJ" in header[header_start:-1]:
+            return True
+    return False
 
 
 def reject_api_keys(value: Any, path: str = "experience") -> None:

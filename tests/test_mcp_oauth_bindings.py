@@ -418,7 +418,11 @@ def test_resolve_rejects_a_transferred_or_mismatched_binding():
 
 @pytest.mark.parametrize(
     "client_id",
-    ["", "contains\x00nul", "a" * 2049, chr(0xD800)],
+    [
+        "", "contains\x00nul", "a" * 2049, chr(0xD800),
+        "eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZA.c2ln",
+        "https://client.example/prefixeyJa.b.c",
+    ],
 )
 def test_client_id_validation_is_bounded_and_sanitized(client_id):
     service = _service()
@@ -427,6 +431,7 @@ def test_client_id_validation_is_bounded_and_sanitized(client_id):
         service.resolve_agent(owner_user_id=OWNER_ID, client_id=client_id, grant_id=GRANT_ID)
 
     assert error.value.message == "Invalid MCP OAuth binding input"
+    service.binding_repo.get.assert_not_called()
     if client_id:
         assert client_id not in error.value.message
 

@@ -5,13 +5,49 @@ from uuid import UUID
 
 import pytest
 
-from app.core.content_security import reject_api_keys
+from app.core.content_security import contains_jwt, reject_api_keys
 from app.core.exceptions import ValidationError
 from app.services.experience_assembler import ExperienceAssembler
 from app.services.experience_service import ExperienceService
 
 
 FAKE_PLURUM_KEY = "plrm_live_abcdefghijklmnopqrstuvwxyz"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZA.c2ln",
+        "client/eyJa.b.c?query=1",
+        "prefixeyJa.b.c!suffix",
+        "invalid.!.eyJa.b.c",
+        "eyJ?.eyJa.b.c",
+        "eyJ" * 680 + ".a.b",
+    ],
+)
+def test_jwt_detection_finds_tokens_embedded_in_opaque_values(value):
+    assert contains_jwt(value) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "https://codex.example/register/Client-A",
+        "deploy.v2.tools",
+        "eyJ.a.b",
+        "eyJa..b",
+        "eyJa.b.",
+        "eyJa.b?.c",
+        "eyJa?.b.c",
+        "eyJa.b.?c",
+        "eyJ" * 682,
+        "eyJ" * 680 + ".a.!",
+        "." * 2048,
+    ],
+)
+def test_jwt_detection_preserves_opaque_values_and_partial_tokens(value):
+    assert contains_jwt(value) is False
 
 
 @pytest.mark.parametrize(
