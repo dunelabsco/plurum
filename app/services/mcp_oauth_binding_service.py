@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import logging
 from uuid import UUID
-import re
 
-from app.core.content_security import reject_api_keys
+from app.core.content_security import contains_jwt, reject_api_keys
 from app.core.exceptions import (
     AuthorizationError,
     NotFoundError,
@@ -168,7 +167,7 @@ def _validate_client_id(value: object) -> str:
         reject_api_keys(value)
     except ValidationError:
         raise ValidationError(_INVALID_BINDING_INPUT) from None
-    if re.search(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", value):
+    if contains_jwt(value):
         raise ValidationError(_INVALID_BINDING_INPUT)
     return value
 

@@ -334,7 +334,12 @@ def test_provider_listing_rejects_malformed_or_duplicate_grants(payload):
 
 
 @pytest.mark.parametrize(
-    "name", [USER_TOKEN, "app eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZA.c2ln", "bad\x7fname"]
+    "name", [
+        USER_TOKEN,
+        "app eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZA.c2ln",
+        "prefixeyJa.b.c",
+        "bad\x7fname",
+    ]
 )
 def test_provider_client_names_cannot_reflect_credentials(name):
     with httpx.Client(

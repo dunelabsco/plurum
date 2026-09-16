@@ -5,12 +5,11 @@ from __future__ import annotations
 from contextlib import nullcontext
 import json
 import logging
-import re
 
 import httpx
 
 from app.config import Settings, get_settings
-from app.core.content_security import reject_api_keys
+from app.core.content_security import contains_jwt, reject_api_keys
 from app.core.exceptions import AuthenticationError, PlurimException, ValidationError
 from app.models.mcp_oauth import MCPOAuthConnection, MCPOAuthDisconnectResult
 from app.repositories.agent_repo import AgentRepository
@@ -54,7 +53,7 @@ class SupabaseOAuthGrants:
                     if name and (
                         any(ord(c) < 0x20 or ord(c) == 0x7F for c in name)
                         or (user_token and user_token in name)
-                        or re.search(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", name)
+                        or contains_jwt(name)
                     ):
                         name = None
                 grants[client_id] = name
