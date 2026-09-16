@@ -5,6 +5,10 @@ import { resolve } from "node:path";
 import { runInNewContext } from "node:vm";
 import test from "node:test";
 import ts from "typescript";
+import { chromium } from "playwright";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { unstable_getResponseFromNextConfig } from "next/experimental/testing/server.js";
 
 const require = createRequire(import.meta.url);
 const root = resolve(import.meta.dirname, "..");
@@ -18,7 +22,10 @@ const SECRET = "synthetic-private-error-that-must-not-be-returned";
 // replaced. TypeScript and NextResponse are the project's installed versions.
 function load(path, overrides = {}) {
   const code = ts.transpileModule(readFileSync(resolve(root, path), "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020,
+      jsx: ts.JsxEmit.ReactJSX,
+    },
   }).outputText;
   const loaded = { exports: {} };
   runInNewContext(code, {
@@ -136,12 +143,18 @@ for (const pending of [false, true]) {
   });
 }
 
-for (const origin of ["https://attacker.example", "", "https://plurum.test/invalid"]) {
+for (const origin of ["https://attacker.example", "", "null", "https://plurum.test/invalid"]) {
   test(`cross-origin or missing origin is rejected: ${origin}`, async () => {
     const h = harness();
     const response = await h.connections.POST(request(disconnectFields, { origin }));
     assert.equal(response.status, 400);
     privateResponse(response);
+    assert.equal(h.calls.length, 0);
+
+    const rejectedConsent = await h.decision.POST(request(consentFields, { origin }));
+    assert.equal(rejectedConsent.status, 303);
+    assert.equal(rejectedConsent.headers.get("location"), "https://plurum.test/oauth/error");
+    privateResponse(rejectedConsent);
     assert.equal(h.calls.length, 0);
   });
 }
@@ -204,7 +217,8 @@ for (const name of ["authorization_id", "decision", "agent_id", "expected_grant_
     const fields = new URLSearchParams(consentFields);
     fields.append(name, fields.get(name));
     const response = await h.decision.POST(request(fields));
-    assert.equal(response.status, 403);
+    assert.equal(response.status, 303);
+    assert.equal(response.headers.get("location"), "https://plurum.test/oauth/error");
     assert.equal(h.calls.length, 0);
     privateResponse(response);
   });
@@ -218,4 +232,82 @@ test("consent failures and denials never render provider diagnostics", async () 
   const denied = await h.decision.POST(request({ ...consentFields, decision: "deny" }));
   assert.equal(denied.headers.get("location"), "https://client.example/denied");
   assert.ok(!h.calls.some(([method]) => method === "post"));
+});
+
+test("native consent forms preserve origin without disclosing authorization details", async (t) => {
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const nextConfig = load("next.config.ts").default;
+  const { ConsentForm } = load("src/app/oauth/consent/consent-form.tsx");
+
+  for (const selection of ["existing", "new", "deny"]) {
+    await t.test(selection, async () => {
+      const h = harness();
+      const page = await browser.newPage({ javaScriptEnabled: false, offline: true });
+      const submissions = [];
+      const responses = [];
+      const callback = `https://client.example/${selection === "deny" ? "denied" : "approved"}`;
+
+      // Fulfill every request in memory. Chromium supplies the real native-form
+      // headers; only Supabase and the backend are replaced by the route harness.
+      await page.route("**/*", async (route) => {
+        const incoming = route.request();
+        const url = new URL(incoming.url());
+        if (url.origin === "https://plurum.test" && url.pathname === "/oauth/consent") {
+          const configResponse = await unstable_getResponseFromNextConfig({
+            url: url.href, nextConfig,
+          });
+          const html = renderToStaticMarkup(createElement(ConsentForm, {
+            authorizationId: "authorization_A", expectedGrantId: null,
+            agents: selection === "existing" ? [{ id: AGENT, name: "test agent", username: "test_agent" }] : [],
+          }));
+          await route.fulfill({
+            status: 200, headers: Object.fromEntries(configResponse.headers),
+            contentType: "text/html", body: `<!doctype html><html><body>${html}</body></html>`,
+          });
+        } else if (url.href === "https://plurum.test/api/oauth/decision" && incoming.method() === "POST") {
+          const headers = await incoming.allHeaders();
+          submissions.push({ headers, body: incoming.postData() });
+          const response = await h.decision.POST(new Request(url, {
+            method: "POST", headers, body: incoming.postDataBuffer(),
+          }));
+          responses.push(response);
+          // Inspect the real handler's response below and stop at the callback
+          // boundary: redirected requests bypass Playwright's route mocks.
+          await route.fulfill({ status: 200, contentType: "text/html", body: "request handled" });
+        } else {
+          await route.abort();
+        }
+      });
+
+      try {
+        await page.goto("https://plurum.test/oauth/consent?authorization_id=authorization_A");
+        if (selection === "new") {
+          await page.getByLabel("agent name", { exact: true }).fill("test agent");
+          await page.getByLabel("unique username", { exact: true }).fill("test_agent");
+        }
+        await page.getByRole("button", { name: selection === "deny" ? "cancel" : "connect to plurum" }).click();
+        assert.equal(submissions.length, 1);
+        assert.equal(submissions[0].headers.origin, "https://plurum.test");
+        assert.equal(submissions[0].headers.referer, "https://plurum.test/");
+        assert.equal(responses.length, 1);
+        assert.equal(responses[0].status, 303);
+        assert.equal(responses[0].headers.get("location"), callback);
+        privateResponse(responses[0]);
+        const fields = new URLSearchParams(submissions[0].body);
+        assert.equal(fields.get("decision"), selection === "deny" ? "deny" : "approve");
+        if (selection === "new") {
+          assert.deepEqual(h.calls[2], ["post", "/mcp/oauth/create-and-bind", {
+            client_id: CLIENT, name: "test agent", username: "test_agent", expected_grant_id: null,
+          }]);
+        } else if (selection === "deny") {
+          assert.ok(!h.calls.some(([method]) => method === "post"));
+        } else {
+          assert.equal(h.calls[2][1], "/mcp/oauth/bind");
+        }
+      } finally {
+        await page.close();
+      }
+    });
+  }
 });

@@ -54,6 +54,10 @@ jobs:
         run: npm ci
       - name: Lint
         run: npm run lint
+      - name: Install browser for OAuth tests
+        run: npx playwright install --with-deps --only-shell chromium
+      - name: Test OAuth routes and browser forms
+        run: npm run test:oauth
       - name: Build
         run: npm run build
 

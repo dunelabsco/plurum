@@ -1,7 +1,7 @@
 import { oauthConsentPath, parseAuthorizationId } from "@/lib/auth/safe-redirect";
 import { serverApiClient } from "@/lib/api/server";
 import { createClient } from "@/lib/supabase/server";
-import { oauthJson, oauthRedirect, readExpectedGrantId, readOAuthForm } from "@/lib/auth/oauth-http";
+import { oauthRedirect, readExpectedGrantId, readOAuthForm } from "@/lib/auth/oauth-http";
 import type { OAuthBindingState } from "@/lib/auth/oauth-types";
 
 const AGENT_ID_PATTERN =
@@ -22,7 +22,7 @@ async function decide(request: Request) {
     "agent_name", "agent_username", "expected_grant_id",
   ]));
   if (!formData) {
-    return oauthJson({ error: "Invalid request" }, 403);
+    return oauthErrorRedirect(request);
   }
   const authorizationId = parseAuthorizationId(
     formString(formData, "authorization_id")

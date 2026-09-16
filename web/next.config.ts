@@ -55,6 +55,12 @@ const nextConfig: NextConfig = {
           { key: "Referrer-Policy", value: "no-referrer" },
         ],
       })),
+      {
+        source: "/oauth/consent",
+        // Native forms need their Origin for CSRF checks. Send only the
+        // origin as a referrer, never the authorization path or query.
+        headers: [{ key: "Referrer-Policy", value: "strict-origin" }],
+      },
     ];
   },
 };
