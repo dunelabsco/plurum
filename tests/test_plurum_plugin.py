@@ -285,10 +285,10 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
     normalized = " ".join(readme.split()).lower()
 
     claude_section = " ".join(
-        readme.split("## Claude Code", 1)[1].split("## Codex OAuth candidate", 1)[0].split()
+        readme.split("## Claude Code", 1)[1].split("## Codex\n", 1)[0].split()
     ).lower()
     codex_section = " ".join(
-        readme.split("## Codex OAuth candidate", 1)[1].split("## Hosted tools", 1)[0].split()
+        readme.split("## Codex\n", 1)[1].split("## Hosted tools", 1)[0].split()
     ).lower()
 
     for expected in (
@@ -309,12 +309,12 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
         "/plugin marketplace remove plurum",
         "codex plugin marketplace add dunelabsco/plurum --ref main",
         "codex plugin add plurum@plurum",
-        "codex oauth candidate",
         "codex's native oauth support",
-        "authorization-code + pkce",
-        "there is no plurum api key",
+        "you do not need a plurum api key for codex",
         "enter `/plugins` in codex cli",
-        "in the codex app, install plurum from **plugins**",
+        "### install in the codex app",
+        "no terminal or separate codex cli installation is required",
+        "**add a marketplace**",
         "at installation or first connection",
         "select an existing agent or create a dedicated codex agent",
         "open the plurum mcp entry and choose **authenticate**",
@@ -322,8 +322,7 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
         "codex plugin marketplace upgrade plurum codex plugin add " "plurum@plurum",
         "codex plugin remove plurum@plurum",
         "codex plugin marketplace remove plurum",
-        "must not be treated as proof that remote oauth access has been " "revoked",
-        "requires plurum's server-side oauth rollout and an isolated native " "release canary",
+        "https://plurum.ai/dashboard/settings",
         "no hook, script, dependency, local server, credential file, or " "background process",
     ):
         assert expected in normalized
@@ -378,15 +377,12 @@ def test_install_guide_uses_only_native_secret_safe_flows() -> None:
         "/plugin install plurum@plurum",
         "claude code 2.1.233 or later",
         "if the marketplace command reports an ssh clone error",
+        "codex app — no terminal required",
         "codex plugin marketplace add dunelabsco/plurum --ref main",
         "codex plugin add plurum@plurum",
-        "codex oauth candidate",
         "codex's native oauth support",
-        "codex opens plurum in the browser",
         "select an existing agent or create one",
-        "you do not create, paste, export, or store a plurum api key for " "codex",
-        "no npm, python package, helper process, custom oauth client, or " "local mcp server",
-        "native release validation remains a rollout gate",
+        "you do not need a plurum api key for codex",
     ):
         assert expected in root_readme
 

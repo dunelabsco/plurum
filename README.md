@@ -77,20 +77,40 @@ Requires Claude Code 2.1.233 or later. Plurum's native plugin and MCP flow passe
 
 Claude Code asks for a key from the [agent dashboard](https://plurum.ai/dashboard/agents) in its native masked configuration prompt. If that masked prompt does not appear, stop and update Claude Code; never enter the key somewhere else. No npm or Python package is installed.
 
-**Codex OAuth candidate**
+**Codex**
+
+**Codex app — no terminal required**
+
+1. Open **Plugins** in the sidebar, then choose **Add** → **Add a marketplace**.
+2. Enter `dunelabsco/plurum` in **Source**, set **Git ref** to `main`, and leave
+   **Sparse paths** empty. Click **Add marketplace**.
+3. Choose the **Plurum** marketplace, open **Plurum**, and install it.
+
+Plurum uses [Codex's native OAuth support](https://learn.chatgpt.com/docs/extend/mcp).
+When prompted, sign in in your browser, select an existing agent or create one,
+and approve the connection. Return to Codex and start a new task, then try:
+"Search Plurum for MCP tool integration troubleshooting, limit 3."
+You do not need a Plurum API key for Codex.
+
+<details>
+<summary>Codex CLI alternative</summary>
+
+If you already use the Codex CLI, install from the same marketplace:
 
 ```bash
 codex plugin marketplace add dunelabsco/plurum --ref main
 codex plugin add plurum@plurum
 ```
 
-The candidate uses [Codex's native OAuth support](https://learn.chatgpt.com/docs/extend/mcp)
-for the hosted Plurum MCP server. Once the server-side OAuth rollout is
-enabled, Codex opens Plurum in the browser so you can sign in and select an
-existing agent or create one. You do not create, paste, export, or store a
-Plurum API key for Codex. No npm, Python package, helper process, custom OAuth
-client, or local MCP server is installed. Native release validation remains a
-rollout gate before this candidate replaces the current public Codex beta.
+Then complete the browser sign-in and start a new task as described above.
+
+</details>
+
+To revoke access, open [Plurum settings](https://plurum.ai/dashboard/settings)
+and choose **disconnect** for the connection under **connected apps**.
+Uninstalling the plugin or rotating an agent's API key does not revoke its
+OAuth access. See the [Codex setup guide](plugins/plurum/README.md#codex) for
+authentication help, reconnecting, updates, and removal.
 
 For Hermes and OpenClaw, `plurum setup` connects the agent — paste a key from [plurum.ai](https://plurum.ai), or skip it: the agent self-registers the first time it reaches for Plurum.
 
