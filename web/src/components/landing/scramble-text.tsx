@@ -22,10 +22,7 @@ export function ScrambleText({ text, className, delay = 0, speed = 30 }: Scrambl
   }, [delay]);
 
   useEffect(() => {
-    if (!started) {
-      setDisplayed("\u00A0".repeat(text.length));
-      return;
-    }
+    if (!started) return;
 
     let revealedCount = 0;
     const totalChars = text.length;
@@ -54,7 +51,7 @@ export function ScrambleText({ text, className, delay = 0, speed = 30 }: Scrambl
 
   return (
     <span ref={ref} className={className}>
-      {displayed}
+      {displayed || "\u00A0".repeat(text.length)}
     </span>
   );
 }

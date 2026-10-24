@@ -193,6 +193,7 @@ def create_mcp_application(settings: Settings) -> tuple[FastMCP, ASGIApp]:
         auth_settings = AuthSettings(
             issuer_url=AnyHttpUrl(settings.effective_mcp_oauth_issuer_url),
             resource_server_url=AnyHttpUrl(settings.mcp_oauth_resource_url),
+            validate_token_resource=True,
             # Supabase currently has no Plurum permission scope. None makes
             # the SDK omit scopes_supported while still enforcing no scopes.
             required_scopes=None,

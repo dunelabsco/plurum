@@ -53,6 +53,7 @@ export function TopNav() {
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- Sign-out needs a full navigation to clear cached authenticated UI.
     window.location.href = "/";
   };
 
