@@ -87,6 +87,7 @@ def _verified_api_key(*, token: str, agent_id: str) -> AccessToken:
         client_id=f"plurum-api-key:{agent_id}",
         scopes=[],
         expires_at=int(time()) + 3600,
+        resource=_RESOURCE,
         subject=agent_id,
         claims={
             "plurum_agent_id": agent_id,
@@ -237,6 +238,39 @@ async def test_oauth_authentication_failures_return_generic_discovery_challenge(
     assert response.headers["cache-control"] == "no-store"
     assert "private-value" not in response.text
     assert "private-value" not in response.headers["www-authenticate"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resource", [None, "https://other.example/mcp"])
+@pytest.mark.parametrize("auth_method", ["api_key", "oauth"])
+async def test_transport_rejects_verified_tokens_for_another_or_missing_resource(
+    monkeypatch,
+    resource,
+    auth_method,
+):
+    token = "plrm_live_resource_test" if auth_method == "api_key" else "header.payload.signature"
+    agent_id = "11111111-1111-4111-8111-111111111111"
+    verified = (
+        _verified_api_key(token=token, agent_id=agent_id)
+        if auth_method == "api_key"
+        else _verified_oauth_token(
+            token=token,
+            agent_id=agent_id,
+            owner_user_id="22222222-2222-4222-8222-222222222222",
+            client_id="codex-resource-test",
+        )
+    ).model_copy(update={"resource": resource})
+
+    async def verify_token(_self, _token: str) -> AccessToken:
+        return verified
+
+    application = _oauth_application(monkeypatch, verify_token)
+    response = await _post_initialize(application, f"Bearer {token}")
+
+    assert response.status_code == 401
+    assert response.json()["error"] == "invalid_token"
+    assert response.headers["cache-control"] == "no-store"
+    assert token not in response.text
 
 
 @pytest.mark.asyncio
