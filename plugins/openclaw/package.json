@@ -26,10 +26,10 @@
     "prepare": "tsc"
   },
   "dependencies": {
-    "typebox": "^1.1.37"
+    "typebox": "^1.4.3"
   },
   "devDependencies": {
-    "openclaw": "2026.7.2-beta.6",
+    "openclaw": "2026.10.10",
     "typescript": "^5.4.0"
   },
   "overrides": {
